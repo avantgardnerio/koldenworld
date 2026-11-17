@@ -1,0 +1,20 @@
+{
+  // Shared settings. Node runs .ts directly (type stripping), so tsc only typechecks.
+  // The default `lib`/`types` give no DOM and no Node APIs: shared packages can run
+  // anywhere. Node-only packages add "types": ["node"]; the viewer will add "dom".
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "types": [],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true
+  }
+}

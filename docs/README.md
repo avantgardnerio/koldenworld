@@ -2,7 +2,7 @@
 
 Design notes for an original open-world driving game on real streets from OpenStreetMap.
 
-Status (2026-11-17): design phase, no code yet.
+Status (2026-11-17): scaffold done; importing OSM roads into PostGIS (milestone M1).
 
 | Doc | What it covers |
 |---|---|

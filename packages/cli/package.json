@@ -1,0 +1,12 @@
+{
+  "name": "@game/cli",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@game/db": "*",
+    "@game/osm-import": "*"
+  }
+}

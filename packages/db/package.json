@@ -1,0 +1,15 @@
+{
+  "name": "@game/db",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@game/osm-import": "*",
+    "pg": "^8.23.1"
+  }
+}

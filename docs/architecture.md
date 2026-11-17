@@ -26,22 +26,25 @@
 packages/
   sim/         pure step(), dynamic entity tables      ─┐ no DOM, no Node APIs:
   world/       map tables, operators, spatial indexes   │ loads anywhere
-  osm-import/  raw OSM → map tables                    ─┘
+  osm-import/  raw OSM → map rows; way splitting       ─┘
   viewer/      3D rendering, input, UI                  ← browser only
-  cli/         scenarios, replays, text view,           ← Node only
-               JSON-lines on stdin/stdout
-  server/      blob generator over PostGIS              ← Node only
+  cli/         fetch, migrate, import; later scenarios, ← Node only
+               replays, text view, JSON-lines
+  db/          Postgres access, migrations runner;      ← Node only
+               later the blob export and server
 ```
+
+Existing today: `osm-import`, `db`, `cli`. The others are created when they get code.
 
 The shared packages are compiled without DOM type definitions, and a lint rule blocks Node-specific imports, so platform leaks fail the build.
 
 ## Data flow
 
 ```
-OSM extract ─▶ PostGIS ─▶ osm-import (TS, Node) ─▶ partition blobs (typed arrays)
+OSM snapshot ─▶ osm-import (TS) ─▶ PostGIS ─▶ export (TS) ─▶ partition blobs (typed arrays)
                                                         │  HTTP, immutable, cacheable
                                                         ▼
-                                   client cache (IndexedDB in browser, files in Node)
+                                   getBlob(): fetch + HTTP cache (browser), files (Node)
                                                         │
                                                         ▼
                                           map tables (columnar)
@@ -69,7 +72,7 @@ The few things that differ between browser and Node go through small injected in
 
 | Concern | Browser | Node |
 |---|---|---|
-| Blob cache | IndexedDB | filesystem |
+| Blob loading (`getBlob`) | `fetch` + HTTP cache; IndexedDB later if needed | filesystem |
 | Background work | Web Workers | `worker_threads`, or synchronous (tests) |
 | Network | `fetch` | `fetch` (built in) |
 

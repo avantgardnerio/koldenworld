@@ -4,8 +4,12 @@ Everything except `viewer` runs in Node with the same code as the browser. Claud
 
 ## CLI (sketch)
 
+Run as `npm run cli -- <command>`. Existing today: `fetch-osm`, `migrate`, `import-roads`. The rest are planned.
+
 ```sh
-cli import --zip 80202 --size 2km     # fetch, import and cache an area
+cli fetch-osm --zip 80205 --size 4    # one-time raw OSM download into data/
+cli migrate                           # apply pending SQL migrations
+cli import-roads --zip 80205          # convert the snapshot into road_ways
 cli run scenarios/straight-line.json  # run a scenario, print pass/fail and diffs
 cli replay recordings/crash.jsonl     # replay a recorded input log
 cli view --at 1200,-340 --radius 150  # print the text view

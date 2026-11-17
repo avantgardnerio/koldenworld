@@ -20,7 +20,7 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Rejected:** a third-party physics engine.
 - **Why:** engines keep internal state outside our tables, which breaks snapshots, replays and determinism. Arcade handling also suits the genre better.
 
-## 4. PostGIS as the source of map data
+## 4. PostGIS as the source of map data (loading path amended by 13)
 
 - **Chosen:** Geofabrik extracts → osm2pgsql (flex output, our own schema) → PostGIS, with blobs generated from it.
 - **Rejected as long-term source:** the public Overpass API (fair-use limits, volunteer-run), off-the-shelf vector tiles (simplified geometry, lost topology and tags).
@@ -49,3 +49,35 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 ## 9. Local markdown docs
 
 - Design docs live in `docs/` in the repo so they stay next to the code and under version control.
+
+## 10. Same logical schema everywhere, two physical formats
+
+- **Chosen:** tables, column names and meanings are shared between Postgres and the client. Physically, Postgres stores rows (lat/lon geometry, OSM ids, raw tags); the network, any cache and memory all use the same columnar blob per partition (local-meter `f32` geometry, dense `u32` indices, string tables, only game columns).
+- **Rejected:** a byte-for-byte identical schema in Postgres, IndexedDB and memory; and pivoting to rows for IndexedDB.
+- **Why:** geometry, coordinates, ID representation and column sets genuinely differ between the source of truth and the game. IndexedDB is slow with many tiny records but stores `ArrayBuffer`s efficiently, so a cached blob is identical to the in-memory form: paging in is "read buffer, create views". The Postgres → blob export is the one conversion point.
+- **Keeping in sync:** the client schema is declared once in TS; a test compares shared columns against Postgres `information_schema`.
+
+## 11. No IndexedDB for now
+
+- **Chosen:** blobs are loaded through a `getBlob(key) → ArrayBuffer` interface backed by `fetch`. Immutable blob URLs with `Cache-Control: immutable` let the browser HTTP cache avoid re-downloads.
+- **Deferred:** an IndexedDB layer behind the same interface, when we need offline play, caching of client-derived artifacts (meshes), or more cached data than the HTTP cache keeps.
+- **Why:** a 2 km area is a few MB; even Denver's roads and buildings are tens of MB. Memory is not a constraint yet.
+
+## 12. Keys: OSM ids for OSM data, generated ids only for our own things
+
+- **Chosen:** OSM-derived tables are keyed by OSM ids (e.g. `road_ways.osm_way_id`). Ways are stored unsplit; imports upsert. Splitting into segments and graph building happen at blob export, which reads a partition plus its neighbors.
+- **Rejected:** identity ids on imported rows, and storing pre-split segments keyed by area.
+- **Why:** identity ids change on every reimport; per-area rows duplicate roads where areas overlap; and where a way gets split depends on which neighboring ways happened to be downloaded, so segments have no stable identity. OSM ids are globally unique (OSM is the single master) and make imports idempotent.
+- **Caveat:** OSM ids are stable within a snapshot only; upstream edits split, merge and delete ways. A refresh upserts what is present and deletes ways that disappeared from the refreshed box. Long-lived references (missions, saves) should use position + snapshot version, not way ids.
+- **Our own ids:** `bigint` identity for rows the server creates (fetches, partitions, jobs). UUIDv7 (`uuidv7()` is built into PostgreSQL 18) for anything that may be created outside the server, such as player saves or offline browser data.
+
+## 13. One-time Overpass snapshots, converted by our own TS code
+
+- **Chosen:** for development, raw OSM for a square around a zip code is downloaded once from Overpass into gitignored `data/osm/` (with a `.meta.json` recording bbox, query, OSM base timestamp and sha256). The TS converter reads that file and upserts into PostGIS directly.
+- **Deferred:** osm2pgsql and Geofabrik extracts, until we import whole regions.
+- **Why:** no repeated API traffic, no extra tooling, and all OSM interpretation stays in the shared, tested `osm-import` package.
+
+## 14. Postgres setup
+
+- **Chosen:** the existing local PostgreSQL 18 cluster (shared with koldenhome), no Docker. Roles: `game_migrations` owns the database and runs DDL; `game` is the runtime role with DML via default privileges. Both use `trust` on the local socket and loopback, scoped to the `game` database, so connection strings hold no secrets. One-time superuser steps are in `db/bootstrap.sql`.
+- **Migrations:** plain SQL in `db/migrations/`, forward-only, applied in filename order, each in a transaction, recorded with a checksum. Editing an applied migration is an error. No ORM.

@@ -2,9 +2,9 @@
 
 ## Milestones
 
-**M0: Scaffold.** Workspace with the packages from [architecture.md](architecture.md), TypeScript config without DOM types for shared packages, lint rule against Node imports, Vitest, CI.
+**M0: Scaffold.** npm workspaces, Node running `.ts` directly, TypeScript configs that reject DOM and Node APIs in shared packages, Vitest. (Done; CI not yet.)
 
-**M1: Data in.** PostGIS in Docker, osm2pgsql flex schema, `osm-import` producing blobs for one small area, blob reader with zero-copy views, first fixtures committed.
+**M1: Data in.** Local PostGIS with roles and migrations, a one-time Overpass snapshot for 80205, converter upserting `road_ways`. (In progress.) Then the blob export with way splitting, a blob reader with zero-copy views, and first fixtures committed.
 
 **M2: One car, headless.** Road graph loaded, one car driving along edges, `cli view` text rendering, `cli repl`, first scenario and determinism tests.
 
@@ -26,6 +26,7 @@
 - **Large worlds:** origin rebasing for `f32` precision beyond ~10 km; stable entity IDs across partitions.
 - **Cross-engine determinism:** do replays need to match in Firefox and Safari, or is V8 (Node + Chrome) enough?
 - **Blob format:** custom aligned columns vs Apache Arrow IPC.
+- **IndexedDB:** deferred; revisit for offline play or caching client-built meshes.
 - **Missing buildings:** how good should an unmapped suburb look; procedural filler or not.
 - **Hosting:** where PostGIS and the blob store live once there are users.
 

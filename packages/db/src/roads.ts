@@ -1,0 +1,94 @@
+import type { RoadWay } from "@game/osm-import";
+import pg from "pg";
+import { DATABASE_URL } from "./config.ts";
+
+/** What data/osm/<area>.meta.json records about a raw snapshot. */
+export interface OsmFetch {
+  area: string;
+  bbox: { south: number; west: number; north: number; east: number };
+  source: string;
+  osmBaseTimestamp: string | null;
+  fetchedAt: string;
+  sha256: string;
+}
+
+export interface ImportResult {
+  fetchId: number;
+  upserted: number;
+  deleted: number;   // ways in the box that this snapshot no longer has
+}
+
+/**
+ * Imports one snapshot's road ways, in one transaction: records the fetch,
+ * upserts ways by OSM id, then deletes road ways that have a node inside the
+ * fetched box but are absent from this snapshot (deleted upstream, or no
+ * longer a road). Overpass returns every way with a node in the box, so
+ * anything matching that test and missing is really gone.
+ */
+export async function importRoadWays(fetch: OsmFetch, ways: RoadWay[], url = DATABASE_URL): Promise<ImportResult> {
+  const client = new pg.Client({ connectionString: url });
+  await client.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows: [f] } = await client.query<{ id: string }>(
+      `INSERT INTO osm_fetches (area, bbox, source, osm_base_timestamp, fetched_at, sha256)
+       VALUES ($1, ST_MakeEnvelope($2, $3, $4, $5, 4326), $6, $7, $8, $9)
+       ON CONFLICT (sha256) DO UPDATE SET imported_at = now()
+       RETURNING id`,
+      [fetch.area, fetch.bbox.west, fetch.bbox.south, fetch.bbox.east, fetch.bbox.north,
+       fetch.source, fetch.osmBaseTimestamp, fetch.fetchedAt, fetch.sha256]);
+    const fetchId = Number(f!.id);
+
+    // One statement for all rows: each column is passed as an array and zipped by unnest.
+    // node_ids travel as JSON because unnest would flatten a 2-D bigint array.
+    const upsert = await client.query(
+      `INSERT INTO road_ways (osm_way_id, class, name, oneway, lanes_fwd, lanes_back,
+                              speed_limit_mps, speed_limit_from_tag, length_m,
+                              node_ids, geom, tags, fetch_id)
+       SELECT osm_way_id, class, name, oneway, lanes_fwd, lanes_back,
+              speed_limit_mps, speed_limit_from_tag, ST_Length(g::geography),
+              ARRAY(SELECT jsonb_array_elements_text(node_ids)::bigint), g, tags, $1
+       FROM unnest($2::bigint[], $3::text[], $4::text[], $5::boolean[], $6::smallint[], $7::smallint[],
+                   $8::real[], $9::boolean[], $10::jsonb[], $11::text[], $12::jsonb[])
+         AS x(osm_way_id, class, name, oneway, lanes_fwd, lanes_back,
+              speed_limit_mps, speed_limit_from_tag, node_ids, wkt, tags),
+         LATERAL ST_GeomFromText(wkt, 4326) AS g
+       ON CONFLICT (osm_way_id) DO UPDATE SET
+         class = excluded.class, name = excluded.name, oneway = excluded.oneway,
+         lanes_fwd = excluded.lanes_fwd, lanes_back = excluded.lanes_back,
+         speed_limit_mps = excluded.speed_limit_mps, speed_limit_from_tag = excluded.speed_limit_from_tag,
+         length_m = excluded.length_m, node_ids = excluded.node_ids, geom = excluded.geom,
+         tags = excluded.tags, fetch_id = excluded.fetch_id`,
+      [
+        fetchId,
+        ways.map((w) => w.osmWayId),
+        ways.map((w) => w.class),
+        ways.map((w) => w.name),
+        ways.map((w) => w.oneway),
+        ways.map((w) => w.lanesFwd),
+        ways.map((w) => w.lanesBack),
+        ways.map((w) => w.speedLimitMps),
+        ways.map((w) => w.speedLimitFromTag),
+        ways.map((w) => JSON.stringify(w.nodeIds)),
+        ways.map((w) => `LINESTRING(${w.points.map(([lon, lat]) => `${lon} ${lat}`).join(",")})`),
+        ways.map((w) => JSON.stringify(w.tags)),
+      ]);
+
+    const del = await client.query(
+      `DELETE FROM road_ways r
+       USING osm_fetches f
+       WHERE f.id = $1
+         AND r.geom && f.bbox
+         AND r.osm_way_id <> ALL($2::bigint[])
+         AND EXISTS (SELECT 1 FROM ST_DumpPoints(r.geom) p WHERE ST_Intersects(p.geom, f.bbox))`,
+      [fetchId, ways.map((w) => w.osmWayId)]);
+
+    await client.query("COMMIT");
+    return { fetchId, upserted: upsert.rowCount ?? 0, deleted: del.rowCount ?? 0 };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    await client.end();
+  }
+}
