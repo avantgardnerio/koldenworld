@@ -2,13 +2,15 @@
 
 import { parseArgs } from "node:util";
 import { migrate } from "@game/db";
+import { exportArea } from "./export.ts";
 import { fetchOsm } from "./fetch-osm.ts";
 import { importRoads } from "./import-roads.ts";
 
 const USAGE = `commands:
   fetch-osm --zip <zip> [--size <km>] [--force]   download raw OSM for a square around a zip code
   migrate                                          apply pending database migrations
-  import-roads --zip <zip>                         convert downloaded OSM into the roads table`;
+  import-roads --zip <zip>                         convert downloaded OSM into the road_ways table
+  export --zip <zip>                               build the road graph, write Arrow files to data/export/<zip>`;
 
 const log = (msg: string) => console.log(msg);
 
@@ -33,6 +35,12 @@ async function main(argv: string[]): Promise<void> {
       const { values } = parseArgs({ args: rest, options: { zip: { type: "string" } } });
       if (!values.zip) throw new Error("--zip is required");
       await importRoads(values.zip, log);
+      return;
+    }
+    case "export": {
+      const { values } = parseArgs({ args: rest, options: { zip: { type: "string" } } });
+      if (!values.zip) throw new Error("--zip is required");
+      await exportArea(values.zip, log);
       return;
     }
     default:

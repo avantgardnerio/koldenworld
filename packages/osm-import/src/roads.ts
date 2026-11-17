@@ -1,19 +1,11 @@
-// Raw OSM ways → drivable road ways with resolved attributes, and road ways →
-// segments split at intersections.
+// Raw OSM ways → drivable road ways with resolved attributes.
 //
-// Ways are what Postgres stores (keyed by OSM id). Segments are derived at
-// export time: where a way gets split depends on which other ways meet it, so
-// splitting needs a partition together with its neighbors.
+// Ways are what Postgres stores, whole and keyed by OSM id. Cutting them into
+// graph edges at intersections happens at export (@game/world buildRoadGraph):
+// where a way gets cut depends on which other ways meet it.
 
+import { ROAD_CLASSES, type RoadClass } from "@game/world";
 import type { OsmElement, OsmNode, OsmWay, Tags } from "./osm.ts";
-
-export type RoadClass =
-  | "motorway" | "motorway_link"
-  | "trunk" | "trunk_link"
-  | "primary" | "primary_link"
-  | "secondary" | "secondary_link"
-  | "tertiary" | "tertiary_link"
-  | "unclassified" | "residential" | "living_street" | "service" | "road";
 
 const MPH = 0.44704; // m/s
 const KMH = 1 / 3.6; // m/s
@@ -28,7 +20,7 @@ const DEFAULT_SPEED_MPH: Record<RoadClass, number> = {
   unclassified: 25, residential: 25, living_street: 15, service: 10, road: 25,
 };
 
-const ROAD_CLASSES = new Set<string>(Object.keys(DEFAULT_SPEED_MPH));
+const ROAD_CLASS_SET = new Set<string>(ROAD_CLASSES);
 
 interface RoadAttributes {
   class: RoadClass;
@@ -48,14 +40,6 @@ export interface RoadWay extends RoadAttributes {
   points: [lon: number, lat: number][];
 }
 
-/** A piece of a road way between two graph nodes (way endpoints or intersections). */
-export interface RoadSegment extends RoadAttributes {
-  osmWayId: number;
-  fromNode: number;            // OSM node id
-  toNode: number;              // OSM node id
-  points: [lon: number, lat: number][];
-}
-
 export interface ExtractStats {
   roadWays: number;
   skippedWays: number;         // missing node coordinates or degenerate
@@ -64,7 +48,7 @@ export interface ExtractStats {
 export function isRoad(tags: Tags | undefined): boolean {
   return tags !== undefined
     && tags.highway !== undefined
-    && ROAD_CLASSES.has(tags.highway)
+    && ROAD_CLASS_SET.has(tags.highway)
     && tags.area !== "yes";
 }
 
@@ -97,32 +81,6 @@ export function extractRoadWays(elements: OsmElement[]): { ways: RoadWay[]; stat
     });
   }
   return { ways, stats: { roadWays: osmWays.length, skippedWays } };
-}
-
-/** Splits ways wherever they share a node with another way (or themselves). */
-export function splitRoadWays(ways: RoadWay[]): RoadSegment[] {
-  const uses = new Map<number, number>();
-  for (const w of ways) {
-    for (const id of w.nodeIds) uses.set(id, (uses.get(id) ?? 0) + 1);
-  }
-
-  const segments: RoadSegment[] = [];
-  for (const { nodeIds, points, osmWayId, ...attrs } of ways) {
-    let start = 0;
-    for (let i = 1; i < nodeIds.length; i++) {
-      if (i === nodeIds.length - 1 || (uses.get(nodeIds[i]!) ?? 0) > 1) {
-        segments.push({
-          ...attrs,
-          osmWayId,
-          fromNode: nodeIds[start]!,
-          toNode: nodeIds[i]!,
-          points: points.slice(start, i + 1),
-        });
-        start = i;
-      }
-    }
-  }
-  return segments;
 }
 
 export function roadAttributes(tags: Tags): RoadAttributes & { reversed: boolean } {

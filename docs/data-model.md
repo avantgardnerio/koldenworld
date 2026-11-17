@@ -74,7 +74,7 @@ The schema should be declared once and drive the TS table classes, the blob writ
 | `Area` | polygon (ragged), kind (park, water, parking, ...) |
 | `EdgeFeature` | linear-referenced features on edges (below) |
 
-Adjacency is stored CSR-style: edges sorted by node, each node holds a start index and count.
+Adjacency is stored CSR-style: an `Int32Array` of `count + 1` offsets into a flat list (Int32 to match Arrow list offsets, so files and memory share bytes). The implemented road graph is `RoadGraph` in `packages/world/src/road-graph.ts`; its Arrow layout is documented in `road-graph-arrow.ts`.
 
 ## Linear referencing
 

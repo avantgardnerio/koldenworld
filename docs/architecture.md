@@ -34,7 +34,7 @@ packages/
                later the blob export and server
 ```
 
-Existing today: `osm-import`, `db`, `cli`. The others are created when they get code.
+Existing today: `world` (road graph, Arrow I/O, projection), `osm-import`, `db`, `cli`. The others are created when they get code.
 
 The shared packages are compiled without DOM type definitions, and a lint rule blocks Node-specific imports, so platform leaks fail the build.
 

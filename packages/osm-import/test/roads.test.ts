@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
-  extractRoadWays, parseMaxspeed, roadAttributes, splitRoadWays, type OsmElement, type Tags,
-} from "../src/index.ts";
+import { extractRoadWays, parseMaxspeed, roadAttributes, type OsmElement, type Tags } from "../src/index.ts";
 
 const node = (id: number, lon: number, lat: number): OsmElement => ({ type: "node", id, lon, lat });
 const way = (id: number, nodes: number[], tags: Tags): OsmElement => ({ type: "way", id, nodes, tags });
-const segmentsOf = (elements: OsmElement[]) => splitRoadWays(extractRoadWays(elements).ways);
 
 // A plus-shaped intersection at node 5:
 //
@@ -62,42 +59,6 @@ describe("extractRoadWays", () => {
       way(1, [1, 1, 2], { highway: "residential" }),
     ]);
     expect(ways[0]!.nodeIds).toEqual([1, 2]);
-  });
-});
-
-describe("splitRoadWays", () => {
-  it("splits ways at shared nodes", () => {
-    const segments = segmentsOf(plus);
-    expect(segments.map((s) => [s.osmWayId, s.fromNode, s.toNode])).toEqual([
-      [100, 4, 5], [100, 5, 6], [200, 2, 5], [200, 5, 8],
-    ]);
-    expect(segments[0]!.points).toEqual([[-1, 0], [0, 0]]);
-  });
-
-  it("does not split at nodes used by only one way", () => {
-    const segments = segmentsOf([
-      node(1, 0, 0), node(2, 1, 0), node(3, 2, 0),
-      way(1, [1, 2, 3], { highway: "primary" }),
-    ]);
-    expect(segments).toHaveLength(1);
-    expect(segments[0]!.points).toHaveLength(3);
-  });
-
-  it("does not let footpaths create intersections", () => {
-    const segments = segmentsOf([
-      ...plus.filter((e) => e.type === "node"),
-      way(100, [4, 5, 6], { highway: "residential" }),
-      way(300, [2, 5, 8], { highway: "footway" }),
-    ]);
-    expect(segments).toHaveLength(1);
-  });
-
-  it("keeps one-way segments in the direction of travel", () => {
-    const segments = segmentsOf([
-      node(1, 0, 0), node(2, 1, 0),
-      way(1, [1, 2], { highway: "secondary", oneway: "-1" }),
-    ]);
-    expect(segments[0]).toMatchObject({ fromNode: 2, toNode: 1 });
   });
 });
 

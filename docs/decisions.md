@@ -81,3 +81,12 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 
 - **Chosen:** the existing local PostgreSQL 18 cluster (shared with koldenhome), no Docker. Roles: `game_migrations` owns the database and runs DDL; `game` is the runtime role with DML via default privileges. Both use `trust` on the local socket and loopback, scoped to the `game` database, so connection strings hold no secrets. One-time superuser steps are in `db/bootstrap.sql`.
 - **Migrations:** plain SQL in `db/migrations/`, forward-only, applied in filename order, each in a transaction, recorded with a checksum. Editing an applied migration is an error. No ORM.
+
+## 15. Apache Arrow IPC for exported map data
+
+- **Chosen:** Arrow IPC files (the `apache-arrow` JS library, pure TypeScript, no WASM), one file per table per partition (`nodes.arrow`, `edges.arrow`), one record batch per file. Provenance goes in schema metadata. Served with HTTP `Content-Encoding` (brotli/gzip) on top.
+- **Rejected:** JSON (5–10× larger, parse and allocation cost, lossy floats); a hand-rolled columnar blob (worked, but every inspection tool would be ours to write); Parquet (needs decoding, usually WASM in the browser).
+- **Why:** reading is zero-copy (tests assert columns are views onto the file bytes), the format is a standard readable by pyarrow and others, and our layout maps directly: CSR offsets are Arrow `List` offsets, ragged points are `List<FixedSizeList<Float32, 2>>`, the class enum and street names are dictionary-encoded strings.
+- **Details:** in-memory CSR offsets are `Int32Array` to match Arrow list offsets. OSM ids are stored as `float64` (exact below 2^53) to avoid `BigInt`. Dictionary ids are set explicitly so output is byte-for-byte reproducible.
+- **Bitpacking:** deferred until measured. First candidate is quantizing coordinates to `Int16` relative to the partition, which WebGL can consume directly.
+- **Measured (80205, 4×4 km):** nodes 171 KB raw / 81 KB brotli; edges 461 KB raw / 176 KB brotli.

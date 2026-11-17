@@ -1,0 +1,14 @@
+{
+  "name": "@game/world",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "apache-arrow": "^21.2.0"
+  }
+}

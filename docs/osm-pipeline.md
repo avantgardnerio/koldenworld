@@ -15,13 +15,22 @@ Overpass API ─▶ data/osm/<zip>.json + <zip>.meta.json   (gitignored raw snap
 PostGIS: osm_fetches, road_ways (upsert by OSM id; delete ways gone from the box)
 ```
 
+Then the export (one area = one partition for now):
+
+```
+   │  npm run cli -- export --zip 80205
+   ▼
+PostGIS road_ways in the fetch bbox ─▶ @game/world buildRoadGraph ─▶ Arrow IPC
+   ─▶ data/export/<zip>/nodes.arrow, edges.arrow, manifest.json (sha256 per file)
+```
+
 ## Target (later)
 
 ```
-PostGIS ─▶ export (TS, Node): select partition + neighbors, split ways at
+PostGIS ─▶ export (TS, Node): select partition + neighbors, cut ways at
            intersections, build graph, project to local meters, build R-tree
-        ─▶ partition blobs: columnar, immutable, keyed by content hash
-        ─▶ GET /p/{partition}/{hash}   (Cache-Control: immutable)
+        ─▶ Arrow files per table per partition, immutable, keyed by content hash
+        ─▶ GET /p/{partition}/{hash}/{table}.arrow   (Cache-Control: immutable, brotli)
         ─▶ client getBlob() → typed-array views
 ```
 
@@ -42,12 +51,21 @@ For whole regions, Geofabrik extracts via osm2pgsql (or our converter reading `.
 
 All OSM interpretation lives in TS so the server, CLI and tests share it.
 
-## Export (not built yet)
+## Export
 
-- Per partition: split ways at shared nodes (`extractRoads` in osm-import already does this and is tested), number nodes and edges densely, build CSR adjacency.
-- Project lat/lon to local meters around the world origin.
-- Write columns aligned to 8 bytes after a small header, so the client creates typed-array views with no parsing or copying. Alternative: Apache Arrow IPC (decide at implementation).
-- Blob key = hash(data snapshot + export code version + partition id).
+Built (`@game/world` + `cli export`):
+- Cut ways into edges at nodes shared with another way (OSM intersections are shared node ids, not geometric crossings, so bridges stay unconnected). Nodes and edges are numbered densely in `osm_way_id` order, so output is reproducible.
+- Project lat/lon to local meters around the area's bbox center (equirectangular; error is negligible at this scale).
+- Build CSR incidence lists (each node's incident edges).
+- Write Arrow IPC files (decision 15) and check the round trip before writing.
+
+80205 result: 3,775 ways → 5,598 nodes, 7,684 edges, 24,758 points. 98% of nodes are in one connected component; the remaining 13 components are mostly tiny pieces cut off at the bbox edge. Counts match an independent SQL computation.
+
+Not built yet:
+- Partitions: one fetch area is one partition today. Neighbor padding, so intersections at partition edges are seen.
+- Merging degree-2 nodes where one way simply continues into the next (897 such nodes in 80205).
+- Content-hash keys: hash(data snapshot + graph version + partition id).
+- R-tree in the export.
 
 ## Data quality
 
