@@ -6,7 +6,7 @@
 
 **M1: Data in.** Local PostGIS with roles and migrations, a one-time Overpass snapshot for 80205, converter upserting `road_ways`, road graph export to Arrow with zero-copy reads. (Done; committed fixtures still to do.)
 
-**M2: Map in the browser.** Raw WebGL2 viewer drawing the road graph from the Arrow files, URL-addressable camera, headless e2e pixel tests and screenshots. (Done: green ground, asphalt roads with real widths, lane markings, fog, fly camera, graph overlay.) Next: buildings and areas (parks, water), then partitions and culling.
+**M2: Map in the browser.** Raw WebGL2 viewer drawing the road graph from the Arrow files, URL-addressable camera, headless e2e pixel tests and screenshots. (Done: green ground, asphalt roads with real widths, lane markings, fog, fly camera, graph overlay, buildings with heights.) Next: areas (parks, water, parking lots), then partitions and culling.
 
 **M3: One car.** One car driving along edges, `cli view` text rendering, `cli repl`, first scenario and determinism tests, the same car drawn in the viewer; then the player drives with arcade physics.
 

@@ -2,8 +2,9 @@
 // the ground, the road surface, the graph overlay. Buffers are uploaded once;
 // each draw is one call. Layers hold GPU handles only, no game state.
 //
-// The world is flat for now, so layers are painted in order with no depth
-// buffer. Fog blends toward the sky color by distance; "fade" materials (the
+// Ground layers are coplanar, so they are painted in order (depth test
+// ALWAYS) while still writing depth, so that buildings drawn afterwards are
+// depth-tested against the ground and against each other. Fog blends toward the sky color by distance; "fade" materials (the
 // thin lane markings) blend into material 0 at a distance, before they would
 // shimmer at sub-pixel widths.
 
@@ -123,6 +124,7 @@ export function createFlatLayer(
       gl.uniform3fv(uSky, f.sky);
       gl.uniform2f(uFog, f.fog[0], f.fog[1]);
       gl.uniform2f(uFade, f.fade[0], f.fade[1]);
+      gl.depthFunc(gl.ALWAYS);
       gl.bindVertexArray(vao);
       gl.drawElements(opts.mode, count, gl.UNSIGNED_INT, 0);
       gl.bindVertexArray(null);

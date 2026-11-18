@@ -1,6 +1,6 @@
 // Colors and atmosphere are a view concern: they live here, not in the map data.
 
-import { ROAD_CLASSES, SurfaceMaterial, type RoadClass } from "@game/world";
+import { BUILDING_GROUPS, ROAD_CLASSES, SurfaceMaterial, type BuildingGroup, type RoadClass } from "@game/world";
 
 const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
 const palette = (hexes: string[]) => new Float32Array(hexes.flatMap(rgb));
@@ -29,6 +29,24 @@ const CLASS_COLORS: Record<RoadClass, string> = {
 };
 /** Graph overlay: vec3 per road class, in ROAD_CLASSES order. Bright, to stand out on asphalt. */
 export const CLASS_COLORS_RGB = palette(ROAD_CLASSES.map((c) => CLASS_COLORS[c]));
+
+const BUILDING_COLORS: Record<BuildingGroup, [wall: string, roof: string]> = {
+  residential: ["#d9cbb4", "#8c7462"],
+  commercial: ["#c8ccd3", "#8e9298"],
+  industrial: ["#bdb6a8", "#8a867e"],
+  civic: ["#d8bc96", "#9c7e62"],
+  utility: ["#b4ada3", "#7b7670"],
+  other: ["#cfc8bb", "#918b84"],
+};
+/** vec3 per building material: group × 2 + (1 for roof), as emitted by buildingMesh. */
+export const BUILDING_COLORS_RGB = palette(BUILDING_GROUPS.flatMap((g) => BUILDING_COLORS[g]));
+
+/** Unit vector toward the sun: high in the south-southeast, so north and west walls fall in shade. */
+export const SUN: [number, number, number] = (() => {
+  const v = [0.3, -0.55, 0.78];
+  const n = Math.hypot(...v);
+  return [v[0]! / n, v[1]! / n, v[2]! / n];
+})();
 
 /** Fog grows with altitude, so the overview stays clear and street level gets a horizon. */
 export function fogRange(altitude: number): [start: number, end: number] {

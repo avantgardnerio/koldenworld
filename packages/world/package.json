@@ -9,6 +9,7 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "apache-arrow": "^21.2.0"
+    "apache-arrow": "^21.2.0",
+    "earcut": "^3.2.4"
   }
 }

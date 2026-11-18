@@ -7,12 +7,12 @@ zip code ─▶ Census ZCTA gazetteer (data/census/) ─▶ center point ─▶ 
    │  npm run cli -- fetch-osm --zip 80205 --size 4     (once per area)
    ▼
 Overpass API ─▶ data/osm/<zip>.json + <zip>.meta.json   (gitignored raw snapshot)
-   │  npm run cli -- import-roads --zip 80205           (repeatable, no network)
+   │  npm run cli -- import --zip 80205                 (repeatable, no network)
    ▼
-@game/osm-import (pure TS): raw OSM → drivable ways with resolved attributes
+@game/osm-import (pure TS): raw OSM → drivable ways, buildings (resolved attributes)
    │  @game/db: one transaction
    ▼
-PostGIS: osm_fetches, road_ways (upsert by OSM id; delete ways gone from the box)
+PostGIS: osm_fetches, road_ways, buildings (upsert by OSM key; delete rows gone from the box)
 ```
 
 Then the export (one area = one partition for now):
@@ -21,7 +21,8 @@ Then the export (one area = one partition for now):
    │  npm run cli -- export --zip 80205
    ▼
 PostGIS road_ways in the fetch bbox ─▶ @game/world buildRoadGraph ─▶ Arrow IPC
-   ─▶ data/export/<zip>/nodes.arrow, edges.arrow, manifest.json (sha256 per file)
+PostGIS buildings in the fetch bbox  ─▶ @game/world buildBuildings ─▶ Arrow IPC
+   ─▶ data/export/<zip>/nodes.arrow, edges.arrow, buildings.arrow, manifest.json (sha256 per file)
 ```
 
 ## Target (later)
@@ -49,6 +50,13 @@ For whole regions, Geofabrik extracts via osm2pgsql (or our converter reading `.
 - Upsert into `road_ways` by `osm_way_id`. Then delete road ways that have a node inside the fetched box but were not in this fetch (deleted upstream, or no longer a road).
 - Record the fetch in `osm_fetches` (keyed by file sha256, so re-importing the same file is idempotent).
 
+### Buildings
+
+- Sources: closed ways and multipolygon relations tagged `building=*` or `building:part=*` (not `no`). Relation member ways are joined into rings by matching endpoints; inner rings are attached to the outer ring containing them. Building nodes (4 in 80205) are ignored.
+- Height: `height=*` (meters, feet or feet'inches"), else `building:levels` × 3 m, else a default by kind (house 6 m, garage 3 m, apartments 12 m, …). `min_height` or `building:min_level` × 3 m lifts the bottom. The source is stored (`height_source`) so estimated heights stay visible.
+- Keyed by `(osm_type, osm_id)` (ways and relations have separate id spaces); geometry is always a MultiPolygon.
+- 80205: 16,694 buildings + 379 parts, none skipped; heights from `height` 6,716 (Denver's lidar import), levels 1,683, default 8,674. Tallest: 213 m.
+
 All OSM interpretation lives in TS so the server, CLI and tests share it.
 
 ## Export
@@ -58,6 +66,8 @@ Built (`@game/world` + `cli export`):
 - Project lat/lon to local meters around the area's bbox center (equirectangular; error is negligible at this scale).
 - Build CSR incidence lists (each node's incident edges).
 - Write Arrow IPC files (decision 15) and check the round trip before writing.
+
+Buildings (`buildBuildings`): one row per polygon; rings opened (no repeated closing point) and oriented (outer counterclockwise, holes clockwise). An outline is left out when a `building:part` lies inside it (`ST_PointOnSurface` of the part), since the parts describe its shape; parts are always kept. 80205: 17,011 buildings and parts → 17,014 polygons, 130,696 points; `buildings.arrow` 1.5 MB raw, 757 KB brotli.
 
 80205 result: 3,775 ways → 5,598 nodes, 7,684 edges, 24,758 points. 98% of nodes are in one connected component; the remaining 13 components are mostly tiny pieces cut off at the bbox edge. Counts match an independent SQL computation.
 

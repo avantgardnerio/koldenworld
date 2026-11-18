@@ -6,19 +6,19 @@ Everything except `viewer` runs in Node with the same code as the browser. Claud
 
 - `npm run viewer`: interactive dev server at http://localhost:5173/?area=80205
 - `npm run shot -- --area 80205 [--view=x,y,z,yaw,pitch] [--size WxH]`: screenshot to `data/shots/`, plus a JSON line with counts and the camera. Claude reads the PNG to see the result.
-- `packages/viewer/test/viewer.e2e.test.ts`: a synthetic graph written as Arrow to a temp dir, served by Vite, rendered in headless Chromium with SwiftShader; asserts load counts, exact pixel colors at known world positions (asphalt vs ground at road edges, the double yellow line at 5 cm per pixel), the G overlay toggle, and that holding W in the browser flies north and writes the pose to the URL. Runs in `npm test` in under a second.
+- `packages/viewer/test/viewer.e2e.test.ts`: a synthetic graph written as Arrow to a temp dir, served by Vite, rendered in headless Chromium with SwiftShader; asserts load counts, exact pixel colors at known world positions (asphalt vs ground at road edges, the double yellow line at 5 cm per pixel), two buildings (roofs over the ground, and the near one hiding the far one, which fails if the depth test is disabled), the G overlay toggle, and that holding W in the browser flies north and writes the pose to the URL. Runs in `npm test` in under a second.
 - `packages/viewer/harness/browser.ts` (`openViewer`) is the shared harness: Vite + Chromium + wait for `window.viewer.state`.
 - One-time setup on a new machine: `npx playwright install chromium`.
 
 ## CLI (sketch)
 
-Run as `npm run cli -- <command>`. Existing today: `fetch-osm`, `migrate`, `import-roads`, `export`. The rest are planned.
+Run as `npm run cli -- <command>`. Existing today: `fetch-osm`, `migrate`, `import`, `export`. The rest are planned.
 
 ```sh
 cli fetch-osm --zip 80205 --size 4    # one-time raw OSM download into data/
 cli migrate                           # apply pending SQL migrations
-cli import-roads --zip 80205          # convert the snapshot into road_ways
-cli export --zip 80205                # road graph → data/export/80205/*.arrow, with stats
+cli import --zip 80205                # convert the snapshot into road_ways and buildings
+cli export --zip 80205                # road graph and buildings → data/export/80205/*.arrow, with stats
 cli run scenarios/straight-line.json  # run a scenario, print pass/fail and diffs
 cli replay recordings/crash.jsonl     # replay a recorded input log
 cli view --at 1200,-340 --radius 150  # print the text view

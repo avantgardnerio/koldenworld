@@ -110,3 +110,10 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Rejected for now:** true intersection polygons (cutting each road back and joining the curb lines); per-lane geometry from `turn:lanes`; textures.
 - **Why:** discs make every junction look solid with no topology work, and the mesh stays a pure function of the graph. Painter's order with no depth buffer avoids z-fighting between coplanar layers; buildings will need depth and a decal approach (polygon offset or a small z lift) for the ground layers.
 
+## 19. Buildings: extruded footprints, parts replace outlines, depth only for solids
+
+- **Chosen:** buildings go through the same pipeline as roads: pure TS extraction (ways and multipolygons, ring assembly, height resolution with a recorded source), a `buildings` table keyed by `(osm_type, osm_id)`, an Arrow table with one row per polygon and nested ring lists, and a pure mesh operator (walls + earcut roofs). When a building has `building:part`s inside it, the export keeps the parts and drops the outline.
+- **Height policy:** `height` tag, else levels × 3 m, else a per-kind default; `height_source` records which, so estimated buildings can be treated differently later (procedural detail, a debug view).
+- **Rendering:** ground layers keep painter's order but write depth; buildings are depth-tested and back-face culled. This avoids z-fighting between coplanar ground layers without needing polygon offset.
+- **Rejected for now:** roof shapes (too rare in the data to justify the work), textures and windows, splitting `import` into separate road and building commands (one `import` reads the snapshot once).
+

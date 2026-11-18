@@ -23,9 +23,9 @@ const viewer = await openViewer({ area: a.area, graph: a.graph, hash: a.view ? `
 try {
   await mkdir(path.dirname(out), { recursive: true });
   await viewer.page.screenshot({ path: out });
-  const { state, nodes, edges, surfaceTriangles, frames } = await viewer.status();
+  const { state, nodes, edges, surfaceTriangles, buildings, buildingTriangles, frames } = await viewer.status();
   const camera = await viewer.page.evaluate(() => location.hash);
-  console.log(JSON.stringify({ state, nodes, edges, surfaceTriangles, frames, camera, out }));
+  console.log(JSON.stringify({ state, nodes, edges, surfaceTriangles, buildings, buildingTriangles, frames, camera, out }));
 } finally {
   await viewer.close();
 }

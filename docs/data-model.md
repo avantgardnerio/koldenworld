@@ -18,6 +18,7 @@ The Postgres → blob export is the single conversion point. It is a pure functi
 ## Postgres tables
 
 - `osm_fetches`: one row per downloaded snapshot (area key, bbox, OSM base timestamp, sha256). Identity key, since we create these.
+- `buildings`: one row per building or building part, keyed by `(osm_type, osm_id)`: kind, `is_part`, height and min height in meters with `height_source` (`height`, `levels`, `default`), levels, MultiPolygon geometry, raw tags, fetch.
 - `road_ways`: one row per drivable OSM way, keyed by `osm_way_id`, stored **unsplit**: node id list, geometry in direction of travel, resolved attributes (class, one-way, lanes, speed limit), raw tags, and the fetch that last wrote it.
 
 Splitting ways into segments at intersections and building the road graph happen at export time, not in Postgres. Where a way gets split depends on which other ways meet it, and only the export sees a partition together with its neighbors.
@@ -70,7 +71,7 @@ The schema should be declared once and drive the TS table classes, the blob writ
 |---|---|
 | `RoadNode` | position, first edge / edge count (adjacency), is-signalized |
 | `RoadEdge` | from, to, polyline, class, lanes per direction, width, speed limit, length |
-| `Building` | footprint (ragged), height, min height, kind, height-was-estimated flag |
+| `Building` | one row per polygon: footprint rings (nested CSR: rows → rings → points), height, min height, kind, is-part, height source. Built: `Buildings` in `packages/world/src/buildings.ts`, Arrow layout in `buildings-arrow.ts` |
 | `Area` | polygon (ragged), kind (park, water, parking, ...) |
 | `EdgeFeature` | linear-referenced features on edges (below) |
 

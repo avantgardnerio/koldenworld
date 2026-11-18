@@ -35,7 +35,7 @@ packages/
                later the blob export and server
 ```
 
-Existing today: `world` (road graph, Arrow I/O, projection, road line and surface meshes), `osm-import`, `db`, `cli`, `viewer` (WebGL2 road map, headless harness). `sim` is created when it gets code.
+Existing today: `world` (road graph, buildings, Arrow I/O, projection, road line, road surface and building meshes), `osm-import`, `db`, `cli`, `viewer` (WebGL2 road map, headless harness). `sim` is created when it gets code.
 
 The shared packages are compiled without DOM type definitions, and a lint rule blocks Node-specific imports, so platform leaks fail the build.
 

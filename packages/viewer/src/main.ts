@@ -11,11 +11,14 @@
 // window.viewer exposes status and a pixel probe so headless tests can check
 // what was drawn without decoding screenshots.
 
-import { roadGraphFromArrow, roadLineMesh, roadSurfaceMesh } from "@game/world";
+import { buildingMesh, buildingsFromArrow, roadGraphFromArrow, roadLineMesh, roadSurfaceMesh } from "@game/world";
 import { FAR, formatHash, overview, parseHash, speed, stepCamera, viewProjection, type Camera } from "./camera.ts";
 import { createFlatLayer, groundMesh } from "./flat-layer.ts";
 import { attachInput, isIdle } from "./input.ts";
-import { CLASS_COLORS_RGB, fogRange, GROUND, MARKING_FADE, SKY, SURFACE_COLORS } from "./style.ts";
+import { createSolidLayer } from "./solid-layer.ts";
+import {
+  BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, GROUND, MARKING_FADE, SKY, SUN, SURFACE_COLORS,
+} from "./style.ts";
 
 export interface ViewerStatus {
   state: "loading" | "ready" | "error";
@@ -24,6 +27,8 @@ export interface ViewerStatus {
   nodes?: number;
   edges?: number;
   surfaceTriangles?: number;
+  buildings?: number;
+  buildingTriangles?: number;
   graphOverlay: boolean;
   frames: number;
   /** Render now and read the RGB at a CSS pixel (origin top left). */
@@ -52,8 +57,12 @@ async function start(): Promise<void> {
   const gl = canvas.getContext("webgl2", { antialias: true });
   if (!gl) throw new Error("WebGL2 is not available");
 
-  const [nodes, edges] = await Promise.all([getBlob(`/${area}/nodes.arrow`), getBlob(`/${area}/edges.arrow`)]);
+  const [nodes, edges, buildingFile] = await Promise.all([
+    getBlob(`/${area}/nodes.arrow`), getBlob(`/${area}/edges.arrow`), getBlob(`/${area}/buildings.arrow`),
+  ]);
   const { graph } = roadGraphFromArrow({ nodes, edges });
+  const { buildings } = buildingsFromArrow(buildingFile);
+  const buildingTris = buildingMesh(buildings);
   const lines = roadLineMesh(graph);
   const surface = roadSurfaceMesh(graph);
   const b = lines.bounds;
@@ -61,6 +70,7 @@ async function start(): Promise<void> {
     ground: createFlatLayer(gl, groundMesh((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, FAR),
       { mode: gl.TRIANGLES, colors: GROUND, fadeToBase: false }),
     roads: createFlatLayer(gl, surface, { mode: gl.TRIANGLES, colors: SURFACE_COLORS, fadeToBase: true }),
+    buildings: createSolidLayer(gl, buildingTris, BUILDING_COLORS_RGB),
     graph: createFlatLayer(gl, { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       { mode: gl.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false }),
   };
@@ -78,7 +88,8 @@ async function start(): Promise<void> {
     }
     gl.viewport(0, 0, w, h);
     gl.clearColor(SKY[0]!, SKY[1]!, SKY[2]!, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     const f = {
       view: viewProjection(camera, aspect()),
       eye: camera.pos,
@@ -86,9 +97,10 @@ async function start(): Promise<void> {
       fog: fogRange(camera.pos[2]),
       fade: MARKING_FADE,
     };
-    // Flat world: painter's order, no depth buffer.
+    // Ground layers in painter's order (writing depth), then depth-tested buildings.
     layers.ground.draw(f);
     layers.roads.draw(f);
+    layers.buildings.draw(f, SUN);
     if (status.graphOverlay) layers.graph.draw(f);
     status.frames++;
     hud.textContent = `alt ${camera.pos[2].toFixed(0)} m · ${speed(camera, false).toFixed(0)} m/s (Shift ×4)`;
@@ -142,6 +154,8 @@ async function start(): Promise<void> {
     nodes: graph.nodes.count,
     edges: graph.edges.count,
     surfaceTriangles: surface.indices.length / 3,
+    buildings: buildings.count,
+    buildingTriangles: buildingTris.indices.length / 3,
     pixel(x: number, y: number) {
       render();  // read before the browser clears the drawing buffer
       const dpr = devicePixelRatio;
