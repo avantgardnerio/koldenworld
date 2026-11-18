@@ -19,7 +19,8 @@ export interface Session {
 export interface OpenOptions {
   dataDir?: string;   // directory holding <area>/*.arrow; default data/export
   area: string;
-  hash?: string;      // camera, "#x,y,mpp"; default fits the area
+  graph?: boolean;    // road graph overlay
+  hash?: string;      // camera, "#x,y,z,yaw,pitch"; default is an overview
   width: number;
   height: number;
 }
@@ -44,7 +45,7 @@ export async function openViewer(o: OpenOptions): Promise<Session> {
     page.on("console", (m) => { if (m.type() === "error") logs.push(m.text()); });
     page.on("pageerror", (e) => logs.push(e.message));
 
-    await page.goto(`${base}?area=${encodeURIComponent(o.area)}${o.hash ?? ""}`);
+    await page.goto(`${base}?area=${encodeURIComponent(o.area)}${o.graph ? "&graph=1" : ""}${o.hash ?? ""}`);
     await page.waitForFunction(() => window.viewer?.state !== "loading", null, { timeout: 30_000 });
 
     const status = () => page.evaluate(() => {

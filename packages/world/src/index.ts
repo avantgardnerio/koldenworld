@@ -5,3 +5,6 @@ export {
 } from "./road-graph.ts";
 export { roadGraphFromArrow, roadGraphToArrow, type GraphMetadata, type RoadGraphFiles } from "./road-graph-arrow.ts";
 export { roadLineMesh, type Bounds, type RoadLineMesh } from "./road-lines.ts";
+export {
+  edgeHalfWidth, MARKING, nodeRadii, ROAD_PROFILES, roadSurfaceMesh, SurfaceMaterial, type SurfaceMesh,
+} from "./road-surface.ts";

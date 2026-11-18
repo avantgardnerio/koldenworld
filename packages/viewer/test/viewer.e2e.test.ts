@@ -25,9 +25,11 @@ const graph = buildRoadGraph([
 // pixel (200, 150). Hash: #x,y,z,yaw,pitch.
 const W = 401, H = 301;
 const Z = (H / 2 / Math.tan(Math.PI / 6)).toFixed(1);
-const PRIMARY = [232, 200, 74];
-const RESIDENTIAL = [168, 172, 180];
-const BACKGROUND = [18, 20, 26];
+const top = (x: number, mpp: number) => `#${x},0,${(+Z * mpp).toFixed(2)},0,-90`;
+const ASPHALT = [46, 48, 52];
+const GROUND = [91, 127, 58];
+const YELLOW = [226, 182, 42];
+// Widths: primary 1+1 lanes × 3.4 m + 1 m shoulders = 8.8 m; residential 1+1 × 3 + 1 = 8 m.
 
 let dir: string;
 let viewer: Session;
@@ -38,8 +40,13 @@ beforeAll(async () => {
   await mkdir(path.join(dir, "fixture"));
   await writeFile(path.join(dir, "fixture/nodes.arrow"), files.nodes);
   await writeFile(path.join(dir, "fixture/edges.arrow"), files.edges);
-  viewer = await openViewer({ dataDir: dir, area: "fixture", hash: `#0,0,${Z},0,-90`, width: W, height: H });
+  viewer = await openViewer({ dataDir: dir, area: "fixture", hash: top(0, 1), width: W, height: H });
 }, 60_000);
+
+async function setHash(hash: string) {
+  await viewer.page.evaluate((h) => { location.hash = h; }, hash);
+  await viewer.page.waitForFunction((h) => location.hash === h, hash);
+}
 
 afterAll(async () => {
   await viewer?.close();
@@ -49,31 +56,49 @@ afterAll(async () => {
 describe("viewer", () => {
   it("loads the graph from Arrow files", async () => {
     const s = await viewer.status();
-    expect(s).toMatchObject({ state: "ready", nodes: 5, edges: 4, segments: 4 });
+    expect(s).toMatchObject({ state: "ready", nodes: 5, edges: 4, graphOverlay: false });
+    expect(s.surfaceTriangles).toBeGreaterThan(0);
     expect(s.frames).toBeGreaterThan(0);
   });
 
-  it("draws roads in their class colors, major roads on top", async () => {
-    expect(await viewer.pixel(200, 150)).toEqual(PRIMARY);      // the intersection
-    expect(await viewer.pixel(250, 150)).toEqual(PRIMARY);      // 50 m east
-    expect(await viewer.pixel(200, 100)).toEqual(RESIDENTIAL);  // 50 m north
-    expect(await viewer.pixel(200, 200)).toEqual(RESIDENTIAL);  // 50 m south
-    expect(await viewer.pixel(100, 50)).toEqual(BACKGROUND);
+  it("draws asphalt roads of real width on green ground", async () => {
+    expect(await viewer.pixel(200, 150)).toEqual(ASPHALT);  // the intersection
+    expect(await viewer.pixel(250, 153)).toEqual(ASPHALT);  // primary, 50 m east, 3 m south of center
+    expect(await viewer.pixel(250, 145)).toEqual(GROUND);   // 5 m north: past its 4.4 m half width
+    expect(await viewer.pixel(203, 100)).toEqual(ASPHALT);  // residential, 3 m east of center
+    expect(await viewer.pixel(205, 100)).toEqual(GROUND);   // 5 m east: past its 4 m half width
+    expect(await viewer.pixel(100, 50)).toEqual(GROUND);
+  });
+
+  it("paints a double yellow center line on the primary road", async () => {
+    await setHash(top(50, 0.05));  // 5 cm per pixel, over the primary 50 m east
+    expect(await viewer.pixel(200, 147)).toEqual(YELLOW);   // 0.15 m north of center
+    expect(await viewer.pixel(200, 153)).toEqual(YELLOW);   // 0.15 m south
+    expect(await viewer.pixel(200, 150)).toEqual(ASPHALT);  // the gap between the lines
+    expect(await viewer.pixel(200, 140)).toEqual(ASPHALT);
   });
 
   it("puts the camera in the URL", async () => {
-    const hash = `#100,0,${Z},0,-90`;
-    await viewer.page.evaluate((h) => { location.hash = h; }, hash);
-    await viewer.page.waitForFunction((h) => location.hash === h, hash);
+    await setHash(top(100, 1));
     // The intersection is now 100 px left of center.
-    expect(await viewer.pixel(100, 150)).toEqual(PRIMARY);
-    expect(await viewer.pixel(100, 100)).toEqual(RESIDENTIAL);
+    expect(await viewer.pixel(100, 150)).toEqual(ASPHALT);
+    expect(await viewer.pixel(105, 100)).toEqual(GROUND);
+  });
+
+  it("toggles the road graph overlay with G, in the URL", async () => {
+    await setHash(top(0, 1));
+    await viewer.page.keyboard.press("KeyG");
+    expect((await viewer.status()).graphOverlay).toBe(true);
+    expect(await viewer.page.evaluate(() => new URL(location.href).searchParams.get("graph"))).toBe("1");
+    expect(await viewer.pixel(200, 100)).not.toEqual(ASPHALT);  // the residential centerline
+    await viewer.page.keyboard.press("KeyG");
+    expect((await viewer.status()).graphOverlay).toBe(false);
+    expect(await viewer.pixel(200, 100)).toEqual(ASPHALT);
   });
 
   it("flies with the keyboard and writes the pose back once idle", async () => {
     const start = "#0,0,100.0,0.0,0.0";  // level, facing north
-    await viewer.page.evaluate((h) => { location.hash = h; }, start);
-    await viewer.page.waitForFunction((h) => location.hash === h, start);
+    await setHash(start);
     const frames = (await viewer.status()).frames;
     await viewer.page.keyboard.down("KeyW");
     await viewer.page.waitForTimeout(300);

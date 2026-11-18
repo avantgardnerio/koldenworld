@@ -10,16 +10,21 @@ The project is first an efficient world renderer; the game sits on top of it. Re
 
 ```
 GET /<area>/nodes.arrow, edges.arrow ─▶ roadGraphFromArrow (zero-copy views)
-  ─▶ roadLineMesh (world operator: positions = graph.points, per-point class, segment indices)
-  ─▶ createRoadLayer: 3 buffers uploaded once ─▶ 1 drawElements(LINES) per frame
+  ├─▶ roadSurfaceMesh (world operator) ─▶ road layer: asphalt + markings, 1 draw call
+  └─▶ roadLineMesh (world operator)    ─▶ graph overlay (G): 1 px lines by class, 1 draw call
+ground layer: one green quad to the far plane, under everything
 ```
+
+- **Road surface** (`road-surface.ts`, decision 18): each edge is a mitered ribbon whose width comes from lanes × the class's lane width plus shoulders; every node gets a disc as wide as its widest road, which fills intersection corners and rounds dead ends. Markings on tertiary roads and above: double yellow center line on two-way roads, dashed white (3 m dash, 9 m gap) between same-direction lanes, stopping short of intersections. 80205: 140k triangles.
+- **Flat layers** (`flat-layer.ts`): one shader for every mesh on the ground plane, with a material index per vertex and a per-layer palette. The world is flat, so layers are painted in order with no depth buffer (to revisit with buildings).
+- **Atmosphere:** sky-colored background, distance fog toward the sky color (range grows with altitude), and lane markings fading into asphalt between 60 and 220 m so they don't shimmer below a pixel wide. MSAA is on.
 
 - **Camera:** a fly camera, `{pos, rot}` (position in meters, orientation quaternion), perspective with a 60° vertical field of view. `stepCamera(camera, input, dt)` is pure and tested in Node (decision 17). The pose is mirrored to the URL hash (`/?area=80205#x,y,z,yaw,pitch`, meters and degrees), so a URL fully describes the view.
 - **Controls:** click to capture the mouse (Esc releases; dragging also looks); WASD or arrows move along the view direction; E/Space up, Q/C down in world space; Shift ×4. Speed scales with altitude (max(5, z) m/s). Keys are physical codes, so the layout doesn't matter.
 - **Draw on demand:** the frame loop runs only while keys are held or the mouse moves; when input goes idle it stops and writes the pose to the URL.
 - **Draw order:** segments are sorted by class, least important first, so major roads paint over minor ones without a depth buffer.
 - **Style** (colors per class) lives in the viewer, not in the map data.
-- **Limits:** lines are 1 device pixel (WebGL ignores `lineWidth`). Road ribbons with real widths are the next operator. Distant lines alias into noise near the horizon; fog or LOD will fix that.
+- **Limits:** lane data is sparse: in 80205 only 8 edges are tagged with 2+ lanes each way, so most arterials render as 1+1. Roads that cross without sharing a node (bridges) overlap flat. Lane-count changes show as small bulges at the node disc.
 - 80205: 7,684 edges → 17,074 segments, one draw call.
 
 ## Static world

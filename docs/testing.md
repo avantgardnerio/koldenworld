@@ -6,7 +6,7 @@ Everything except `viewer` runs in Node with the same code as the browser. Claud
 
 - `npm run viewer`: interactive dev server at http://localhost:5173/?area=80205
 - `npm run shot -- --area 80205 [--view=x,y,z,yaw,pitch] [--size WxH]`: screenshot to `data/shots/`, plus a JSON line with counts and the camera. Claude reads the PNG to see the result.
-- `packages/viewer/test/viewer.e2e.test.ts`: a synthetic graph written as Arrow to a temp dir, served by Vite, rendered in headless Chromium with SwiftShader; asserts load counts, exact pixel colors at known world positions (looking straight down), and that holding W in the browser flies north and writes the pose to the URL. Runs in `npm test` in under a second.
+- `packages/viewer/test/viewer.e2e.test.ts`: a synthetic graph written as Arrow to a temp dir, served by Vite, rendered in headless Chromium with SwiftShader; asserts load counts, exact pixel colors at known world positions (asphalt vs ground at road edges, the double yellow line at 5 cm per pixel), the G overlay toggle, and that holding W in the browser flies north and writes the pose to the URL. Runs in `npm test` in under a second.
 - `packages/viewer/harness/browser.ts` (`openViewer`) is the shared harness: Vite + Chromium + wait for `window.viewer.state`.
 - One-time setup on a new machine: `npx playwright install chromium`.
 

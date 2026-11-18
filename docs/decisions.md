@@ -104,3 +104,9 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Rejected:** composing small rotations onto the quaternion every frame. It is the textbook approach, but float error leaks in as roll, which a pitch rotation cannot remove; in testing the camera tilted several degrees off the clamp after 50 frames of looking straight down. Also rejected: pitch from `asin`, which is ill-conditioned near ±90° (we use `atan2`).
 - **Why quaternions at all:** with yaw/pitch only and a clamp there is no gimbal lock either way, but quaternions are what vehicles and free 6-DOF orientation need, and they compose and interpolate cleanly. The camera uses the same type the sim will.
 
+## 18. Road surfaces from lanes and class profiles, painted flat
+
+- **Chosen:** the road surface is an operator in `@game/world` (`roadSurfaceMesh`): width = lanes × lane width + shoulders, from a per-class profile; mitered ribbons per edge plus a disc per node (intersections and dead ends). Markings follow US conventions and only appear on tertiary roads and above. Everything is one triangle mesh with a material per vertex, emitted in draw order.
+- **Rejected for now:** true intersection polygons (cutting each road back and joining the curb lines); per-lane geometry from `turn:lanes`; textures.
+- **Why:** discs make every junction look solid with no topology work, and the mesh stays a pure function of the graph. Painter's order with no depth buffer avoids z-fighting between coplanar layers; buildings will need depth and a decal approach (polygon offset or a small z lift) for the ground layers.
+

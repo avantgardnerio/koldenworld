@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Viewer</title>
   <style>
-    html, body { margin: 0; height: 100%; background: #121419; overflow: hidden; }
+    html, body { margin: 0; height: 100%; background: #a9c8e6; overflow: hidden; }
     canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-    footer, #help, #hud { position: fixed; font: 12px system-ui, sans-serif; color: #889; pointer-events: none; }
+    footer, #help, #hud { position: fixed; font: 12px system-ui, sans-serif; color: #1d2a38; pointer-events: none; }
     footer { right: 6px; bottom: 4px; font-size: 11px; pointer-events: auto; }
+    #help, #hud { background: rgb(255 255 255 / 0.7); padding: 2px 6px; border-radius: 4px; }
     #help { left: 8px; top: 6px; }
     #hud { left: 8px; bottom: 4px; }
     footer a { color: inherit; }
@@ -16,7 +17,7 @@
 </head>
 <body>
   <canvas></canvas>
-  <div id="help">click to look (Esc releases) · WASD / arrows move · E / Space up · Q / C down · Shift fast</div>
+  <div id="help">click to look (Esc releases) · WASD / arrows move · E / Space up · Q / C down · Shift fast · G road graph</div>
   <div id="hud"></div>
   <footer>© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</footer>
   <script type="module" src="/src/main.ts"></script>

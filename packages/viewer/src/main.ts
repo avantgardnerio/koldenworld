@@ -1,6 +1,8 @@
-// Viewer entry: load an area's Arrow files, build the line mesh, fly around it.
+// Viewer entry: load an area's Arrow files, build meshes, fly around them.
 //
-// URL: /?area=80205#x,y,z,yaw,pitch   (the hash is the camera pose; without it, an overview)
+// URL: /?area=80205[&graph=1]#x,y,z,yaw,pitch
+//   hash: the camera pose (without it, an overview); graph=1: the road graph
+//   overlay (toggle with G). The URL describes the whole view.
 //
 // Frames are rendered only while something changes: a held key or mouse
 // movement starts the loop, and it stops (and writes the pose to the URL) once
@@ -9,11 +11,11 @@
 // window.viewer exposes status and a pixel probe so headless tests can check
 // what was drawn without decoding screenshots.
 
-import { roadGraphFromArrow, roadLineMesh } from "@game/world";
-import { formatHash, overview, parseHash, speed, stepCamera, viewProjection, type Camera } from "./camera.ts";
+import { roadGraphFromArrow, roadLineMesh, roadSurfaceMesh } from "@game/world";
+import { FAR, formatHash, overview, parseHash, speed, stepCamera, viewProjection, type Camera } from "./camera.ts";
+import { createFlatLayer, groundMesh } from "./flat-layer.ts";
 import { attachInput, isIdle } from "./input.ts";
-import { createRoadLayer } from "./road-layer.ts";
-import { BACKGROUND, classColors } from "./style.ts";
+import { CLASS_COLORS_RGB, fogRange, GROUND, MARKING_FADE, SKY, SURFACE_COLORS } from "./style.ts";
 
 export interface ViewerStatus {
   state: "loading" | "ready" | "error";
@@ -21,7 +23,8 @@ export interface ViewerStatus {
   area: string;
   nodes?: number;
   edges?: number;
-  segments?: number;
+  surfaceTriangles?: number;
+  graphOverlay: boolean;
   frames: number;
   /** Render now and read the RGB at a CSS pixel (origin top left). */
   pixel?: (x: number, y: number) => [number, number, number];
@@ -38,23 +41,32 @@ async function getBlob(path: string): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-const area = new URLSearchParams(location.search).get("area") ?? "80205";
-const status: ViewerStatus = (window.viewer = { state: "loading", area, frames: 0 });
+const params = new URLSearchParams(location.search);
+const area = params.get("area") ?? "80205";
+const status: ViewerStatus = (window.viewer = { state: "loading", area, graphOverlay: params.get("graph") === "1", frames: 0 });
 const MAX_DT = 0.1;  // s; a stalled tab must not teleport the camera
 
 async function start(): Promise<void> {
   const canvas = document.querySelector("canvas")!;
   const hud = document.querySelector<HTMLElement>("#hud")!;
-  const gl = canvas.getContext("webgl2", { antialias: false });
+  const gl = canvas.getContext("webgl2", { antialias: true });
   if (!gl) throw new Error("WebGL2 is not available");
 
   const [nodes, edges] = await Promise.all([getBlob(`/${area}/nodes.arrow`), getBlob(`/${area}/edges.arrow`)]);
   const { graph } = roadGraphFromArrow({ nodes, edges });
-  const mesh = roadLineMesh(graph);
-  const roads = createRoadLayer(gl, mesh, classColors());
+  const lines = roadLineMesh(graph);
+  const surface = roadSurfaceMesh(graph);
+  const b = lines.bounds;
+  const layers = {
+    ground: createFlatLayer(gl, groundMesh((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, FAR),
+      { mode: gl.TRIANGLES, colors: GROUND, fadeToBase: false }),
+    roads: createFlatLayer(gl, surface, { mode: gl.TRIANGLES, colors: SURFACE_COLORS, fadeToBase: true }),
+    graph: createFlatLayer(gl, { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
+      { mode: gl.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false }),
+  };
 
   const aspect = () => canvas.clientWidth / Math.max(1, canvas.clientHeight);
-  let camera: Camera = parseHash(location.hash) ?? overview(mesh.bounds, aspect());
+  let camera: Camera = parseHash(location.hash) ?? overview(lines.bounds, aspect());
   history.replaceState(null, "", formatHash(camera));
 
   const render = () => {
@@ -65,9 +77,19 @@ async function start(): Promise<void> {
       canvas.height = h;
     }
     gl.viewport(0, 0, w, h);
-    gl.clearColor(BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 1);
+    gl.clearColor(SKY[0]!, SKY[1]!, SKY[2]!, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    roads.draw(viewProjection(camera, aspect()));
+    const f = {
+      view: viewProjection(camera, aspect()),
+      eye: camera.pos,
+      sky: SKY,
+      fog: fogRange(camera.pos[2]),
+      fade: MARKING_FADE,
+    };
+    // Flat world: painter's order, no depth buffer.
+    layers.ground.draw(f);
+    layers.roads.draw(f);
+    if (status.graphOverlay) layers.graph.draw(f);
     status.frames++;
     hud.textContent = `alt ${camera.pos[2].toFixed(0)} m · ${speed(camera, false).toFixed(0)} m/s (Shift ×4)`;
   };
@@ -96,6 +118,16 @@ async function start(): Promise<void> {
   };
   const keys = attachInput(canvas, wake);
 
+  addEventListener("keydown", (e) => {
+    if (e.code !== "KeyG" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    status.graphOverlay = !status.graphOverlay;
+    const url = new URL(location.href);
+    if (status.graphOverlay) url.searchParams.set("graph", "1");
+    else url.searchParams.delete("graph");
+    history.replaceState(null, "", url);
+    render();
+  });
+
   addEventListener("hashchange", () => {
     const c = parseHash(location.hash);
     if (c) { camera = c; render(); }
@@ -109,7 +141,7 @@ async function start(): Promise<void> {
     state: "ready",
     nodes: graph.nodes.count,
     edges: graph.edges.count,
-    segments: mesh.indices.length / 2,
+    surfaceTriangles: surface.indices.length / 3,
     pixel(x: number, y: number) {
       render();  // read before the browser clears the drawing buffer
       const dpr = devicePixelRatio;
