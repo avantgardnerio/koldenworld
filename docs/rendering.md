@@ -2,6 +2,25 @@
 
 The viewer is a pure view: it reads map artifacts and dynamic tables and draws them. It owns no game state.
 
+The project is first an efficient world renderer; the game sits on top of it. Rendering work follows the same principles as everything else: meshes come from pure, tested operators, the GPU side holds only handles, and every view is reproducible from its URL.
+
+## Built so far
+
+`packages/viewer` (raw WebGL2, Vite dev server):
+
+```
+GET /<area>/nodes.arrow, edges.arrow ─▶ roadGraphFromArrow (zero-copy views)
+  ─▶ roadLineMesh (world operator: positions = graph.points, per-point class, segment indices)
+  ─▶ createRoadLayer: 3 buffers uploaded once ─▶ 1 drawElements(LINES) per frame
+```
+
+- **Camera:** `{x, y, mpp}` (center in meters, meters per CSS pixel), pure functions in `camera.ts`. It is mirrored to the URL hash (`/?area=80205#x,y,mpp`), so a URL fully describes the view. Drag pans, the wheel zooms about the cursor.
+- **Draw on demand:** a frame is rendered only when the camera or canvas size changes.
+- **Draw order:** segments are sorted by class, least important first, so major roads paint over minor ones without a depth buffer.
+- **Style** (colors per class) lives in the viewer, not in the map data.
+- **Limits:** lines are 1 device pixel (WebGL ignores `lineWidth`). Road ribbons with real widths are the next operator.
+- 80205: 7,684 edges → 17,074 segments, one draw call.
+
 ## Static world
 
 - Each partition's meshes come from operators, already merged into a few vertex buffers per partition and LOD. That keeps draw calls to a few hundred instead of one per building.
@@ -26,7 +45,7 @@ Estimates, not measurements:
 
 ## Library
 
-Open question: Three.js, or raw WebGL2 / WebGPU. Three.js is faster to start; raw APIs give full control over buffer layout. The static/dynamic split above works with either. See [roadmap.md](roadmap.md).
+Raw WebGL2 (decision 16). Our columns are already GPU-ready buffers; a scene graph would wrap them in objects we would then have to keep in sync. WebGPU can come later behind the same layer interface.
 
 ## Required UI
 

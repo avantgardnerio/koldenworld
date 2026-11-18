@@ -1,0 +1,6 @@
+{
+  // Browser code: DOM, no Node APIs.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "lib": ["es2024", "dom", "dom.iterable"] },
+  "include": ["src"]
+}

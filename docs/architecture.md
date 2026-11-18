@@ -5,6 +5,7 @@
 - An original open-world driving game set on real streets, built from OpenStreetMap (OSM) data.
 - Any location: open the app, enter a zip code, play there.
 - A workflow where every part of the game can be run, inspected and tested headless, by a human or by Claude.
+- First and foremost an efficient world renderer; the game is built on top of it.
 
 ## Non-goals
 
@@ -34,7 +35,7 @@ packages/
                later the blob export and server
 ```
 
-Existing today: `world` (road graph, Arrow I/O, projection), `osm-import`, `db`, `cli`. The others are created when they get code.
+Existing today: `world` (road graph, Arrow I/O, projection, road line mesh), `osm-import`, `db`, `cli`, `viewer` (WebGL2 road map, headless harness). `sim` is created when it gets code.
 
 The shared packages are compiled without DOM type definitions, and a lint rule blocks Node-specific imports, so platform leaks fail the build.
 

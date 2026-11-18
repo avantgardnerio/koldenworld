@@ -90,3 +90,11 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Details:** in-memory CSR offsets are `Int32Array` to match Arrow list offsets. OSM ids are stored as `float64` (exact below 2^53) to avoid `BigInt`. Dictionary ids are set explicitly so output is byte-for-byte reproducible.
 - **Bitpacking:** deferred until measured. First candidate is quantizing coordinates to `Int16` relative to the partition, which WebGL can consume directly.
 - **Measured (80205, 4×4 km):** nodes 171 KB raw / 81 KB brotli; edges 461 KB raw / 176 KB brotli.
+
+## 16. Raw WebGL2 viewer, verified headless in Chromium
+
+- **Chosen:** raw WebGL2 with a Vite dev server, built before the simulation so the pipeline is proven end to end (OSM → PostGIS → Arrow → browser → GPU). The project is primarily an efficient world renderer; the game goes on top.
+- **Rejected:** Three.js (its scene graph and object-per-mesh model would wrap our columnar buffers in state we would have to sync); building the sim and text view first.
+- **Viewer rules:** meshes come from pure operators in `@game/world` (tested in Node); GPU layers hold only handles; the camera is a plain value mirrored to the URL hash, so the same URL renders the same pixels; frames render on demand.
+- **Headless verification:** Playwright drives headless Chromium with SwiftShader (software WebGL, no GPU, deterministic pixels). The viewer exposes `window.viewer` (status counts and a `pixel(x, y)` probe that renders and reads back), so tests assert exact colors at known world positions without decoding screenshots. `npm run shot` writes PNGs that Claude can look at.
+

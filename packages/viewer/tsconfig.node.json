@@ -1,0 +1,6 @@
+{
+  // Node-side tooling: dev server config, browser harness, tests, scripts.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "types": ["node"], "lib": ["es2024", "dom"] },
+  "include": ["vite.config.ts", "harness", "test", "scripts"]
+}
