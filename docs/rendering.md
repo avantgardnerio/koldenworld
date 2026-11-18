@@ -14,11 +14,12 @@ GET /<area>/nodes.arrow, edges.arrow ─▶ roadGraphFromArrow (zero-copy views)
   ─▶ createRoadLayer: 3 buffers uploaded once ─▶ 1 drawElements(LINES) per frame
 ```
 
-- **Camera:** `{x, y, mpp}` (center in meters, meters per CSS pixel), pure functions in `camera.ts`. It is mirrored to the URL hash (`/?area=80205#x,y,mpp`), so a URL fully describes the view. Drag pans, the wheel zooms about the cursor.
-- **Draw on demand:** a frame is rendered only when the camera or canvas size changes.
+- **Camera:** a fly camera, `{pos, rot}` (position in meters, orientation quaternion), perspective with a 60° vertical field of view. `stepCamera(camera, input, dt)` is pure and tested in Node (decision 17). The pose is mirrored to the URL hash (`/?area=80205#x,y,z,yaw,pitch`, meters and degrees), so a URL fully describes the view.
+- **Controls:** click to capture the mouse (Esc releases; dragging also looks); WASD or arrows move along the view direction; E/Space up, Q/C down in world space; Shift ×4. Speed scales with altitude (max(5, z) m/s). Keys are physical codes, so the layout doesn't matter.
+- **Draw on demand:** the frame loop runs only while keys are held or the mouse moves; when input goes idle it stops and writes the pose to the URL.
 - **Draw order:** segments are sorted by class, least important first, so major roads paint over minor ones without a depth buffer.
 - **Style** (colors per class) lives in the viewer, not in the map data.
-- **Limits:** lines are 1 device pixel (WebGL ignores `lineWidth`). Road ribbons with real widths are the next operator.
+- **Limits:** lines are 1 device pixel (WebGL ignores `lineWidth`). Road ribbons with real widths are the next operator. Distant lines alias into noise near the horizon; fog or LOD will fix that.
 - 80205: 7,684 edges → 17,074 segments, one draw call.
 
 ## Static world

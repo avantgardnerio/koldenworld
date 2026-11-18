@@ -1,5 +1,5 @@
 // Screenshot an exported area headlessly:
-//   npm run shot -- --area 80205 [--view=x,y,mpp] [--size 1600x1200] [--out data/shots/80205.png]
+//   npm run shot -- --area 80205 [--view=x,y,z,yaw,pitch] [--size 1600x1200] [--out data/shots/80205.png]
 // (Use --view=..., with "=": a value starting with "-" would otherwise parse as a flag.)
 
 import { mkdir } from "node:fs/promises";

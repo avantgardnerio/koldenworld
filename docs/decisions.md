@@ -98,3 +98,9 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Viewer rules:** meshes come from pure operators in `@game/world` (tested in Node); GPU layers hold only handles; the camera is a plain value mirrored to the URL hash, so the same URL renders the same pixels; frames render on demand.
 - **Headless verification:** Playwright drives headless Chromium with SwiftShader (software WebGL, no GPU, deterministic pixels). The viewer exposes `window.viewer` (status counts and a `pixel(x, y)` probe that renders and reads back), so tests assert exact colors at known world positions without decoding screenshots. `npm run shot` writes PNGs that Claude can look at.
 
+## 17. Fly camera: quaternion state, yaw/pitch control
+
+- **Chosen:** the camera stores a position and an orientation quaternion. Mouse look changes yaw (about world up) and pitch (about the camera's right axis, clamped to ±90°), and the quaternion is rebuilt from the new yaw and pitch each frame.
+- **Rejected:** composing small rotations onto the quaternion every frame. It is the textbook approach, but float error leaks in as roll, which a pitch rotation cannot remove; in testing the camera tilted several degrees off the clamp after 50 frames of looking straight down. Also rejected: pitch from `asin`, which is ill-conditioned near ±90° (we use `atan2`).
+- **Why quaternions at all:** with yaw/pitch only and a clamp there is no gimbal lock either way, but quaternions are what vehicles and free 6-DOF orientation need, and they compose and interpolate cleanly. The camera uses the same type the sim will.
+

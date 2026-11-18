@@ -1,12 +1,17 @@
-// Viewer entry: load an area's Arrow files, build the line mesh, draw on demand.
+// Viewer entry: load an area's Arrow files, build the line mesh, fly around it.
 //
-// URL: /?area=80205#x,y,mpp   (the hash is the camera; without it the view fits the area)
+// URL: /?area=80205#x,y,z,yaw,pitch   (the hash is the camera pose; without it, an overview)
+//
+// Frames are rendered only while something changes: a held key or mouse
+// movement starts the loop, and it stops (and writes the pose to the URL) once
+// input goes idle.
 //
 // window.viewer exposes status and a pixel probe so headless tests can check
 // what was drawn without decoding screenshots.
 
 import { roadGraphFromArrow, roadLineMesh } from "@game/world";
-import { fitBounds, formatHash, pan, parseHash, viewMatrix, zoomAt, type Camera } from "./camera.ts";
+import { formatHash, overview, parseHash, speed, stepCamera, viewProjection, type Camera } from "./camera.ts";
+import { attachInput, isIdle } from "./input.ts";
 import { createRoadLayer } from "./road-layer.ts";
 import { BACKGROUND, classColors } from "./style.ts";
 
@@ -35,9 +40,11 @@ async function getBlob(path: string): Promise<Uint8Array> {
 
 const area = new URLSearchParams(location.search).get("area") ?? "80205";
 const status: ViewerStatus = (window.viewer = { state: "loading", area, frames: 0 });
+const MAX_DT = 0.1;  // s; a stalled tab must not teleport the camera
 
 async function start(): Promise<void> {
   const canvas = document.querySelector("canvas")!;
+  const hud = document.querySelector<HTMLElement>("#hud")!;
   const gl = canvas.getContext("webgl2", { antialias: false });
   if (!gl) throw new Error("WebGL2 is not available");
 
@@ -46,55 +53,54 @@ async function start(): Promise<void> {
   const mesh = roadLineMesh(graph);
   const roads = createRoadLayer(gl, mesh, classColors());
 
-  const size = () => ({ w: canvas.clientWidth, h: canvas.clientHeight });
-  let camera: Camera = parseHash(location.hash) ?? fitBounds(mesh.bounds, size().w, size().h);
+  const aspect = () => canvas.clientWidth / Math.max(1, canvas.clientHeight);
+  let camera: Camera = parseHash(location.hash) ?? overview(mesh.bounds, aspect());
   history.replaceState(null, "", formatHash(camera));
 
   const render = () => {
-    const { w, h } = size();
     const dpr = devicePixelRatio;
-    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(h * dpr);
+    const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
     }
-    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.viewport(0, 0, w, h);
     gl.clearColor(BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    roads.draw(viewMatrix(camera, w, h));
+    roads.draw(viewProjection(camera, aspect()));
     status.frames++;
+    hud.textContent = `alt ${camera.pos[2].toFixed(0)} m · ${speed(camera, false).toFixed(0)} m/s (Shift ×4)`;
   };
 
-  let queued = false;
-  const invalidate = () => {
-    if (queued) return;
-    queued = true;
-    requestAnimationFrame(() => { queued = false; render(); });
+  // --- frame loop, running only while there is input ---
+  let running = false;
+  let last = 0;
+  const frame = (now: number) => {
+    const dt = Math.min(MAX_DT, (now - last) / 1000);
+    last = now;
+    const input = keys.take();
+    if (isIdle(input)) {
+      running = false;
+      history.replaceState(null, "", formatHash(camera));
+      return;
+    }
+    camera = stepCamera(camera, input, dt);
+    render();
+    requestAnimationFrame(frame);
   };
-  const setCamera = (c: Camera) => {
-    camera = c;
-    history.replaceState(null, "", formatHash(c));
-    invalidate();
+  const wake = () => {
+    if (running) return;
+    running = true;
+    last = performance.now();
+    requestAnimationFrame(frame);
   };
+  const keys = attachInput(canvas, wake);
 
-  // --- input: drag to pan, wheel to zoom about the cursor ---
-  let drag: { x: number; y: number } | null = null;
-  canvas.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); });
-  canvas.addEventListener("pointerup", () => { drag = null; });
-  canvas.addEventListener("pointermove", (e) => {
-    if (!drag) return;
-    setCamera(pan(camera, e.clientX - drag.x, e.clientY - drag.y));
-    drag = { x: e.clientX, y: e.clientY };
-  });
-  canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const { w, h } = size();
-    setCamera(zoomAt(camera, w, h, e.offsetX, e.offsetY, Math.exp(e.deltaY * 0.002)));
-  }, { passive: false });
   addEventListener("hashchange", () => {
     const c = parseHash(location.hash);
-    if (c) { camera = c; invalidate(); }
+    if (c) { camera = c; render(); }
   });
-  new ResizeObserver(invalidate).observe(canvas);
+  new ResizeObserver(() => render()).observe(canvas);
 
   render();
   if (gl.getError() !== gl.NO_ERROR) throw new Error("WebGL error during the first frame");

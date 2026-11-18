@@ -7,12 +7,17 @@
   <style>
     html, body { margin: 0; height: 100%; background: #121419; overflow: hidden; }
     canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-    footer { position: fixed; right: 6px; bottom: 4px; font: 11px system-ui, sans-serif; color: #888; }
+    footer, #help, #hud { position: fixed; font: 12px system-ui, sans-serif; color: #889; pointer-events: none; }
+    footer { right: 6px; bottom: 4px; font-size: 11px; pointer-events: auto; }
+    #help { left: 8px; top: 6px; }
+    #hud { left: 8px; bottom: 4px; }
     footer a { color: inherit; }
   </style>
 </head>
 <body>
   <canvas></canvas>
+  <div id="help">click to look (Esc releases) · WASD / arrows move · E / Space up · Q / C down · Shift fast</div>
+  <div id="hud"></div>
   <footer>© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</footer>
   <script type="module" src="/src/main.ts"></script>
 </body>

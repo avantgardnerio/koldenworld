@@ -4,13 +4,13 @@
 import { ROAD_CLASSES, type RoadLineMesh } from "@game/world";
 
 const VERTEX = `#version 300 es
-uniform mat3 u_view;
+uniform mat4 u_view;
 uniform vec3 u_colors[${ROAD_CLASSES.length}];
 in vec2 a_pos;
 in uint a_class;
 out vec3 v_color;
 void main() {
-  gl_Position = vec4((u_view * vec3(a_pos, 1.0)).xy, 0.0, 1.0);
+  gl_Position = u_view * vec4(a_pos, 0.0, 1.0);
   v_color = u_colors[a_class];
 }`;
 
@@ -75,7 +75,7 @@ export function createRoadLayer(gl: WebGL2RenderingContext, mesh: RoadLineMesh, 
   return {
     draw(view) {
       gl.useProgram(program);
-      gl.uniformMatrix3fv(uView, false, view);
+      gl.uniformMatrix4fv(uView, false, view);
       gl.bindVertexArray(vao);
       gl.drawElements(gl.LINES, count, gl.UNSIGNED_INT, 0);
       gl.bindVertexArray(null);
