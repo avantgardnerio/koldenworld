@@ -7,6 +7,7 @@
 //   is_part        uint8                      0 / 1
 //   height         float32                    m, top of walls
 //   min_height     float32                    m, bottom of walls
+//   base           float32                    m, ground under the building in the frame (lowest point)
 //   height_source  dictionary<uint8, utf8>    "height" | "levels" | "default"
 //   rings          list<list<fixed_size_list<float32, 2>>>   outer first (CCW), holes CW; open rings
 
@@ -41,6 +42,7 @@ export function buildingsToArrow(b: Buildings, metadata: FileMetadata): Uint8Arr
     is_part: u8(b.isPart),
     height: f32(b.height),
     min_height: f32(b.minHeight),
+    base: f32(b.base),
     height_source: utf8Dictionary(2, new Uint8(), b.heightSource, HEIGHT_SOURCES),
     rings,
   }, b.count, metadata);
@@ -73,6 +75,7 @@ export function buildingsFromArrow(bytes: Uint8Array): { buildings: Buildings; m
       isPart: values(c("is_part"), count, Uint8Array, "buildings.is_part"),
       height: values(c("height"), count, Float32Array, "buildings.height"),
       minHeight: values(c("min_height"), count, Float32Array, "buildings.min_height"),
+      base: values(c("base"), count, Float32Array, "buildings.base"),
       heightSource: values(c("height_source"), count, Uint8Array, "buildings.height_source"),
       ringStart: outer.offsets,
       pointStart: inner.offsets,

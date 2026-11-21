@@ -1,8 +1,10 @@
 // The camera on the globe (decision 20): a geodetic position (f64) and an
 // orientation relative to east-north-up at that position, so north and up are
 // always local. Each step runs the flat fly camera (camera.ts) in the ENU
-// frame at the camera, then moves the camera to where that step landed on the
-// globe: a long flight follows the curve of the Earth.
+// frame on the ground below the camera, then moves the camera to where that
+// step landed on the globe: a long flight follows the curve of the Earth.
+// Speed and the minimum altitude go by height above the ground (terrain), and
+// the camera never ends a step below it.
 //
 // The renderer works in that same frame: the camera sits at (0, 0, h), and
 // every cell is placed by its frame-to-frame transform.
@@ -16,7 +18,7 @@ import { fromYawPitch, MIN_ALTITUDE, stepCamera, yawPitch, type Camera, type Cam
 export interface GlobeCamera {
   lat: number;
   lon: number;
-  h: number;    // m above the ellipsoid (the ground, until there is terrain)
+  h: number;    // m above the WGS84 ellipsoid (not above the ground, not above sea level)
   rot: Quat;    // relative to east-north-up here
 }
 
@@ -28,11 +30,16 @@ export const viewFrame = (g: GlobeCamera): Frame => enuFrame({ lat: g.lat, lon: 
 /** The camera in its own view frame. */
 export const localCamera = (g: GlobeCamera): Camera => ({ pos: [0, 0, g.h], rot: g.rot });
 
-export function stepGlobe(g: GlobeCamera, input: CameraInput, dt: number): GlobeCamera {
-  const s = stepCamera(localCamera(g), input, dt);
-  if (s.pos[0] === 0 && s.pos[1] === 0 && s.pos[2] === g.h) return { ...g, rot: s.rot };
-  const p = ecefToGeodetic(localToEcef(viewFrame(g), s.pos));
-  return { lat: p.lat, lon: p.lon, h: Math.max(MIN_ALTITUDE, p.h), rot: s.rot };
+/** Ground height (m above the ellipsoid) at a point. */
+export type Ground = (lat: number, lon: number) => number;
+
+export function stepGlobe(g: GlobeCamera, input: CameraInput, dt: number, ground: Ground = () => 0): GlobeCamera {
+  const g0 = ground(g.lat, g.lon);
+  const agl = g.h - g0;
+  const s = stepCamera({ pos: [0, 0, agl], rot: g.rot }, input, dt);
+  if (s.pos[0] === 0 && s.pos[1] === 0 && s.pos[2] === agl) return { ...g, h: Math.max(g.h, g0 + MIN_ALTITUDE), rot: s.rot };
+  const p = ecefToGeodetic(localToEcef(enuFrame({ lat: g.lat, lon: g.lon, h: g0 }), s.pos));
+  return { lat: p.lat, lon: p.lon, h: Math.max(ground(p.lat, p.lon) + MIN_ALTITUDE, p.h), rot: s.rot };
 }
 
 export function formatGlobeHash(g: GlobeCamera): string {

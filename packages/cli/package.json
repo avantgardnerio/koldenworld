@@ -8,6 +8,7 @@
   "dependencies": {
     "@game/db": "*",
     "@game/osm-import": "*",
-    "@game/world": "*"
+    "@game/world": "*",
+    "geotiff": "^2.1.3"
   }
 }

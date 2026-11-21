@@ -53,8 +53,10 @@ export function buildingMesh(b: Buildings): BuildingMesh {
   const groups = b.kinds.map((k) => BUILDING_GROUPS.indexOf(buildingGroup(k)));
 
   for (let i = 0; i < b.count; i++) {
-    const top = b.height[i]!, bottom = b.minHeight[i]!;
-    if (!(top > bottom)) continue;
+    if (!(b.height[i]! > b.minHeight[i]!)) continue;
+    // Heights are above the ground; base is the ground's lowest point under the building, so on a
+    // slope the uphill walls run into the ground rather than the building floating.
+    const top = b.base[i]! + b.height[i]!, bottom = b.base[i]! + b.minHeight[i]!;
     const wallMat = groups[b.kind[i]!]! * 2, roofMat = wallMat + 1;
     const sh = idShade(b.osmId[i]!);
     const r0 = b.ringStart[i]!, r1 = b.ringStart[i + 1]!;

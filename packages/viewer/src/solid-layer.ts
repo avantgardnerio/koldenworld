@@ -1,5 +1,8 @@
-// A lit 3D mesh: buildings. Depth-tested against everything drawn before it
-// and back-face culled (the operator emits front faces counterclockwise).
+// A lit 3D mesh: buildings and terrain. Depth-tested against everything drawn
+// before it. Buildings are back-face culled (the operator emits front faces
+// counterclockwise); terrain isn't (its skirts face either way). Terrain is lit
+// so flat ground keeps its base color and slopes darken or brighten with the
+// sun; it can draw one level of detail (a range of its indices).
 // Positions and normals are in a cell's frame, placed by its model matrix
 // (rigid, so it rotates normals too). Holds GPU handles only.
 
@@ -31,19 +34,22 @@ uniform vec3 u_eye;
 uniform vec3 u_sky;
 uniform vec2 u_fog;
 uniform vec3 u_sun;   // unit vector toward the sun
+uniform bool u_terrain;
 in vec3 v_world;
 in vec3 v_normal;
 in vec3 v_color;
 out vec4 color;
 void main() {
   vec3 n = normalize(v_normal);
-  float light = 0.55 + 0.45 * max(dot(n, u_sun), 0.0) + 0.08 * n.z;
+  float light = u_terrain
+    ? 0.25 + 0.75 * max(dot(n, u_sun), 0.0) / u_sun.z
+    : 0.55 + 0.45 * max(dot(n, u_sun), 0.0) + 0.08 * n.z;
   float d = distance(v_world, u_eye);
   color = vec4(mix(v_color * light, u_sky, smoothstep(u_fog.x, u_fog.y, d)), 1.0);
 }`;
 
 export interface SolidLayer {
-  draw(f: Frame, model: Float32Array, sun: readonly [number, number, number]): void;
+  draw(f: Frame, model: Float32Array, sun: readonly [number, number, number], range?: { start: number; count: number }): void;
   dispose(): void;
 }
 
@@ -70,11 +76,13 @@ function program(gl: WebGL2RenderingContext): WebGLProgram {
   return p;
 }
 
-export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh, colors: Float32Array): SolidLayer {
+export function createSolidLayer(
+  gl: WebGL2RenderingContext, mesh: BuildingMesh, colors: Float32Array, opts: { terrain?: boolean } = {},
+): SolidLayer {
   if (colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
   const p = program(gl);
   const u = (name: string) => gl.getUniformLocation(p, name);
-  const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uSun = u("u_sun");
+  const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uSun = u("u_sun"), uTerrain = u("u_terrain");
 
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
@@ -99,8 +107,9 @@ export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh,
   const count = mesh.indices.length;
 
   return {
-    draw(f, model, sun) {
-      if (count === 0) return;
+    draw(f, model, sun, range) {
+      const n = range?.count ?? count;
+      if (n === 0) return;
       gl.useProgram(p);
       gl.uniformMatrix4fv(uView, false, f.view);
       gl.uniformMatrix4fv(uModel, false, model);
@@ -109,10 +118,11 @@ export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh,
       gl.uniform3fv(uSky, f.sky);
       gl.uniform2f(uFog, f.fog[0], f.fog[1]);
       gl.uniform3f(uSun, sun[0], sun[1], sun[2]);
+      gl.uniform1i(uTerrain, opts.terrain ? 1 : 0);
       gl.depthFunc(gl.LEQUAL);
-      gl.enable(gl.CULL_FACE);
+      if (!opts.terrain) gl.enable(gl.CULL_FACE);
       gl.bindVertexArray(vao);
-      gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, 0);
+      gl.drawElements(gl.TRIANGLES, n, gl.UNSIGNED_INT, 4 * (range?.start ?? 0));
       gl.bindVertexArray(null);
       gl.disable(gl.CULL_FACE);
     },

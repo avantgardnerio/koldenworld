@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { CELL_LEVEL, CELL_TABLES, cellFromToken, cellLevel, type CellFiles } from "@game/world";
 import { CellService } from "./cells.ts";
 
-const ROUTE = /^\/cells\/([0-9a-f]{1,16})\/(nodes|edges|buildings)\.arrow$/;
+const ROUTE = new RegExp(`^/cells/([0-9a-f]{1,16})/(${CELL_TABLES.join("|")})\\.arrow$`);
 
 export function serve(port: number, log: (msg: string) => void): Promise<void> {
   const cells = new CellService(log);

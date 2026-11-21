@@ -11,7 +11,7 @@
 import type { Projection } from "./projection.ts";
 
 /** Bump when buildRoadGraph's output changes for the same input. */
-export const ROAD_GRAPH_VERSION = 1;
+export const ROAD_GRAPH_VERSION = 2;
 
 export const ROAD_CLASSES = [
   "motorway", "motorway_link",
@@ -40,6 +40,7 @@ export interface RoadNodes {
   count: number;
   x: Float32Array;           // m east, in the projection's frame
   y: Float32Array;           // m north
+  z: Float32Array;           // m up: the ground's height in the frame (0 until draped on terrain)
   osmId: Float64Array;
   edgeStart: Int32Array;     // count + 1 offsets into edgeList (CSR; Int32 like Arrow list offsets)
   edgeList: Uint32Array;     // incident edge ids; a self-loop is listed twice
@@ -63,6 +64,7 @@ export interface RoadGraph {
   nodes: RoadNodes;
   edges: RoadEdges;
   points: Float32Array;      // x, y interleaved; each edge's points include both end nodes
+  pointZ: Float32Array;      // z per point (0 until draped on terrain)
   names: string[];           // names[0] = ""
 }
 
@@ -176,6 +178,7 @@ export function buildRoadGraph(
       count: nodeCount,
       x: Float32Array.from(nodeX),
       y: Float32Array.from(nodeY),
+      z: new Float32Array(nodeCount),
       osmId: Float64Array.from(nodeOsm),
       edgeStart,
       edgeList,
@@ -194,6 +197,7 @@ export function buildRoadGraph(
       pointStart: Int32Array.from(e.pointStart),
     },
     points: Float32Array.from(points),
+    pointZ: new Float32Array(points.length / 2),
     names,
   };
 }

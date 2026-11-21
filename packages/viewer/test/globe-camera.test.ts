@@ -24,6 +24,15 @@ describe("globe camera", () => {
     expect(yawPitch(c.rot)[0] / DEG).toBeCloseTo(-90, 6);
   });
 
+  it("moves by height above the ground and never goes below it", () => {
+    const ground = (_lat: number, lon: number) => 1600 + (lon + 104.964699) * 100_000;  // rising eastward, ~50°
+    let c = { ...denver(-90), h: 1700 };  // 100 m above the ground, facing east
+    c = stepGlobe(c, forward, 0.1, ground);
+    expect((c.lon + 104.964699) * 85_000).toBeCloseTo(10, 0);  // 100 m/s at 100 m up, as on flat ground
+    for (let k = 0; k < 200; k++) c = stepGlobe(c, forward, 0.1, ground);
+    expect(c.h).toBeCloseTo(ground(c.lat, c.lon) + MIN_ALTITUDE, 6);  // ran into the rising ground; rides it
+  });
+
   it("only turns when looking", () => {
     const c = stepGlobe(denver(), { move: [0, 0, 0], look: [100, 0], fast: false }, 0.1);
     expect([c.lat, c.lon, c.h]).toEqual([39.758861, -104.964699, 100]);

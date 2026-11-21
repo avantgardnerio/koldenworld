@@ -6,7 +6,7 @@
 
 **M1: Data in.** Local PostGIS with roles and migrations, a one-time Overpass snapshot for 80205, converter upserting `road_ways`, road graph export to Arrow with zero-copy reads. (Done; committed fixtures still to do.)
 
-**M2: Map in the browser.** Raw WebGL2 viewer drawing the road graph from the Arrow files, URL-addressable camera, headless e2e pixel tests and screenshots. (Done: green ground, asphalt roads with real widths, lane markings, fog, fly camera, graph overlay, buildings with heights.) Then cells (decision 22): the world is cut into S2 cells, streamed within the horizon, and generated on demand from Overpass. Next: terrain, LOD for the far horizon, culling, areas (parks, water, parking lots).
+**M2: Map in the browser.** Raw WebGL2 viewer drawing the road graph from the Arrow files, URL-addressable camera, headless e2e pixel tests and screenshots. (Done: green ground, asphalt roads with real widths, lane markings, fog, fly camera, graph overlay, buildings with heights.) Then cells (decision 22): the world is cut into S2 cells, streamed within the horizon, and generated on demand from Overpass. Terrain from USGS 10 m (decision 24). Next: distant terrain for the far horizon, road grading (cuts and fills), ground color from land cover and elevation, procedural trees, areas (parks, water, parking lots).
 
 **M3: One car.** One car driving along edges, `cli view` text rendering, `cli repl`, first scenario and determinism tests, the same car drawn in the viewer; then the player drives with arcade physics.
 
@@ -23,7 +23,7 @@
 - **On foot:** is walking around part of the game, or only driving?
 - **Partition sizing:** S2 cells (decision 21); target items per partition and the rule for choosing cell levels.
 - **Large worlds:** stable entity IDs across partitions. (Precision is settled by decision 20.)
-- **Terrain source:** USGS 3DEP for the US, a global DEM (Copernicus GLO-30) elsewhere; resolution, and how roads are fitted to it (cuts, fills, bridges, tunnels).
+- **Terrain outside the US:** a bare-earth source (Copernicus GLO-30 is a surface model; FABDEM is bare earth but non-commercial); how roads are fitted to the ground (grading, bridges, tunnels).
 - **Long view distances** for flight: distant terrain LOD and depth precision (reversed-Z or logarithmic depth).
 - **Bulk OSM:** extracts work for Colorado (decision 23); open: updating from newer extracts, and how much of the continent to keep imported.
 - **Cross-engine determinism:** do replays need to match in Firefox and Safari, or is V8 (Node + Chrome) enough?

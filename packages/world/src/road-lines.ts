@@ -16,7 +16,8 @@ export interface Bounds {
 }
 
 export interface RoadLineMesh {
-  positions: Float32Array;  // x, y interleaved, m; the same buffer as graph.points
+  positions: Float32Array;  // x, y, z interleaved, m (z from graph.pointZ)
+  dims: 3;
   pointClass: Uint8Array;   // road class per point (index into ROAD_CLASSES)
   indices: Uint32Array;     // segment endpoints, 2 per segment
   bounds: Bounds;
@@ -63,5 +64,11 @@ export function roadLineMesh(g: RoadGraph): RoadLineMesh {
     if (y > maxY) maxY = y;
   }
 
-  return { positions: points, pointClass, indices, bounds: { minX, minY, maxX, maxY } };
+  const positions = new Float32Array(3 * pointCount);
+  for (let p = 0; p < pointCount; p++) {
+    positions[3 * p] = points[2 * p]!;
+    positions[3 * p + 1] = points[2 * p + 1]!;
+    positions[3 * p + 2] = g.pointZ[p]!;
+  }
+  return { positions, dims: 3, pointClass, indices, bounds: { minX, minY, maxX, maxY } };
 }

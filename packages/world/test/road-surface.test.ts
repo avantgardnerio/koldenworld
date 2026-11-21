@@ -15,7 +15,7 @@ const graphOf = (...ways: RoadWayInput[]) => buildRoadGraph(ways, enuProjection(
 /** Vertices of one material as [x, y] pairs. */
 function verts(m: SurfaceMesh, mat: SurfaceMaterial): [number, number][] {
   const out: [number, number][] = [];
-  for (let v = 0; v < m.material.length; v++) if (m.material[v] === mat) out.push([m.positions[2 * v]!, m.positions[2 * v + 1]!]);
+  for (let v = 0; v < m.material.length; v++) if (m.material[v] === mat) out.push([m.positions[3 * v]!, m.positions[3 * v + 1]!]);
   return out;
 }
 
@@ -25,8 +25,8 @@ function area(m: SurfaceMesh, mat: SurfaceMaterial): number {
   for (let i = 0; i < m.indices.length; i += 3) {
     const [a, b, c] = [m.indices[i]!, m.indices[i + 1]!, m.indices[i + 2]!];
     if (m.material[a] !== mat) continue;
-    const ax = m.positions[2 * a]!, ay = m.positions[2 * a + 1]!;
-    s += Math.abs((m.positions[2 * b]! - ax) * (m.positions[2 * c + 1]! - ay) - (m.positions[2 * c]! - ax) * (m.positions[2 * b + 1]! - ay)) / 2;
+    const ax = m.positions[3 * a]!, ay = m.positions[3 * a + 1]!;
+    s += Math.abs((m.positions[3 * b]! - ax) * (m.positions[3 * c + 1]! - ay) - (m.positions[3 * c]! - ax) * (m.positions[3 * b + 1]! - ay)) / 2;
   }
   return s;
 }

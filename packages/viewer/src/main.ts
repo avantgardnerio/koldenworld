@@ -17,10 +17,11 @@
 // what was drawn without decoding screenshots.
 
 import {
-  buildingMesh, CELL_LEVEL, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellGroundMesh, cellsWithin, cellToken,
-  frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, type CellFiles, type CellId, type Frame as CellFrame,
+  buildingMesh, CELL_LEVEL, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
+  type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
-import { fromYawPitch, speed, viewProjection } from "./camera.ts";
+import { fromYawPitch, MIN_ALTITUDE, speed, viewProjection } from "./camera.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
@@ -58,7 +59,12 @@ const KEEP_FACTOR = 1.3;
 /** The load radius moves in steps of this (m), so climbing doesn't recompute the wanted cells every frame. */
 const RADIUS_STEP = 500;
 const MAX_DT = 0.1;  // s; a stalled tab must not teleport the camera
-const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 400, rot: fromYawPitch(0, -35 * Math.PI / 180) };
+/** Downtown Denver, ~400 m above the ground (which is ~1,575 m above the ellipsoid there). */
+const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 1975, rot: fromYawPitch(0, -35 * Math.PI / 180) };
+/** Terrain level of detail (index into TERRAIN_LOD_STEPS) by distance to the cell's center, m. */
+const TERRAIN_LOD_DISTANCES = [4000, 8000, 16_000];
+/** Roads drawn this far toward the camera from the ground they lie on (m, plus 0.1% of distance). */
+const ROAD_BIAS = 0.3;
 
 const params = new URLSearchParams(location.search);
 const fixedRadius = params.has("radius") ? Number(params.get("radius")) : undefined;
@@ -68,7 +74,7 @@ const status: ViewerStatus = (window.viewer = {
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
 
-/** What can be seen from this height, out to MAX_RADIUS. */
+/** What can be seen from this height above the ground, out to MAX_RADIUS. */
 const loadRadius = (h: number) =>
   fixedRadius ?? Math.min(MAX_RADIUS, Math.ceil(horizonDistance(h) / RADIUS_STEP) * RADIUS_STEP);
 
@@ -91,9 +97,12 @@ function reach(points: ArrayLike<number>, stride: number): number {
 interface CellGpu {
   frame: CellFrame;
   missing: boolean;
-  radius: number;  // bounding sphere around the frame's origin, m: ground, roads, buildings to their tops
+  radius: number;  // bounding sphere around (0, 0, centerZ) in the frame, m: terrain, roads, building tops
+  centerZ: number;
   model: Float32Array;  // this frame's cell → view transform, reused every frame
-  ground: FlatLayer;
+  terrain: CellTerrain;
+  ground: SolidLayer;
+  lods: { start: number; count: number }[];
   roads?: FlatLayer;
   lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
   graph?: FlatLayer;
@@ -112,27 +121,34 @@ async function start(): Promise<void> {
     const blobs = await Promise.all(CELL_TABLES.map((t) => getBlob(`/cells/${token}/${t}.arrow`)));
     const frame = cellFrame(cell);
     const zero = { nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0 };
-    const groundMesh = cellGroundMesh(cell, frame);
-    const ground = createFlatLayer(gl!, { ...groundMesh, dims: 3 }, { mode: gl!.TRIANGLES, colors: GROUND, fadeToBase: false });
-    const groundReach = reach(groundMesh.positions, 3);
+    const missing = blobs.some((b) => b === null);
+    const c = missing ? null : cellFromArrow(Object.fromEntries(CELL_TABLES.map((t, i) => [t, blobs[i]!])) as unknown as CellFiles);
+    if (c && c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);
+    const terrain = c?.terrain ?? flatTerrain();
+    const tm = terrainMesh(cell, frame, terrain);
+    const ground = createSolidLayer(gl!, tm, GROUND, { terrain: true });
+    const groundReach = reach(tm.positions, 3);
     const model = new Float32Array(16);
-    if (blobs.some((b) => b === null)) return { frame, missing: true, radius: groundReach, model, ground, counts: zero };
-    const files = Object.fromEntries(CELL_TABLES.map((t, i) => [t, blobs[i]!])) as unknown as CellFiles;
-    const c = cellFromArrow(files);
-    if (c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);
+    // Vertical extent: terrain (with its skirts) and building tops.
+    let z0 = Infinity, z1 = -Infinity;
+    for (let i = 2; i < tm.positions.length; i += 3) { z0 = Math.min(z0, tm.positions[i]!); z1 = Math.max(z1, tm.positions[i]!); }
+    const sphere = (flat: number) => ({ centerZ: (z0 + z1) / 2, radius: Math.hypot(flat, (z1 - z0) / 2) });
+    if (!c) return { frame, missing: true, ...sphere(groundReach), model, terrain, ground, lods: tm.lods, counts: zero };
     const surface = roadSurfaceMesh(c.graph);
     const lines = roadLineMesh(c.graph);
     const tris = buildingMesh(c.buildings);
     // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
     const flat = Math.max(groundReach, reach(c.graph.points, 2) + 20, reach(c.buildings.points, 2));
-    const top = c.buildings.height.reduce((m, v) => Math.max(m, v), 0);
+    for (let i = 0; i < c.buildings.count; i++) z1 = Math.max(z1, c.buildings.base[i]! + c.buildings.height[i]!);
     return {
       frame,
       missing: false,
-      radius: Math.hypot(flat, top),
+      ...sphere(flat),
       model,
+      terrain,
       ground,
-      roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fadeToBase: true }),
+      lods: tm.lods,
+      roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fadeToBase: true, bias: ROAD_BIAS }),
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB),
       counts: {
@@ -156,11 +172,20 @@ async function start(): Promise<void> {
   let camera: GlobeCamera = parseGlobeHash(location.hash) ?? DEFAULT_CAMERA;
   history.replaceState(null, "", formatGlobeHash(camera));
 
+  /** The ground's height under a point, from its loaded cell; the last known height while it loads. */
+  let lastGround = 0;
+  const groundAt = (lat: number, lon: number): number => {
+    const cell = cellFromLatLon(lat, lon, CELL_LEVEL);
+    const g = streamer.get(cell);
+    if (g) lastGround = terrainHeightAt(cell, g.terrain, lat, lon);
+    return lastGround;
+  };
+
   // --- which cells: refreshed when the camera enters another cell or the radius steps ---
   let refreshedCell: CellId | null = null;
   let refreshedRadius = 0;
   const refreshCells = () => {
-    const radius = loadRadius(camera.h);
+    const radius = loadRadius(camera.h - groundAt(camera.lat, camera.lon));
     const here = cellFromLatLon(camera.lat, camera.lon, CELL_LEVEL);
     if (here === refreshedCell && radius === refreshedRadius) return;
     refreshedCell = here;
@@ -186,6 +211,9 @@ async function start(): Promise<void> {
   const visible: CellGpu[] = [];  // reused every frame
   const render = () => {
     const t0 = performance.now();
+    // Terrain may have arrived under the camera since it last moved.
+    const ground = groundAt(camera.lat, camera.lon);
+    if (camera.h < ground + MIN_ALTITUDE) camera = { ...camera, h: ground + MIN_ALTITUDE };
     refreshCells();
     const dpr = devicePixelRatio;
     const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
@@ -212,24 +240,32 @@ async function start(): Promise<void> {
     visible.length = 0;
     streamer.forEachReady((g) => {
       frameToFrame(g.frame, vf, g.model);
-      if (sphereVisible(planes, g.model[12]!, g.model[13]!, g.model[14]!, g.radius)) visible.push(g);
+      const m = g.model, cz = g.centerZ;
+      if (sphereVisible(planes, m[12]! + m[8]! * cz, m[13]! + m[9]! * cz, m[14]! + m[10]! * cz, g.radius)) visible.push(g);
     });
     status.cells.drawn = visible.length;
-    // Ground layers in painter's order across all cells (writing depth), then depth-tested buildings.
-    for (const g of visible) g.ground.draw(f, g.model);
+    // Terrain first, at a level of detail by distance (skirts hide the cracks between levels), then
+    // roads nudged toward the camera, then buildings; everything depth-tested.
+    for (const g of visible) {
+      const d = Math.hypot(g.model[12]!, g.model[13]!, g.model[14]! + g.centerZ - camera.h);
+      let lod = 0;
+      while (lod < TERRAIN_LOD_DISTANCES.length && d > TERRAIN_LOD_DISTANCES[lod]!) lod++;
+      g.ground.draw(f, g.model, SUN, g.lods[lod]);
+    }
     for (const g of visible) g.roads?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     if (status.graphOverlay) {
       for (const g of visible) {
-        if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false });
+        if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false, bias: 1 });
         g.graph?.draw(f, g.model);
       }
     }
     status.frames++;
     cpuMs = performance.now() - t0;
     const c = status.cells;
-    hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · alt ${camera.h.toFixed(0)} m · ` +
-      `${speed(local, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing}` +
+    const agl = camera.h - ground;
+    hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
+      `(${ground.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing}` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
       `within ${(status.radius / 1000).toFixed(1)} km · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
   };
@@ -250,7 +286,7 @@ async function start(): Promise<void> {
       history.replaceState(null, "", formatGlobeHash(camera));
       return;
     }
-    camera = stepGlobe(camera, input, dt);
+    camera = stepGlobe(camera, input, dt, groundAt);
     render();
     requestAnimationFrame(frame);
   };

@@ -166,6 +166,48 @@ export function cellOutline(id: CellId): { center: { lat: number; lon: number };
   return { center: at(i + 0.5, j + 0.5), corners: [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)] };
 }
 
+/**
+ * An (n + 1) × (n + 1) lattice of points evenly spaced in the cell's (s, t)
+ * square, row by row (t outer, s inner), as lat, lon pairs. Neighbors at the
+ * same level produce identical points along their shared edge.
+ */
+export function cellLattice(id: CellId, n: number): Float64Array {
+  const { face, i, j, level } = cellFaceIJ(id);
+  const size = 2 ** level;
+  const out = new Float64Array(2 * (n + 1) ** 2);
+  for (let b = 0, k = 0; b <= n; b++) {
+    const v = stToUV((j + b / n) / size);
+    for (let a = 0; a <= n; a++, k += 2) {
+      const p = xyzToLatLon(faceUVToXyz(face, stToUV((i + a / n) / size), v));
+      out[k] = p.lat;
+      out[k + 1] = p.lon;
+    }
+  }
+  return out;
+}
+
+/** Where a point lies in a cell's (s, t) square, as fractions (outside [0, 1] when the point is outside the cell). */
+export function cellFractions(id: CellId, lat: number, lon: number): [fs: number, ft: number] {
+  const { face, i, j, level } = cellFaceIJ(id);
+  const size = 2 ** level;
+  // Project onto the cell's face even if the point's own face differs (it is near the edge).
+  const [x, y, z] = latLonToXyz(lat, lon);
+  const [, u, v] = faceUVOn(face, [x, y, z]);
+  return [uvToST(u) * size - i, uvToST(v) * size - j];
+}
+
+/** (u, v) of a direction on a given face (gnomonic), whichever face the direction is closest to. */
+function faceUVOn(face: number, [x, y, z]: Xyz): [number, number, number] {
+  switch (face) {
+    case 0: return [face, y / x, z / x];
+    case 1: return [face, -x / y, z / y];
+    case 2: return [face, -x / z, -y / z];
+    case 3: return [face, z / x, y / x];
+    case 4: return [face, z / y, -x / y];
+    default: return [face, -y / z, -x / z];
+  }
+}
+
 /** The point at fractions (fs, ft) ∈ [0, 1]² across the cell, in its (s, t) square. */
 export function cellPoint(id: CellId, fs: number, ft: number): { lat: number; lon: number } {
   const { face, i, j, level } = cellFaceIJ(id);

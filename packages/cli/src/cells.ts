@@ -12,9 +12,10 @@ import path from "node:path";
 import { fetchAreas, hasFetch, loadBuildings, loadRoadWays, type Bbox } from "@game/db";
 import type { OverpassResponse } from "@game/osm-import";
 import {
-  BUILDINGS_VERSION, buildCell, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
+  BUILDINGS_VERSION, buildCell, drapeCell, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
   cellToken, geodeticToEcef, ROAD_GRAPH_VERSION, type CellFiles, type CellId,
 } from "@game/world";
+import { Elevation } from "./elevation.ts";
 import { downloadOverpass } from "./fetch-osm.ts";
 import { importSnapshot } from "./import.ts";
 import { DATA_DIR } from "./paths.ts";
@@ -42,6 +43,25 @@ export function cellBox(cell: CellId, marginM: number): Bbox {
   };
 }
 
+/** A lat/lon box around everything a built cell owns (its objects reach past its edge), padded by a margin. */
+function contentBox(c: CellContents, marginM: number): Bbox {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const pts of [c.graph.points, c.buildings.points]) {
+    for (let i = 0; i < pts.length; i += 2) {
+      x0 = Math.min(x0, pts[i]!); x1 = Math.max(x1, pts[i]!);
+      y0 = Math.min(y0, pts[i + 1]!); y1 = Math.max(y1, pts[i + 1]!);
+    }
+  }
+  const box = cellBox(c.cell, marginM);
+  if (x0 > x1) return box;
+  const back = enuUnprojection(c.frame);
+  const corners = [back(x0 - marginM, y0 - marginM), back(x1 + marginM, y1 + marginM), back(x0 - marginM, y1 + marginM), back(x1 + marginM, y0 - marginM)];
+  return {
+    south: Math.min(box.south, ...corners.map((p) => p[1])), north: Math.max(box.north, ...corners.map((p) => p[1])),
+    west: Math.min(box.west, ...corners.map((p) => p[0])), east: Math.max(box.east, ...corners.map((p) => p[0])),
+  };
+}
+
 /** The download cells whose data a cell's export needs: everything within its reach plus the margin. */
 export function fetchCellsFor(cell: CellId): CellId[] {
   const c = cellCenter(cell);
@@ -63,6 +83,7 @@ export class CellService {
   private queue: Promise<unknown> = Promise.resolve();  // downloads, one at a time
   private fetches = new Map<CellId, Promise<void>>();
   private covered?: Promise<Set<string>>;  // areas already imported, loaded once
+  private elevation = new Elevation();
   private builds = new Map<CellId, Promise<CellFiles>>();
 
   private log: (msg: string) => void;
@@ -87,8 +108,8 @@ export class CellService {
     if (existsSync(manifest)) {
       const m = JSON.parse(await readFile(manifest, "utf8")) as typeof MANIFEST_VERSION;
       if (Object.entries(MANIFEST_VERSION).every(([k, v]) => m[k as keyof typeof m] === v)) {
-        const [nodes, edges, buildings] = await Promise.all(CELL_TABLES.map((t) => readFile(path.join(dir, `${t}.arrow`))));
-        return { nodes: nodes!, edges: edges!, buildings: buildings! };
+        const files = await Promise.all(CELL_TABLES.map((t) => readFile(path.join(dir, `${t}.arrow`))));
+        return Object.fromEntries(CELL_TABLES.map((t, i) => [t, files[i]!])) as unknown as CellFiles;
       }
     }
     return this.build(cell, dir, manifest);
@@ -111,9 +132,13 @@ export class CellService {
       loadRoadWays(box).then((w) => { lap("roads"); return w; }),
       loadBuildings(box).then((b) => { lap("buildings"); return b; }),
     ]);
-    const contents = buildCell(cell, ways, buildingInputs);
-    const files = cellToArrow(contents);
+    const flat = buildCell(cell, ways, buildingInputs);
     lap("build");
+    const height = await this.elevation.region(contentBox(flat, 100));
+    lap("dem");
+    const contents = drapeCell(flat, height);
+    const files = cellToArrow(contents);
+    lap("drape");
     await mkdir(dir, { recursive: true });
     for (const t of CELL_TABLES) await writeAtomic(path.join(dir, `${t}.arrow`), files[t]);
     await writeAtomic(manifest, JSON.stringify({

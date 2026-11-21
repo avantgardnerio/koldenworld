@@ -5,12 +5,16 @@ export {
 } from "./geodesy.ts";
 export {
   cellCenter, cellChildren, cellContains, cellCorners, cellEdgeNeighbors, cellFace, cellFrame, cellFromInt64,
-  cellFromLatLon, cellFromToken, cellLevel, cellOutline, cellParent, cellPoint, cellToInt64, cellToken, MAX_LEVEL, type CellId,
+  cellFractions, cellFromLatLon, cellFromToken, cellLattice, cellLevel, cellOutline, cellParent, cellPoint, cellToInt64, cellToken, MAX_LEVEL, type CellId,
 } from "./s2.ts";
 export {
   buildCell, CELL_LEVEL, CELL_TABLES, CELL_VERSION, cellFromArrow, cellGroundMesh, cellsWithin, cellToArrow, horizonDistance,
   ownerPoint, type CellContents, type CellFiles, type GroundMesh,
 } from "./cell.ts";
+export {
+  drapeCell, flatTerrain, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,
+  terrainToArrow, type CellTerrain, type HeightFn, type TerrainMesh,
+} from "./terrain.ts";
 export {
   buildRoadGraph, componentSizes, ROAD_CLASSES, ROAD_GRAPH_VERSION,
   type RoadClass, type RoadEdges, type RoadGraph, type RoadNodes, type RoadWayInput,

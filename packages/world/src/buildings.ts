@@ -8,7 +8,7 @@
 
 import type { Projection } from "./projection.ts";
 
-export const BUILDINGS_VERSION = 1;
+export const BUILDINGS_VERSION = 2;
 
 /** Where a building's height came from. */
 export const HEIGHT_SOURCES = ["height", "levels", "default"] as const;
@@ -37,6 +37,7 @@ export interface Buildings {
   isPart: Uint8Array;       // 0 / 1
   height: Float32Array;
   minHeight: Float32Array;
+  base: Float32Array;       // m up in the frame: the lowest ground under the outer ring (0 until draped)
   heightSource: Uint8Array; // index into HEIGHT_SOURCES
   ringStart: Int32Array;    // count + 1 offsets into rings (CSR; Int32 like Arrow list offsets)
   pointStart: Int32Array;   // rings + 1 offsets into points
@@ -98,6 +99,7 @@ export function buildBuildings(inputs: BuildingInput[], project: Projection): Bu
     isPart: new Uint8Array(count),
     height: new Float32Array(count),
     minHeight: new Float32Array(count),
+    base: new Float32Array(count),
     heightSource: new Uint8Array(count),
     ringStart: new Int32Array(count + 1),
     pointStart: new Int32Array(ringTotal + 1),

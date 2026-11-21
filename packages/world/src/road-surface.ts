@@ -21,7 +21,8 @@ export const SurfaceMaterial = { Asphalt: 0, Yellow: 1, White: 2 } as const;
 export type SurfaceMaterial = (typeof SurfaceMaterial)[keyof typeof SurfaceMaterial];
 
 export interface SurfaceMesh {
-  positions: Float32Array;  // x, y interleaved, m
+  positions: Float32Array;  // x, y, z interleaved, m (z from the graph: the ground along each centerline)
+  dims: 3;
   material: Uint8Array;     // SurfaceMaterial per vertex
   indices: Uint32Array;     // triangles
 }
@@ -59,19 +60,20 @@ export function edgeHalfWidth(g: RoadGraph, e: number): number {
 // --- growable typed buffers -------------------------------------------------
 
 class MeshBuilder {
-  private pos = new Float32Array(1 << 14);
+  private pos = new Float32Array(3 << 13);
   private mat = new Uint8Array(1 << 13);
   private idx = new Uint32Array(1 << 14);
   vertices = 0;
   private indexCount = 0;
 
-  vertex(x: number, y: number, m: SurfaceMaterial): number {
+  vertex(x: number, y: number, z: number, m: SurfaceMaterial): number {
     if (this.vertices === this.mat.length) {
       this.pos = grow(this.pos, this.pos.length * 2);
       this.mat = grow(this.mat, this.mat.length * 2);
     }
-    this.pos[2 * this.vertices] = x;
-    this.pos[2 * this.vertices + 1] = y;
+    this.pos[3 * this.vertices] = x;
+    this.pos[3 * this.vertices + 1] = y;
+    this.pos[3 * this.vertices + 2] = z;
     this.mat[this.vertices] = m;
     return this.vertices++;
   }
@@ -85,7 +87,8 @@ class MeshBuilder {
 
   finish(): SurfaceMesh {
     return {
-      positions: this.pos.slice(0, 2 * this.vertices),
+      positions: this.pos.slice(0, 3 * this.vertices),
+      dims: 3,
       material: this.mat.slice(0, this.vertices),
       indices: this.idx.slice(0, this.indexCount),
     };
@@ -100,7 +103,7 @@ function grow<T extends Float32Array | Uint8Array | Uint32Array>(a: T, n: number
 
 // --- polylines ----------------------------------------------------------------
 
-type Polyline = number[];  // x, y interleaved
+type Polyline = number[];  // x, y, z interleaved; lengths and offsets are horizontal (x, y)
 
 /** The edge's points, without consecutive duplicates. */
 function edgePolyline(g: RoadGraph, e: number): Polyline {
@@ -108,14 +111,14 @@ function edgePolyline(g: RoadGraph, e: number): Polyline {
   for (let p = g.edges.pointStart[e]!; p < g.edges.pointStart[e + 1]!; p++) {
     const x = g.points[2 * p]!, y = g.points[2 * p + 1]!;
     const n = out.length;
-    if (n === 0 || Math.abs(x - out[n - 2]!) > 1e-3 || Math.abs(y - out[n - 1]!) > 1e-3) out.push(x, y);
+    if (n === 0 || Math.abs(x - out[n - 3]!) > 1e-3 || Math.abs(y - out[n - 2]!) > 1e-3) out.push(x, y, g.pointZ[p]!);
   }
   return out;
 }
 
 function length(pl: Polyline): number {
   let s = 0;
-  for (let i = 2; i < pl.length; i += 2) s += Math.hypot(pl[i]! - pl[i - 2]!, pl[i + 1]! - pl[i - 1]!);
+  for (let i = 3; i < pl.length; i += 3) s += Math.hypot(pl[i]! - pl[i - 3]!, pl[i + 1]! - pl[i - 2]!);
   return s;
 }
 
@@ -123,17 +126,15 @@ function length(pl: Polyline): number {
 function slice(pl: Polyline, a: number, b: number): Polyline {
   const out: Polyline = [];
   let s = 0;
-  for (let i = 2; i < pl.length; i += 2) {
-    const x0 = pl[i - 2]!, y0 = pl[i - 1]!, x1 = pl[i]!, y1 = pl[i + 1]!;
-    const len = Math.hypot(x1 - x0, y1 - y0);
+  const at = (i: number, t: number) => {
+    for (let k = 0; k < 3; k++) out.push(pl[i - 3 + k]! + (pl[i + k]! - pl[i - 3 + k]!) * t);
+  };
+  for (let i = 3; i < pl.length; i += 3) {
+    const len = Math.hypot(pl[i]! - pl[i - 3]!, pl[i + 1]! - pl[i - 2]!);
     const s1 = s + len;
     if (s1 > a && s < b) {
-      if (out.length === 0) {
-        const t = (a - s) / len;
-        out.push(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
-      }
-      const t = Math.min(1, (b - s) / len);
-      out.push(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+      if (out.length === 0) at(i, (a - s) / len);
+      at(i, Math.min(1, (b - s) / len));
     }
     s = s1;
     if (s >= b) break;
@@ -146,7 +147,7 @@ function slice(pl: Polyline, a: number, b: number): Polyline {
  * mitered joints. Two vertices per point, two triangles per segment.
  */
 function ribbon(m: MeshBuilder, pl: Polyline, o0: number, o1: number, mat: SurfaceMaterial): void {
-  const n = pl.length / 2;
+  const n = pl.length / 3;
   if (n < 2) return;
   let prev = -1;
   for (let i = 0; i < n; i++) {
@@ -154,7 +155,7 @@ function ribbon(m: MeshBuilder, pl: Polyline, o0: number, o1: number, mat: Surfa
     let nx = 0, ny = 0;
     for (const j of [i - 1, i]) {
       if (j < 0 || j >= n - 1) continue;
-      const dx = pl[2 * j + 2]! - pl[2 * j]!, dy = pl[2 * j + 3]! - pl[2 * j + 1]!;
+      const dx = pl[3 * j + 3]! - pl[3 * j]!, dy = pl[3 * j + 4]! - pl[3 * j + 1]!;
       const len = Math.hypot(dx, dy);
       nx += dy / len;
       ny += -dx / len;
@@ -163,14 +164,15 @@ function ribbon(m: MeshBuilder, pl: Polyline, o0: number, o1: number, mat: Surfa
     // Miter: scale so the offset is correct perpendicular to both segments.
     let k = 1;
     if (i > 0 && i < n - 1) {
-      const dx = pl[2 * i + 2]! - pl[2 * i]!, dy = pl[2 * i + 3]! - pl[2 * i + 1]!;
+      const dx = pl[3 * i + 3]! - pl[3 * i]!, dy = pl[3 * i + 4]! - pl[3 * i + 1]!;
       const cos = ((nx / nl) * dy - (ny / nl) * dx) / Math.hypot(dx, dy);
       k = Math.min(1 / Math.max(cos, 1e-6), MITER_LIMIT);
     }
     const ux = (nx / nl) * k, uy = (ny / nl) * k;
-    const x = pl[2 * i]!, y = pl[2 * i + 1]!;
-    const a = m.vertex(x + ux * o0, y + uy * o0, mat);
-    const b = m.vertex(x + ux * o1, y + uy * o1, mat);
+    // Level across the road: both edges take the centerline's height.
+    const x = pl[3 * i]!, y = pl[3 * i + 1]!, z = pl[3 * i + 2]!;
+    const a = m.vertex(x + ux * o0, y + uy * o0, z, mat);
+    const b = m.vertex(x + ux * o1, y + uy * o1, z, mat);
     if (prev >= 0) {
       m.triangle(prev, prev + 1, b);
       m.triangle(prev, b, a);
@@ -179,11 +181,11 @@ function ribbon(m: MeshBuilder, pl: Polyline, o0: number, o1: number, mat: Surfa
   }
 }
 
-function disc(m: MeshBuilder, x: number, y: number, r: number): void {
-  const c = m.vertex(x, y, SurfaceMaterial.Asphalt);
+function disc(m: MeshBuilder, x: number, y: number, z: number, r: number): void {
+  const c = m.vertex(x, y, z, SurfaceMaterial.Asphalt);
   for (let i = 0; i < DISC_SEGMENTS; i++) {
     const t = (2 * Math.PI * i) / DISC_SEGMENTS;
-    m.vertex(x + r * Math.cos(t), y + r * Math.sin(t), SurfaceMaterial.Asphalt);
+    m.vertex(x + r * Math.cos(t), y + r * Math.sin(t), z, SurfaceMaterial.Asphalt);
   }
   for (let i = 0; i < DISC_SEGMENTS; i++) m.triangle(c, c + 1 + i, c + 1 + ((i + 1) % DISC_SEGMENTS));
 }
@@ -206,11 +208,11 @@ export function roadSurfaceMesh(g: RoadGraph): SurfaceMesh {
   const degree = (n: number) => g.nodes.edgeStart[n + 1]! - g.nodes.edgeStart[n]!;
   const lines: Polyline[] = [];
 
-  for (let n = 0; n < g.nodes.count; n++) disc(m, g.nodes.x[n]!, g.nodes.y[n]!, radius[n]!);
+  for (let n = 0; n < g.nodes.count; n++) disc(m, g.nodes.x[n]!, g.nodes.y[n]!, g.nodes.z[n]!, radius[n]!);
 
   for (let e = 0; e < g.edges.count; e++) {
     const pl = edgePolyline(g, e);
-    if (pl.length < 4) continue;
+    if (pl.length < 6) continue;
     lines[e] = pl;
     const hw = edgeHalfWidth(g, e);
     ribbon(m, pl, -hw, hw, SurfaceMaterial.Asphalt);

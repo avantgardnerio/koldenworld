@@ -32,7 +32,7 @@ See decision 20 in [decisions.md](decisions.md).
 - Local positions come from true lat/lon/height, so neighboring partitions agree exactly at shared points.
 - Heights are WGS84 ellipsoidal; geoid-based sources (most elevation models) are converted at import.
 - Lat/lon only exists at the import boundary and in Postgres.
-- Cells (decision 22) store roads and buildings 2D on the cell's tangent plane (z dropped: a few cm at the edges); heights arrive with terrain.
+- Cells (decision 22) store road points and nodes with z (the ground's height, draped), buildings with a base height, and a terrain lattice of heights above the ellipsoid (decision 24).
 
 ## IDs
 

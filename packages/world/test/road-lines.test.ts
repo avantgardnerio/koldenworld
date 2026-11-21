@@ -17,8 +17,9 @@ const graph = buildRoadGraph([
 describe("roadLineMesh", () => {
   const mesh = roadLineMesh(graph);
 
-  it("uses the graph's point buffer without copying", () => {
-    expect(mesh.positions).toBe(graph.points);
+  it("places the graph's points in 3D, with their heights", () => {
+    expect(mesh.positions.length).toBe((graph.points.length / 2) * 3);
+    expect([mesh.positions[3], mesh.positions[4], mesh.positions[5]]).toEqual([graph.points[2], graph.points[3], graph.pointZ[1]]);
   });
 
   it("emits one segment per consecutive point pair, never across edges", () => {

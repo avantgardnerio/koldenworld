@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildCell, CELL_LEVEL, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellGroundMesh, cellsWithin,
+  buildCell, CELL_LEVEL, CELL_VERSION, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellGroundMesh, cellsWithin,
   cellToArrow, ecefToLocal, enuFrame, enuUnprojection, frameToFrame, geodeticToEcef, horizonDistance, transformPoint,
   type BuildingInput, type RoadWayInput, type Vec3,
 } from "../src/index.ts";
@@ -74,7 +74,7 @@ describe("buildCell", () => {
   it("round-trips through Arrow with the cell in the metadata", () => {
     const back = cellFromArrow(cellToArrow(A, { source: "test" }));
     expect(back.cell).toBe(a);
-    expect(back.metadata).toMatchObject({ cellVersion: 1, source: "test" });
+    expect(back.metadata).toMatchObject({ cellVersion: CELL_VERSION, source: "test" });
     expect(back.graph.edges.count).toBe(A.graph.edges.count);
     expect(back.buildings.count).toBe(A.buildings.count);
   });

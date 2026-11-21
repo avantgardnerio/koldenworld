@@ -45,6 +45,12 @@ export class CellStreamer<T> {
     this.pump();
   }
 
+  /** A loaded cell's data, if it is loaded. */
+  get(cell: CellId): T | undefined {
+    const slot = this.slots.get(cell);
+    return slot?.state === "ready" ? slot.data : undefined;
+  }
+
   /** Each loaded cell's data, without allocating (for the render loop). */
   forEachReady(fn: (data: T) => void): void {
     for (const slot of this.slots.values()) if (slot.state === "ready") fn(slot.data!);

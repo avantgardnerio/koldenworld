@@ -10,7 +10,8 @@
 //   nodes.arrow                          edges.arrow
 //   x         float32                    from        uint32
 //   y         float32                    to          uint32
-//   osm_id    float64                    class       dictionary<uint8, utf8>
+//   z         float32                    class       dictionary<uint8, utf8>
+//   osm_id    float64
 //   edges     list<uint32>               lanes_fwd   uint8
 //                                        lanes_back  uint8
 //                                        speed_limit float32   m/s
@@ -18,6 +19,7 @@
 //                                        name        dictionary<uint32, utf8>; "" = unnamed
 //                                        osm_way_id  float64
 //                                        points      list<fixed_size_list<float32, 2>>  x, y in m
+//                                        point_z     list<float32>  z per point, m (same offsets as points)
 
 import { Field, FixedSizeList, Float32, List, makeData, Uint32, Uint8 } from "apache-arrow";
 import {
@@ -60,6 +62,7 @@ export function roadGraphToArrow(g: RoadGraph, metadata: GraphMetadata): RoadGra
     nodes: toIPC({
       x: f32(nodes.x),
       y: f32(nodes.y),
+      z: f32(nodes.z),
       osm_id: f64(nodes.osmId),
       edges: incident,
     }, nodes.count, metadata),
@@ -74,6 +77,13 @@ export function roadGraphToArrow(g: RoadGraph, metadata: GraphMetadata): RoadGra
       name: utf8Dictionary(1, new Uint32(), edges.name, g.names),
       osm_way_id: f64(edges.osmWayId),
       points,
+      point_z: makeData({
+        type: new List(new Field("z", new Float32(), false)),
+        length: edges.count,
+        nullCount: 0,
+        valueOffsets: edges.pointStart,
+        child: f32(g.pointZ),
+      }),
     }, edges.count, metadata),
   };
 }
@@ -91,6 +101,7 @@ export function roadGraphFromArrow(files: RoadGraphFiles): { graph: RoadGraph; m
     count: nodeCount,
     x: values(nc("x"), nodeCount, Float32Array, "nodes.x"),
     y: values(nc("y"), nodeCount, Float32Array, "nodes.y"),
+    z: values(nc("z"), nodeCount, Float32Array, "nodes.z"),
     osmId: values(nc("osm_id"), nodeCount, Float64Array, "nodes.osm_id"),
     edgeStart: incident.offsets,
     edgeList: values(incident.child, incident.offsets[nodeCount]!, Uint32Array, "nodes.edges"),
@@ -122,6 +133,7 @@ export function roadGraphFromArrow(files: RoadGraphFiles): { graph: RoadGraph; m
       nodes,
       edges,
       points: values(pts.child.children[0]!, pointCount * 2, Float32Array, "edges.points"),
+      pointZ: values(listParts(ec("point_z"), "edges.point_z").child, pointCount, Float32Array, "edges.point_z"),
       names: dictionaryStrings(nameData, "edges.name"),
     },
     metadata: { ...n.metadata, ...e.metadata },
