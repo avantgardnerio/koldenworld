@@ -221,13 +221,13 @@ async function start(): Promise<void> {
     hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · alt ${camera.h.toFixed(0)} m · ` +
       `${speed(local, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing}` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
-      `within ${(status.radius / 1000).toFixed(1)} km · ${running ? `${fps.toFixed(0)} fps` : "idle"}, ${cpuMs.toFixed(1)} ms CPU`;
+      `within ${(status.radius / 1000).toFixed(1)} km · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
   };
 
   // --- frame loop, running only while there is input ---
   let running = false;
   let last = 0;
-  let fps = 0;    // smoothed while running
+  let fps = 0;    // smoothed while running; kept when idle
   let cpuMs = 0;  // last frame's CPU time: culling, matrices and draw submission (not GPU time)
   const frame = (now: number) => {
     const raw = (now - last) / 1000;
@@ -237,8 +237,6 @@ async function start(): Promise<void> {
     const input = keys.take();
     if (isIdle(input)) {
       running = false;
-      fps = 0;
-      render();  // the HUD shows idle
       history.replaceState(null, "", formatGlobeHash(camera));
       return;
     }
