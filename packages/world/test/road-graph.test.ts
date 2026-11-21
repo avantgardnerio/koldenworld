@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   buildRoadGraph, componentSizes, roadGraphFromArrow, roadGraphToArrow, type RoadWayInput,
+  enuFrame, enuProjection, enuUnprojection,
 } from "../src/index.ts";
 
-const origin = { lat: 0, lon: 0 };
-const D = 0.001; // degrees; ≈ 111 m at the equator
+const origin = enuProjection(enuFrame({ lat: 0, lon: 0, h: 0 }));
+const M = 111.2;  // m per unit
+const toLonLat = enuUnprojection(enuFrame({ lat: 0, lon: 0, h: 0 }));
 
 const road = (osmWayId: number, nodeIds: number[], coords: [number, number][], extra: Partial<RoadWayInput> = {}): RoadWayInput => ({
-  osmWayId, nodeIds, points: coords.map(([x, y]) => [x * D, y * D]),
+  osmWayId, nodeIds, points: coords.map(([x, y]) => toLonLat(x * M, y * M)),
   class: "residential", name: null, lanesFwd: 1, lanesBack: 1, speedLimitMps: 11, ...extra,
 });
 
@@ -79,8 +81,8 @@ describe("road graph Arrow files", () => {
   const graph = buildRoadGraph([...plus.slice(0, 1), road(300, [6, 9], [[1, 0], [2, 0]], { name: "Ünïcode Ave" })], origin);
 
   it("round-trips the graph and metadata", () => {
-    const { graph: back, metadata } = roadGraphFromArrow(roadGraphToArrow(graph, { origin, version: 1 }));
-    expect(metadata).toEqual({ origin, version: 1 });
+    const { graph: back, metadata } = roadGraphFromArrow(roadGraphToArrow(graph, { cell: "89c25", version: 1 }));
+    expect(metadata).toEqual({ cell: "89c25", version: 1 });
     expect(back).toEqual(graph);
   });
 

@@ -2,7 +2,7 @@ import type { OsmBuilding } from "@game/osm-import";
 import pg from "pg";
 import { DATABASE_URL } from "./config.ts";
 import { upsertFetch, type OsmFetch } from "./fetches.ts";
-import type { ImportResult } from "./roads.ts";
+import type { ImportOptions, ImportResult } from "./roads.ts";
 
 const ring = (r: [number, number][]) => `(${r.map(([lon, lat]) => `${lon} ${lat}`).join(",")})`;
 const multipolygonWkt = (polygons: [number, number][][][]) =>
@@ -14,7 +14,9 @@ const multipolygonWkt = (polygons: [number, number][][][]) =>
  * delete buildings with a vertex inside the fetched box that this snapshot no
  * longer has.
  */
-export async function importBuildings(fetch: OsmFetch, buildings: OsmBuilding[], url = DATABASE_URL): Promise<ImportResult> {
+export async function importBuildings(
+  fetch: OsmFetch, buildings: OsmBuilding[], opts: ImportOptions = {}, url = DATABASE_URL,
+): Promise<ImportResult> {
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {
@@ -50,7 +52,7 @@ export async function importBuildings(fetch: OsmFetch, buildings: OsmBuilding[],
         buildings.map((b) => JSON.stringify(b.tags)),
       ]);
 
-    const del = await client.query(
+    const del = opts.deleteMissing === false ? { rowCount: 0 } : await client.query(
       `DELETE FROM buildings b
        USING osm_fetches f
        WHERE f.id = $1

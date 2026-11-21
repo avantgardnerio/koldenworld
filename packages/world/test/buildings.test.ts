@@ -2,14 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   buildBuildings, buildingMesh, buildingsFromArrow, buildingsToArrow, idShade, signedArea2,
   type BuildingInput, type BuildingMesh,
+  enuFrame, enuProjection, enuUnprojection,
 } from "../src/index.ts";
 
-const D = 0.0001;  // degrees; ≈ 11.12 m at the equator
-const M = 11.1195;
-const origin = { lat: 0, lon: 0 };
+const M = 11.1195;  // m per unit
+const toLonLat = enuUnprojection(enuFrame({ lat: 0, lon: 0, h: 0 }));
+const origin = enuProjection(enuFrame({ lat: 0, lon: 0, h: 0 }));
 const square = (x0: number, y0: number, s: number, cw = false): [number, number][] => {
   const r: [number, number][] = [[x0, y0], [x0 + s, y0], [x0 + s, y0 + s], [x0, y0 + s], [x0, y0]];
-  return (cw ? r.reverse() : r).map(([x, y]) => [x * D, y * D]);
+  return (cw ? r.reverse() : r).map(([x, y]) => toLonLat(x * M, y * M));
 };
 const building = (osmId: number, polygons: [number, number][][][], extra: Partial<BuildingInput> = {}): BuildingInput => ({
   osmType: "way", osmId, kind: "house", isPart: false, height: 10, minHeight: 0, heightSource: "height", polygons, ...extra,
@@ -41,7 +42,7 @@ describe("buildBuildings", () => {
   });
 
   it("drops degenerate rings", () => {
-    const line: [number, number][] = [[0, 0], [D, 0], [0, 0]];
+    const line: [number, number][] = [[0, 0], toLonLat(M, 0), [0, 0]];
     const t = buildBuildings([building(1, [[line]]), building(2, [[square(0, 0, 1), line]])], origin);
     expect(t.count).toBe(1);
     expect(t.osmId[0]).toBe(2);

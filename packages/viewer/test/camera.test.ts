@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  forward, formatHash, fromYawPitch, MIN_ALTITUDE, parseHash, right, stepCamera, up, viewProjection, yawPitch,
+  forward, fromYawPitch, MIN_ALTITUDE, right, stepCamera, up, viewProjection, yawPitch,
   type Camera, type CameraInput, type Vec3,
 } from "../src/camera.ts";
 import { decodeInput } from "../src/input.ts";
@@ -89,23 +89,6 @@ describe("projection", () => {
     const p = project(viewProjection(at([0, 0, 10]), 1), [10, 100, 10]);
     expect(p[0]).toBeGreaterThan(0);
     expect(p[1]).toBeCloseTo(0, 6);
-  });
-});
-
-describe("URL hash", () => {
-  it("round-trips the pose", () => {
-    const c = at([12.3, -45.6, 789], -135, -30);
-    const back = parseHash(formatHash(c))!;
-    near(back.pos, c.pos, 6);
-    near(yawPitch(back.rot), yawPitch(c.rot), 6);
-    expect(formatHash(c)).toBe("#12.3,-45.6,789.0,-135.0,-30.0");
-  });
-
-  it("rejects junk and clamps", () => {
-    expect(parseHash("#1,2,3")).toBeNull();
-    expect(parseHash("#a,b,c,d,e")).toBeNull();
-    expect(parseHash("#0,0,-5,0,-120")!.pos[2]).toBe(MIN_ALTITUDE);
-    expect(yawPitch(parseHash("#0,0,5,0,-120")!.rot)[1]).toBeCloseTo(-90 * DEG, 9);
   });
 });
 

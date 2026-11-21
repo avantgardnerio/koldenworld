@@ -22,6 +22,22 @@ async function withClient<T>(url: string, fn: (c: pg.Client) => Promise<T>): Pro
   }
 }
 
+/** Whether any snapshot has been imported for an area. */
+export function hasFetch(area: string, url = DATABASE_URL): Promise<boolean> {
+  return withClient(url, async (c) => {
+    const { rows } = await c.query("SELECT 1 FROM osm_fetches WHERE area = $1 LIMIT 1", [area]);
+    return rows.length > 0;
+  });
+}
+
+/** Every area with an imported snapshot whose name starts with a prefix. */
+export function fetchAreas(prefix: string, url = DATABASE_URL): Promise<Set<string>> {
+  return withClient(url, async (c) => {
+    const { rows } = await c.query<{ area: string }>("SELECT DISTINCT area FROM osm_fetches WHERE starts_with(area, $1)", [prefix]);
+    return new Set(rows.map((r) => r.area));
+  });
+}
+
 /** The most recently fetched snapshot for an area. */
 export function latestFetch(area: string, url = DATABASE_URL): Promise<FetchInfo> {
   return withClient(url, async (c) => {
@@ -43,17 +59,27 @@ export function latestFetch(area: string, url = DATABASE_URL): Promise<FetchInfo
   });
 }
 
-/** Road ways intersecting the box, ordered by OSM id so graph output is reproducible. */
+/**
+ * Road ways intersecting the box, plus every way sharing a node with one of
+ * them (so a way is cut at the same intersections whichever box selected it),
+ * ordered by OSM id so graph output is reproducible.
+ */
 export function loadRoadWays(bbox: Bbox, url = DATABASE_URL): Promise<RoadWayInput[]> {
   return withClient(url, async (c) => {
     const { rows } = await c.query<{
       osm_way_id: string; node_ids: string[]; class: RoadClass; name: string | null;
       lanes_fwd: number; lanes_back: number; speed_limit_mps: number; coords: [number, number][];
     }>(
-      `SELECT osm_way_id::text, node_ids::text[] AS node_ids, class, name, lanes_fwd, lanes_back,
+      `WITH hit AS (
+         SELECT osm_way_id, node_ids FROM road_ways WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+       ), touching AS (
+         SELECT r.osm_way_id FROM road_ways r
+         WHERE r.node_ids && (SELECT array_agg(DISTINCT n) FROM hit, unnest(hit.node_ids) n)
+       )
+       SELECT osm_way_id::text, node_ids::text[] AS node_ids, class, name, lanes_fwd, lanes_back,
               speed_limit_mps, ST_AsGeoJSON(geom)::json -> 'coordinates' AS coords
        FROM road_ways
-       WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+       WHERE osm_way_id IN (SELECT osm_way_id FROM hit UNION SELECT osm_way_id FROM touching)
        ORDER BY osm_way_id`,
       [bbox.west, bbox.south, bbox.east, bbox.north]);
     return rows.map((r) => ({

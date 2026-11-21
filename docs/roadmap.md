@@ -6,13 +6,13 @@
 
 **M1: Data in.** Local PostGIS with roles and migrations, a one-time Overpass snapshot for 80205, converter upserting `road_ways`, road graph export to Arrow with zero-copy reads. (Done; committed fixtures still to do.)
 
-**M2: Map in the browser.** Raw WebGL2 viewer drawing the road graph from the Arrow files, URL-addressable camera, headless e2e pixel tests and screenshots. (Done: green ground, asphalt roads with real widths, lane markings, fog, fly camera, graph overlay, buildings with heights.) Next: areas (parks, water, parking lots), then partitions and culling.
+**M2: Map in the browser.** Raw WebGL2 viewer drawing the road graph from the Arrow files, URL-addressable camera, headless e2e pixel tests and screenshots. (Done: green ground, asphalt roads with real widths, lane markings, fog, fly camera, graph overlay, buildings with heights.) Then cells (decision 22): the world is cut into S2 cells, streamed within the horizon, and generated on demand from Overpass. Next: terrain, LOD for the far horizon, culling, areas (parks, water, parking lots).
 
 **M3: One car.** One car driving along edges, `cli view` text rendering, `cli repl`, first scenario and determinism tests, the same car drawn in the viewer; then the player drives with arcade physics.
 
 **M4: Traffic.** Lane graph operator, AI cars on the graph, sim LOD bubble with spawning and despawning, collisions with the dynamic grid.
 
-**M5: Any location.** Zip code lookup, blob server with generate-on-miss, IndexedDB cache, partition streaming while driving.
+**M5: Any location.** Blob server with generate-on-miss and cell streaming while moving (done early, in M2); zip code or address lookup to start anywhere; bulk regional OSM imports for long drives (Colorado done, decision 23); IndexedDB cache.
 
 **M6: Gameplay loop.** To be chosen (see below).
 
@@ -25,7 +25,7 @@
 - **Large worlds:** stable entity IDs across partitions. (Precision is settled by decision 20.)
 - **Terrain source:** USGS 3DEP for the US, a global DEM (Copernicus GLO-30) elsewhere; resolution, and how roads are fitted to it (cuts, fills, bridges, tunnels).
 - **Long view distances** for flight: distant terrain LOD and depth precision (reversed-Z or logarithmic depth).
-- **Bulk OSM:** continent-scale imports from regional extracts (such as Geofabrik) instead of Overpass snapshots.
+- **Bulk OSM:** extracts work for Colorado (decision 23); open: updating from newer extracts, and how much of the continent to keep imported.
 - **Cross-engine determinism:** do replays need to match in Firefox and Safari, or is V8 (Node + Chrome) enough?
 - **IndexedDB:** deferred; revisit for offline play or caching client-built meshes.
 - **Missing buildings:** how good should an unmapped suburb look; procedural filler or not.

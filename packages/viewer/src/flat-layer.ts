@@ -1,6 +1,8 @@
-// A mesh lying on the ground plane (z = 0) with a material index per vertex:
-// the ground, the road surface, the graph overlay. Buffers are uploaded once;
-// each draw is one call. Layers hold GPU handles only, no game state.
+// A mesh on the ground with a material index per vertex: the ground, the road
+// surface, the graph overlay. Positions are in a cell's frame, 2D (on its
+// tangent plane, z = 0) or 3D (the curved ground); each draw places the mesh
+// with that cell's model matrix. Buffers are uploaded once; each draw is one
+// call. Layers hold GPU handles only, no game state.
 //
 // Ground layers are coplanar, so they are painted in order (depth test
 // ALWAYS) while still writing depth, so that buildings drawn afterwards are
@@ -12,16 +14,18 @@ export const MAX_MATERIALS = 16;
 
 const VERTEX = `#version 300 es
 uniform mat4 u_view;
+uniform mat4 u_model;
 uniform vec3 u_colors[${MAX_MATERIALS}];
 uniform bool u_fadeToBase;
-in vec2 a_pos;
+in vec3 a_pos;  // z defaults to 0 for 2D positions
 in uint a_mat;
-out vec2 v_world;
+out vec3 v_world;
 out vec3 v_color;
 out vec3 v_base;
 void main() {
-  gl_Position = u_view * vec4(a_pos, 0.0, 1.0);
-  v_world = a_pos;
+  vec4 world = u_model * vec4(a_pos, 1.0);
+  gl_Position = u_view * world;
+  v_world = world.xyz;
   v_color = u_colors[a_mat];
   v_base = u_fadeToBase && a_mat > 0u ? u_colors[0] : v_color;
 }`;
@@ -32,24 +36,25 @@ uniform vec3 u_eye;
 uniform vec3 u_sky;
 uniform vec2 u_fog;   // start, end (m)
 uniform vec2 u_fade;  // start, end (m)
-in vec2 v_world;
+in vec3 v_world;
 in vec3 v_color;
 in vec3 v_base;
 out vec4 color;
 void main() {
-  float d = distance(vec3(v_world, 0.0), u_eye);
+  float d = distance(v_world, u_eye);
   vec3 c = mix(v_color, v_base, smoothstep(u_fade.x, u_fade.y, d));
   color = vec4(mix(c, u_sky, smoothstep(u_fog.x, u_fog.y, d)), 1.0);
 }`;
 
 export interface FlatMesh {
-  positions: Float32Array;  // x, y interleaved, m
+  positions: Float32Array;  // x, y (or x, y, z with dims 3) interleaved, m
+  dims?: 2 | 3;             // default 2
   material: Uint8Array;     // per vertex
   indices: Uint32Array;
 }
 
 export interface Frame {
-  view: Float32Array;  // world → clip
+  view: Float32Array;  // view frame → clip
   eye: readonly [number, number, number];
   sky: Float32Array;
   fog: readonly [number, number];
@@ -57,7 +62,7 @@ export interface Frame {
 }
 
 export interface FlatLayer {
-  draw(f: Frame): void;
+  draw(f: Frame, model: Float32Array): void;  // model: mesh frame → view frame, column-major
   dispose(): void;
 }
 
@@ -93,7 +98,7 @@ export function createFlatLayer(
   if (opts.colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
   const p = program(gl);
   const u = (name: string) => gl.getUniformLocation(p, name);
-  const uView = u("u_view"), uColors = u("u_colors"), uFadeToBase = u("u_fadeToBase");
+  const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uFadeToBase = u("u_fadeToBase");
   const uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uFade = u("u_fade");
 
   const vao = gl.createVertexArray();
@@ -102,7 +107,7 @@ export function createFlatLayer(
   gl.bindBuffer(gl.ARRAY_BUFFER, pos);
   gl.bufferData(gl.ARRAY_BUFFER, mesh.positions, gl.STATIC_DRAW);
   gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribPointer(0, mesh.dims ?? 2, gl.FLOAT, false, 0, 0);
   const mat = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, mat);
   gl.bufferData(gl.ARRAY_BUFFER, mesh.material, gl.STATIC_DRAW);
@@ -115,9 +120,11 @@ export function createFlatLayer(
   const count = mesh.indices.length;
 
   return {
-    draw(f) {
+    draw(f, model) {
+      if (count === 0) return;
       gl.useProgram(p);
       gl.uniformMatrix4fv(uView, false, f.view);
+      gl.uniformMatrix4fv(uModel, false, model);
       gl.uniform3fv(uColors, opts.colors);
       gl.uniform1i(uFadeToBase, opts.fadeToBase ? 1 : 0);
       gl.uniform3f(uEye, f.eye[0], f.eye[1], f.eye[2]);
@@ -135,14 +142,5 @@ export function createFlatLayer(
       gl.deleteBuffer(idx);
       gl.deleteVertexArray(vao);
     },
-  };
-}
-
-/** A square of ground centered on (cx, cy), one material. */
-export function groundMesh(cx: number, cy: number, half: number): FlatMesh {
-  return {
-    positions: new Float32Array([cx - half, cy - half, cx + half, cy - half, cx + half, cy + half, cx - half, cy + half]),
-    material: new Uint8Array(4),
-    indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
   };
 }

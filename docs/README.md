@@ -2,7 +2,7 @@
 
 Design notes for an original open-world driving game on real streets from OpenStreetMap.
 
-Status (2026-11-17): scaffold done; importing OSM roads into PostGIS (milestone M1).
+Status (2026-11-21): the viewer streams S2 cells within the horizon from a cell server that downloads, imports and exports them on demand (milestone M2, decisions 20–22).
 
 | Doc | What it covers |
 |---|---|

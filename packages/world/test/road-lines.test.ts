@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildRoadGraph, ROAD_CLASSES, roadLineMesh, type RoadWayInput } from "../src/index.ts";
+import { buildRoadGraph, enuFrame, enuProjection, enuUnprojection, ROAD_CLASSES, roadLineMesh, type RoadWayInput } from "../src/index.ts";
 
-const D = 0.001;
+const M = 111.2;  // m per unit
+const toLonLat = enuUnprojection(enuFrame({ lat: 0, lon: 0, h: 0 }));
 const road = (osmWayId: number, nodeIds: number[], coords: [number, number][], extra: Partial<RoadWayInput> = {}): RoadWayInput => ({
-  osmWayId, nodeIds, points: coords.map(([x, y]) => [x * D, y * D]),
+  osmWayId, nodeIds, points: coords.map(([x, y]) => toLonLat(x * M, y * M)),
   class: "residential", name: null, lanesFwd: 1, lanesBack: 1, speedLimitMps: 11, ...extra,
 });
 
@@ -11,7 +12,7 @@ const road = (osmWayId: number, nodeIds: number[], coords: [number, number][], e
 const graph = buildRoadGraph([
   road(1, [1, 2, 3], [[-1, 0], [0, 0], [1, 0]], { class: "primary" }),
   road(2, [4, 5, 2, 6], [[0.5, 1], [0, 1], [0, 0], [0, -1]]),
-], { lat: 0, lon: 0 });
+], enuProjection(enuFrame({ lat: 0, lon: 0, h: 0 })));
 
 describe("roadLineMesh", () => {
   const mesh = roadLineMesh(graph);

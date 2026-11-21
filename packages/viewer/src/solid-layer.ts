@@ -1,12 +1,14 @@
 // A lit 3D mesh: buildings. Depth-tested against everything drawn before it
 // and back-face culled (the operator emits front faces counterclockwise).
-// Holds GPU handles only.
+// Positions and normals are in a cell's frame, placed by its model matrix
+// (rigid, so it rotates normals too). Holds GPU handles only.
 
 import type { BuildingMesh } from "@game/world";
 import { MAX_MATERIALS, type Frame } from "./flat-layer.ts";
 
 const VERTEX = `#version 300 es
 uniform mat4 u_view;
+uniform mat4 u_model;
 uniform vec3 u_colors[${MAX_MATERIALS}];
 in vec3 a_pos;
 in vec3 a_normal;
@@ -16,9 +18,10 @@ out vec3 v_world;
 out vec3 v_normal;
 out vec3 v_color;
 void main() {
-  gl_Position = u_view * vec4(a_pos, 1.0);
-  v_world = a_pos;
-  v_normal = a_normal;
+  vec4 world = u_model * vec4(a_pos, 1.0);
+  gl_Position = u_view * world;
+  v_world = world.xyz;
+  v_normal = mat3(u_model) * a_normal;
   v_color = u_colors[a_mat] * (0.9 + 0.2 * a_shade);
 }`;
 
@@ -40,7 +43,7 @@ void main() {
 }`;
 
 export interface SolidLayer {
-  draw(f: Frame, sun: readonly [number, number, number]): void;
+  draw(f: Frame, model: Float32Array, sun: readonly [number, number, number]): void;
   dispose(): void;
 }
 
@@ -52,16 +55,26 @@ function compile(gl: WebGL2RenderingContext, type: GLenum, source: string): WebG
   return s;
 }
 
-export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh, colors: Float32Array): SolidLayer {
-  if (colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
-  const p = gl.createProgram();
+const programs = new WeakMap<WebGL2RenderingContext, WebGLProgram>();
+
+function program(gl: WebGL2RenderingContext): WebGLProgram {
+  let p = programs.get(gl);
+  if (p) return p;
+  p = gl.createProgram();
   gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, VERTEX));
   gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT));
-  ["a_pos", "a_normal", "a_mat", "a_shade"].forEach((name, i) => gl.bindAttribLocation(p, i, name));
+  ["a_pos", "a_normal", "a_mat", "a_shade"].forEach((name, i) => gl.bindAttribLocation(p!, i, name));
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`program: ${gl.getProgramInfoLog(p)}`);
+  programs.set(gl, p);
+  return p;
+}
+
+export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh, colors: Float32Array): SolidLayer {
+  if (colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
+  const p = program(gl);
   const u = (name: string) => gl.getUniformLocation(p, name);
-  const uView = u("u_view"), uColors = u("u_colors"), uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uSun = u("u_sun");
+  const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uSun = u("u_sun");
 
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
@@ -86,10 +99,11 @@ export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh,
   const count = mesh.indices.length;
 
   return {
-    draw(f, sun) {
+    draw(f, model, sun) {
       if (count === 0) return;
       gl.useProgram(p);
       gl.uniformMatrix4fv(uView, false, f.view);
+      gl.uniformMatrix4fv(uModel, false, model);
       gl.uniform3fv(uColors, colors);
       gl.uniform3f(uEye, f.eye[0], f.eye[1], f.eye[2]);
       gl.uniform3fv(uSky, f.sky);
@@ -106,7 +120,6 @@ export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh,
       for (const b of buffers) gl.deleteBuffer(b);
       gl.deleteBuffer(idx);
       gl.deleteVertexArray(vao);
-      gl.deleteProgram(p);
     },
   };
 }

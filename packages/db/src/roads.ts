@@ -3,6 +3,15 @@ import pg from "pg";
 import { DATABASE_URL } from "./config.ts";
 import { upsertFetch, type OsmFetch } from "./fetches.ts";
 
+export interface ImportOptions {
+  /**
+   * Delete rows with a node in the fetch box that the snapshot lacks (default
+   * true). Right for an Overpass box, which returns everything touching it;
+   * wrong for a batch that is not a box query (a cell's share of an extract).
+   */
+  deleteMissing?: boolean;
+}
+
 export interface ImportResult {
   fetchId: number;
   upserted: number;
@@ -16,7 +25,9 @@ export interface ImportResult {
  * longer a road). Overpass returns every way with a node in the box, so
  * anything matching that test and missing is really gone.
  */
-export async function importRoadWays(fetch: OsmFetch, ways: RoadWay[], url = DATABASE_URL): Promise<ImportResult> {
+export async function importRoadWays(
+  fetch: OsmFetch, ways: RoadWay[], opts: ImportOptions = {}, url = DATABASE_URL,
+): Promise<ImportResult> {
   const client = new pg.Client({ connectionString: url });
   await client.connect();
   try {
@@ -58,7 +69,7 @@ export async function importRoadWays(fetch: OsmFetch, ways: RoadWay[], url = DAT
         ways.map((w) => JSON.stringify(w.tags)),
       ]);
 
-    const del = await client.query(
+    const del = opts.deleteMissing === false ? { rowCount: 0 } : await client.query(
       `DELETE FROM road_ways r
        USING osm_fetches f
        WHERE f.id = $1

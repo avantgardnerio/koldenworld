@@ -1,12 +1,12 @@
 // Buildings as a columnar table: one row per polygon (a multipolygon building
 // with several outer rings becomes several rows sharing an OSM id), with its
-// rings and points in nested CSR arrays, projected to local meters.
+// rings and points in nested CSR arrays, projected to a frame's meters.
 //
 // Ring convention: rings are open (no repeated closing point), the first ring
 // of a row is the outer ring, counterclockwise; the rest are holes, clockwise.
 // Downstream code (wall normals, triangulation) relies on this.
 
-import { localProjection, type LatLon } from "./projection.ts";
+import type { Projection } from "./projection.ts";
 
 export const BUILDINGS_VERSION = 1;
 
@@ -53,8 +53,7 @@ export function signedArea2(xy: ArrayLike<number>, start = 0, end = xy.length / 
   return s;
 }
 
-export function buildBuildings(inputs: BuildingInput[], origin: LatLon): Buildings {
-  const project = localProjection(origin);
+export function buildBuildings(inputs: BuildingInput[], project: Projection): Buildings {
   const kinds: string[] = [];
   const kindIndex = new Map<string, number>();
   const rows: { b: BuildingInput; kind: number; rings: number[][] }[] = [];

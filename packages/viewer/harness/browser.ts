@@ -17,18 +17,19 @@ export interface Session {
 }
 
 export interface OpenOptions {
-  dataDir?: string;   // directory holding <area>/*.arrow; default data/export
-  area: string;
-  graph?: boolean;    // road graph overlay
-  hash?: string;      // camera, "#x,y,z,yaw,pitch"; default is an overview
+  dataDir?: string;   // static cells/<token>/*.arrow instead of the cell server
+  query?: string;     // e.g. "graph=1&radius=300"
+  hash?: string;      // camera, "#lat,lon,alt,yaw,pitch"; default is the viewer's default view
   width: number;
   height: number;
+  timeoutMs?: number; // how long to wait for the first cells (the cell server may download OSM)
 }
 
 export async function openViewer(o: OpenOptions): Promise<Session> {
   let server: ViteDevServer | undefined;
   let browser: Browser | undefined;
   try {
+    if (o.dataDir) process.env.CELL_SERVER = "";  // read by vite.config.ts
     server = await createServer({
       configFile: path.join(viewerRoot, "vite.config.ts"),
       ...(o.dataDir ? { publicDir: o.dataDir } : {}),
@@ -45,8 +46,8 @@ export async function openViewer(o: OpenOptions): Promise<Session> {
     page.on("console", (m) => { if (m.type() === "error") logs.push(m.text()); });
     page.on("pageerror", (e) => logs.push(e.message));
 
-    await page.goto(`${base}?area=${encodeURIComponent(o.area)}${o.graph ? "&graph=1" : ""}${o.hash ?? ""}`);
-    await page.waitForFunction(() => window.viewer?.state !== "loading", null, { timeout: 30_000 });
+    await page.goto(`${base}?${o.query ?? ""}${o.hash ?? ""}`);
+    await page.waitForFunction(() => window.viewer?.state !== "loading", null, { timeout: o.timeoutMs ?? 30_000 });
 
     const status = () => page.evaluate(() => {
       const { pixel: _, ...rest } = window.viewer;

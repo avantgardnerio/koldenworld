@@ -156,6 +156,13 @@ export function cellCorners(id: CellId): { lat: number; lon: number }[] {
     xyzToLatLon(faceUVToXyz(face, stToUV((i + di!) / n), stToUV((j + dj!) / n))));
 }
 
+/** The point at fractions (fs, ft) ∈ [0, 1]² across the cell, in its (s, t) square. */
+export function cellPoint(id: CellId, fs: number, ft: number): { lat: number; lon: number } {
+  const { face, i, j, level } = cellFaceIJ(id);
+  const n = 2 ** level;
+  return xyzToLatLon(faceUVToXyz(face, stToUV((i + fs) / n), stToUV((j + ft) / n)));
+}
+
 /** A leaf at (i, j), which may lie up to one leaf beyond the face: wrapped onto the adjacent face. */
 function fromFaceIJWrap(face: number, i: number, j: number): CellId {
   i = Math.max(-1, Math.min(MAX_SIZE, i));

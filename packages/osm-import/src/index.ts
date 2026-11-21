@@ -7,3 +7,6 @@ export {
   assembleRings, buildingHeights, buildingKind, extractBuildings, LEVEL_HEIGHT, parseHeight,
   type BuildingStats, type OsmBuilding,
 } from "./buildings.ts";
+export {
+  blobData, pbfBlocks, readHeader, readPrimitiveBlock, type Inflate, type PbfBlock, type PbfHeader, type PbfVisitor,
+} from "./pbf.ts";

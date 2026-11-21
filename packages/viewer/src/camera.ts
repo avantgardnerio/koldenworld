@@ -2,15 +2,11 @@
 // plain value; stepCamera(camera, input, dt) is the whole update, so the camera
 // is tested in Node like the sim will be.
 //
-// World: x east, y north, z up (m). Camera-local: x right, y forward, z up; the
+// World: a local frame, x east, y north, z up (m); globe-camera.ts puts this
+// camera on the globe. Camera-local: x right, y forward, z up; the
 // identity orientation looks north, level. Mouse yaw rotates about world up and
 // pitch about the camera's right axis, so roll never accumulates; pitch is
 // clamped to straight down / straight up.
-//
-// The pose round-trips through the URL hash as #x,y,z,yaw,pitch (m, degrees):
-// the same URL renders the same pixels.
-
-import type { Bounds } from "@game/world";
 
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];  // x, y, z, w
@@ -151,32 +147,4 @@ export function viewProjection(c: Camera, aspect: number): Float32Array {
     }
   }
   return out;
-}
-
-/** An oblique overview from the south that frames the bounds. */
-export function overview(b: Bounds, aspect: number): Camera {
-  const pitch = -50 * DEG;
-  const size = Math.max((b.maxX - b.minX) / aspect, b.maxY - b.minY, 1);
-  const dist = (size / 2 / Math.tan(FOV_Y / 2)) * 1.2;
-  const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
-  // Back off from the center along the view direction.
-  return {
-    pos: [cx, cy - dist * Math.cos(pitch), -dist * Math.sin(pitch)],
-    rot: fromYawPitch(0, pitch),
-  };
-}
-
-// --- URL --------------------------------------------------------------------
-
-export function formatHash(c: Camera): string {
-  const [yaw, pitch] = yawPitch(c.rot);
-  const p = c.pos.map((v) => v.toFixed(1));
-  return `#${p.join(",")},${(yaw / DEG).toFixed(1)},${(pitch / DEG).toFixed(1)}`;
-}
-
-export function parseHash(hash: string): Camera | null {
-  const v = hash.replace(/^#/, "").split(",").map(Number);
-  if (v.length !== 5 || !v.every(Number.isFinite)) return null;
-  const pitch = Math.max(-90, Math.min(90, v[4]!));
-  return { pos: [v[0]!, v[1]!, Math.max(MIN_ALTITUDE, v[2]!)], rot: fromYawPitch(v[3]! * DEG, pitch * DEG) };
 }

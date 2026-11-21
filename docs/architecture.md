@@ -30,10 +30,9 @@ packages/
   world/       map tables, operators, spatial indexes   │ loads anywhere
   osm-import/  raw OSM → map rows; way splitting       ─┘
   viewer/      3D rendering, input, UI                  ← browser only
-  cli/         fetch, migrate, import; later scenarios, ← Node only
-               replays, text view, JSON-lines
-  db/          Postgres access, migrations runner;      ← Node only
-               later the blob export and server
+  cli/         fetch, migrate, import, cell server;     ← Node only
+               later scenarios, replays, text view, JSON-lines
+  db/          Postgres access, migrations runner       ← Node only
 ```
 
 Existing today: `world` (road graph, buildings, Arrow I/O, projection, WGS84 geodesy and ENU frames, S2 cells, road line, road surface and building meshes), `osm-import`, `db`, `cli`, `viewer` (WebGL2 road map, headless harness). `sim` is created when it gets code.
@@ -43,7 +42,7 @@ The shared packages are compiled without DOM type definitions, and a lint rule b
 ## Data flow
 
 ```
-OSM snapshot ─▶ osm-import (TS) ─▶ PostGIS ─▶ export (TS) ─▶ partition blobs (typed arrays)
+OSM snapshot ─▶ osm-import (TS) ─▶ PostGIS ─▶ export (TS) ─▶ cell blobs (typed arrays)
                                                         │  HTTP, immutable, cacheable
                                                         ▼
                                    getBlob(): fetch + HTTP cache (browser), files (Node)

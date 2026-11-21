@@ -8,7 +8,7 @@
 // Edges run from `from` to `to` along their points. One-way edges are always
 // stored in the direction of travel (lanesBack = 0).
 
-import { localProjection, type LatLon } from "./projection.ts";
+import type { Projection } from "./projection.ts";
 
 /** Bump when buildRoadGraph's output changes for the same input. */
 export const ROAD_GRAPH_VERSION = 1;
@@ -38,8 +38,8 @@ export interface RoadWayInput {
 
 export interface RoadNodes {
   count: number;
-  x: Float32Array;           // m east of origin
-  y: Float32Array;           // m north of origin
+  x: Float32Array;           // m east, in the projection's frame
+  y: Float32Array;           // m north
   osmId: Float64Array;
   edgeStart: Int32Array;     // count + 1 offsets into edgeList (CSR; Int32 like Arrow list offsets)
   edgeList: Uint32Array;     // incident edge ids; a self-loop is listed twice
@@ -69,10 +69,14 @@ export interface RoadGraph {
 /**
  * Builds the graph from ways. Node and edge ids follow input order, so sort
  * the input (e.g. by osm_way_id) for reproducible output.
+ *
+ * `keep` selects edges by their midpoint (lon, lat), for partitions that own
+ * part of the input: ways are still cut wherever any input way shares a node,
+ * so every partition cuts a way the same way. Nodes exist only for kept edges.
  */
-export function buildRoadGraph(ways: RoadWayInput[], origin: LatLon): RoadGraph {
-  const project = localProjection(origin);
-
+export function buildRoadGraph(
+  ways: RoadWayInput[], project: Projection, keep: (lon: number, lat: number) => boolean = () => true,
+): RoadGraph {
   const uses = new Map<number, number>();
   for (const w of ways) {
     for (const id of w.nodeIds) uses.set(id, (uses.get(id) ?? 0) + 1);
@@ -122,6 +126,11 @@ export function buildRoadGraph(ways: RoadWayInput[], origin: LatLon): RoadGraph 
     let start = 0;
     for (let i = 1; i < w.nodeIds.length; i++) {
       if (i < w.nodeIds.length - 1 && (uses.get(w.nodeIds[i]!) ?? 0) < 2) continue;
+      const [mLon, mLat] = midpoint(w.points, start, i);
+      if (!keep(mLon, mLat)) {
+        start = i;
+        continue;
+      }
 
       e.from.push(graphNode(w.nodeIds[start]!, w.points[start]!));
       e.to.push(graphNode(w.nodeIds[i]!, w.points[i]!));
@@ -187,6 +196,12 @@ export function buildRoadGraph(ways: RoadWayInput[], origin: LatLon): RoadGraph 
     points: Float32Array.from(points),
     names,
   };
+}
+
+/** The point halfway along points[start..end] by vertex count: a middle vertex, or the middle segment's midpoint. */
+function midpoint(points: [number, number][], start: number, end: number): [number, number] {
+  const a = points[Math.floor((start + end) / 2)]!, b = points[Math.ceil((start + end) / 2)]!;
+  return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
 }
 
 // --- analysis -------------------------------------------------------------

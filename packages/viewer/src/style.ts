@@ -48,10 +48,9 @@ export const SUN: [number, number, number] = (() => {
   return [v[0]! / n, v[1]! / n, v[2]! / n];
 })();
 
-/** Fog grows with altitude, so the overview stays clear and street level gets a horizon. */
-export function fogRange(altitude: number): [start: number, end: number] {
-  const start = 1500 + 3 * altitude;
-  return [start, start * 6];
+/** Fog closes in at the edge of what is loaded, so the world fades out instead of ending. */
+export function fogRange(loadRadius: number): [start: number, end: number] {
+  return [0.35 * loadRadius, loadRadius];
 }
 
 /** Lane markings blend into the asphalt before they get thinner than a pixel. */

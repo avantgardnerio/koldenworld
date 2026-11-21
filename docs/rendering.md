@@ -9,25 +9,29 @@ The project is first an efficient world renderer; the game sits on top of it. Re
 `packages/viewer` (raw WebGL2, Vite dev server):
 
 ```
-GET /<area>/nodes.arrow, edges.arrow ─▶ roadGraphFromArrow (zero-copy views)
+camera (lat, lon, alt) ─▶ cellsWithin(horizon, ≤ 5 km) ─▶ CellStreamer: nearest first, 4 at a time
+GET /cells/<token>/nodes, edges, buildings.arrow ─▶ cellFromArrow (zero-copy views) ─▶ per cell:
+  ├─▶ cellGroundMesh (world operator)  ─▶ ground layer: curved n × n grid on the ellipsoid
   ├─▶ roadSurfaceMesh (world operator) ─▶ road layer: asphalt + markings, 1 draw call
-  └─▶ roadLineMesh (world operator)    ─▶ graph overlay (G): 1 px lines by class, 1 draw call
-ground layer: one green quad to the far plane, under everything
-GET /<area>/buildings.arrow ─▶ buildingsFromArrow ─▶ buildingMesh (world operator) ─▶ building layer, 1 draw call
+  ├─▶ roadLineMesh (world operator)    ─▶ graph overlay (G): 1 px lines by class, 1 draw call
+  └─▶ buildingMesh (world operator)    ─▶ building layer, 1 draw call
+each frame: model = frameToFrame(cell frame → ENU at the camera), f64 → f32 (decision 20)
 ```
 
+- **Cells and streaming** (decision 22): the load radius is the distance to the horizon from the camera's height (`horizonDistance`), capped at 5 km until there is LOD; `?radius=<m>` fixes it. Cells out to 1.3 × the radius stay loaded, so the edge doesn't thrash; the wanted set is recomputed after 50 m of movement. A cell with no files (404) is bare ground; a failed one (e.g. the server could not reach Overpass) is retried after 30 s.
+- **Frames:** everything is drawn in the ENU frame on the ground below the camera, so the camera is always at (0, 0, alt) and nothing the GPU sees is large. Each cell is placed by its own rigid transform; the Earth's curvature comes out of those transforms (the ground 5 km away is 2 m below the camera's horizon plane).
 - **Road surface** (`road-surface.ts`, decision 18): each edge is a mitered ribbon whose width comes from lanes × the class's lane width plus shoulders; every node gets a disc as wide as its widest road, which fills intersection corners and rounds dead ends. Markings on tertiary roads and above: double yellow center line on two-way roads, dashed white (3 m dash, 9 m gap) between same-direction lanes, stopping short of intersections. 80205: 140k triangles.
-- **Flat layers** (`flat-layer.ts`): one shader for every mesh on the ground plane, with a material index per vertex and a per-layer palette. They are coplanar, so they are painted in order (depth test `ALWAYS`) but still write depth.
+- **Flat layers** (`flat-layer.ts`): one shader for every mesh on the ground (2D on a cell's tangent plane, or 3D for the curved ground), with a material index per vertex and a per-layer palette. They are painted in order (depth test `ALWAYS`), all cells' ground first, then all cells' roads, but still write depth.
 - **Buildings** (`building-mesh.ts`, `solid-layer.ts`, decision 19): walls extruded from each ring edge with flat outward normals, flat roofs triangulated with earcut (holes included), every triangle counterclockwise from outside. Drawn after the ground with depth test `LEQUAL` and back-face culling. Lit by a fixed sun (south-southeast, high) plus ambient; colored by group (residential, commercial, industrial, civic, utility, other; wall and roof) with a stable ±10% tint per OSM id so neighbors differ. 80205: 17,014 polygons → 358k triangles.
-- **Atmosphere:** sky-colored background, distance fog toward the sky color (range grows with altitude), and lane markings fading into asphalt between 60 and 220 m so they don't shimmer below a pixel wide. MSAA is on.
+- **Atmosphere:** sky-colored background, distance fog toward the sky color (from 35% of the load radius to all of it, so the world fades out instead of ending), and lane markings fading into asphalt between 60 and 220 m so they don't shimmer below a pixel wide. MSAA is on.
 
-- **Camera:** a fly camera, `{pos, rot}` (position in meters, orientation quaternion), perspective with a 60° vertical field of view. `stepCamera(camera, input, dt)` is pure and tested in Node (decision 17). The pose is mirrored to the URL hash (`/?area=80205#x,y,z,yaw,pitch`, meters and degrees), so a URL fully describes the view.
+- **Camera:** a fly camera on the globe (`globe-camera.ts`): latitude, longitude and altitude in f64, and an orientation quaternion relative to east-north-up at that point; perspective with a 60° vertical field of view. `stepGlobe` runs the flat `stepCamera` (decision 17) in the local frame and moves the camera to where that lands on the globe, so long flights follow the Earth's curve. Both are pure and tested in Node. The pose is mirrored to the URL hash (`#lat,lon,alt,yaw,pitch`, degrees and meters above the ellipsoid), so a URL fully describes the view.
 - **Controls:** click to capture the mouse (Esc releases; dragging also looks); WASD or arrows move along the view direction; E/Space up, Q/C down in world space; Shift ×4. Speed scales with altitude (max(5, z) m/s). Keys are physical codes, so the layout doesn't matter.
 - **Draw on demand:** the frame loop runs only while keys are held or the mouse moves; when input goes idle it stops and writes the pose to the URL.
 - **Draw order:** segments are sorted by class, least important first, so major roads paint over minor ones without a depth buffer.
 - **Style** (colors per class) lives in the viewer, not in the map data.
-- **Limits:** lane data is sparse: in 80205 only 8 edges are tagged with 2+ lanes each way, so most arterials render as 1+1. Roads that cross without sharing a node (bridges) overlap flat. Roofs are all flat (`roof:shape` is on only 29 buildings in 80205). Buildings on the edge of the area are cut off with the fetch box. Lane-count changes show as small bulges at the node disc.
-- 80205: 7,684 edges → 17,074 segments, one draw call.
+- **Limits:** lane data is sparse: in 80205 only 8 edges are tagged with 2+ lanes each way, so most arterials render as 1+1. Roads that cross without sharing a node (bridges) overlap flat. Roofs are all flat (`roof:shape` is on only 29 buildings in 80205). Lane-count changes show as small bulges at the node disc.
+- **Not yet:** frustum culling (every loaded cell is drawn), LOD for anything past 5 km (towers and mountains beyond the horizon of the ground), meshes built in workers (they are built on the main thread as cells arrive).
 
 ## Static world
 

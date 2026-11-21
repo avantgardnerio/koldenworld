@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildRoadGraph, edgeHalfWidth, MARKING, nodeRadii, roadSurfaceMesh, SurfaceMaterial, type RoadWayInput, type SurfaceMesh,
+  buildRoadGraph, edgeHalfWidth, enuFrame, enuProjection, enuUnprojection, MARKING, nodeRadii, roadSurfaceMesh, SurfaceMaterial,
+  type RoadWayInput, type SurfaceMesh,
 } from "../src/index.ts";
 
-const D = 0.001;  // degrees; ≈ 111.2 m
-const M = 111.195; // m per D at the equator (spherical)
+const M = 111.195; // m per unit
+const toLonLat = enuUnprojection(enuFrame({ lat: 0, lon: 0, h: 0 }));
 const road = (osmWayId: number, nodeIds: number[], coords: [number, number][], extra: Partial<RoadWayInput> = {}): RoadWayInput => ({
-  osmWayId, nodeIds, points: coords.map(([x, y]) => [x * D, y * D]),
+  osmWayId, nodeIds, points: coords.map(([x, y]) => toLonLat(x * M, y * M)),
   class: "residential", name: null, lanesFwd: 1, lanesBack: 1, speedLimitMps: 11, ...extra,
 });
-const graphOf = (...ways: RoadWayInput[]) => buildRoadGraph(ways, { lat: 0, lon: 0 });
+const graphOf = (...ways: RoadWayInput[]) => buildRoadGraph(ways, enuProjection(enuFrame({ lat: 0, lon: 0, h: 0 })));
 
 /** Vertices of one material as [x, y] pairs. */
 function verts(m: SurfaceMesh, mat: SurfaceMaterial): [number, number][] {

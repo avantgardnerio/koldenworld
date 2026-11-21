@@ -1,44 +1,59 @@
-// End to end: a synthetic graph → Arrow files → Vite → headless Chromium →
-// WebGL pixels. Hermetic: no network, no Postgres, no data/ directory.
+// End to end: synthetic OSM rows → buildCell (as the cell server runs it) →
+// Arrow files → Vite → headless Chromium → WebGL pixels. Hermetic: no
+// network, no Postgres, no data/ directory; cells are static files, and the
+// cells around the fixture have none (404), so they are drawn as bare ground.
 
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildBuildings, buildingsToArrow, buildRoadGraph, roadGraphToArrow, type BuildingInput, type RoadWayInput } from "@game/world";
+import {
+  buildCell, CELL_LEVEL, CELL_TABLES, cellCenter, cellFromLatLon, cellToArrow, cellToken, enuFrame, enuUnprojection,
+  type BuildingInput, type RoadWayInput,
+} from "@game/world";
 import { openViewer, type Session } from "../harness/browser.ts";
 
-const D = 0.001; // degrees; ≈ 111 m
+// The fixture sits at the center of one level-13 cell; positions are meters
+// east (x) and north (y) of that point.
+const cell = cellFromLatLon(0.01, 0.01, CELL_LEVEL);
+const O = cellCenter(cell);
+const toLonLat = enuUnprojection(enuFrame({ ...O, h: 0 }));
+const M = 111.2;  // m per unit in road coordinates
 const road = (osmWayId: number, nodeIds: number[], coords: [number, number][], extra: Partial<RoadWayInput>): RoadWayInput => ({
-  osmWayId, nodeIds, points: coords.map(([x, y]) => [x * D, y * D]),
+  osmWayId, nodeIds, points: coords.map(([x, y]) => toLonLat(x * M, y * M)),
   class: "residential", name: null, lanesFwd: 1, lanesBack: 1, speedLimitMps: 11, ...extra,
 });
 
 // A primary road along y = 0 crossed by a residential street along x = 0.
-const graph = buildRoadGraph([
+const ways = [
   road(1, [1, 2, 3], [[-1, 0], [0, 0], [1, 0]], { class: "primary" }),
   road(2, [4, 2, 5], [[0, 1], [0, 0], [0, -1]], { class: "residential" }),
-], { lat: 0, lon: 0 });
+];
 
 // Two buildings north of the primary, east of the residential street: a 10 m
 // house in front (y 30..50 m) and a 30 m office block behind it (y 60..80 m).
-const M = 111.195;  // m per 0.001°
 const box = (x0: number, y0: number, x1: number, y1: number): [number, number][] =>
-  [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]].map(([x, y]) => [(x! / M) * D, (y! / M) * D]);
+  [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]].map(([x, y]) => toLonLat(x!, y!));
 const building = (osmId: number, kind: string, height: number, ring: [number, number][]): BuildingInput => ({
   osmType: "way", osmId, kind, isPart: false, height, minHeight: 0, heightSource: "height", polygons: [[ring]],
 });
-const buildings = buildBuildings([
+const buildings = [
   building(1, "house", 10, box(30, 30, 50, 50)),
   building(2, "office", 30, box(30, 60, 50, 80)),
-], { lat: 0, lon: 0 });
+];
+
+/** The camera hash at (x, y) m from the fixture origin. */
+const at = (x: number, y: number, h: number, yaw: number, pitch: number) => {
+  const [lon, lat] = toLonLat(x, y);
+  return `#${lat.toFixed(7)},${lon.toFixed(7)},${h.toFixed(2)},${yaw},${pitch}`;
+};
 
 // Looking straight down from the height where the 60° field of view gives
-// 1 m per pixel on the ground; odd viewport so world (0, 0) is the center of
-// pixel (200, 150). Hash: #x,y,z,yaw,pitch.
+// 1 m per pixel on the ground; odd viewport so the camera's ground point is
+// the center of pixel (200, 150).
 const W = 401, H = 301;
-const Z = (H / 2 / Math.tan(Math.PI / 6)).toFixed(1);
-const top = (x: number, mpp: number) => `#${x},0,${(+Z * mpp).toFixed(2)},0,-90`;
+const Z = H / 2 / Math.tan(Math.PI / 6);
+const top = (x: number, mpp: number) => at(x, 0, Z * mpp, 0, -90);
 const ASPHALT = [46, 48, 52];
 const GROUND = [91, 127, 58];
 const YELLOW = [226, 182, 42];
@@ -50,12 +65,11 @@ let viewer: Session;
 
 beforeAll(async () => {
   dir = await mkdtemp(path.join(tmpdir(), "viewer-e2e-"));
-  const files = roadGraphToArrow(graph, { area: "fixture" });
-  await mkdir(path.join(dir, "fixture"));
-  await writeFile(path.join(dir, "fixture/nodes.arrow"), files.nodes);
-  await writeFile(path.join(dir, "fixture/edges.arrow"), files.edges);
-  await writeFile(path.join(dir, "fixture/buildings.arrow"), buildingsToArrow(buildings, { area: "fixture" }));
-  viewer = await openViewer({ dataDir: dir, area: "fixture", hash: top(0, 1), width: W, height: H });
+  const files = cellToArrow(buildCell(cell, ways, buildings));
+  const cellDir = path.join(dir, "cells", cellToken(cell));
+  await mkdir(cellDir, { recursive: true });
+  for (const t of CELL_TABLES) await writeFile(path.join(cellDir, `${t}.arrow`), files[t]);
+  viewer = await openViewer({ dataDir: dir, query: "radius=1000", hash: top(0, 1), width: W, height: H });
 }, 60_000);
 
 async function setHash(hash: string) {
@@ -69,9 +83,12 @@ afterAll(async () => {
 });
 
 describe("viewer", () => {
-  it("loads the graph from Arrow files", async () => {
+  it("loads the fixture cell, and the cells around it as bare ground", async () => {
     const s = await viewer.status();
     expect(s).toMatchObject({ state: "ready", nodes: 5, edges: 4, buildings: 2, buildingTriangles: 2 * (8 + 2), graphOverlay: false });
+    expect(s.cells.ready).toBeGreaterThan(1);
+    expect(s.cells).toMatchObject({ missing: s.cells.ready - 1, failed: 0, loading: 0, queued: 0 });
+    expect(s.radius).toBe(1000);
     expect(s.surfaceTriangles).toBeGreaterThan(0);
     expect(s.frames).toBeGreaterThan(0);
   });
@@ -95,7 +112,7 @@ describe("viewer", () => {
 
   it("hides the far building behind the near one (depth test)", async () => {
     // From 5 m up, 20 m south of the house, looking north at both.
-    await setHash("#40,-20,5.0,0.0,0.0");
+    await setHash(at(40, -20, 5, 0, 0));
     const near = await viewer.pixel(200, 150);  // straight ahead: the house's south wall
     // tan 0.3 above the horizon: over the house's 10 m roofline, onto the office's wall.
     const far = await viewer.pixel(200, Math.round(150 - (0.3 / Math.tan(Math.PI / 6)) * 150.5));
@@ -131,17 +148,25 @@ describe("viewer", () => {
     expect(await viewer.pixel(200, 100)).toEqual(ASPHALT);
   });
 
+  it("draws ground in a neighboring cell that has no files", async () => {
+    await setHash(top(800, 1));
+    expect(await viewer.pixel(200, 150)).toEqual(GROUND);
+    expect(await viewer.pixel(10, 150)).toEqual(GROUND);
+  });
+
   it("flies with the keyboard and writes the pose back once idle", async () => {
-    const start = "#0,0,100.0,0.0,0.0";  // level, facing north
+    const start = at(0, 0, 100, 0, 0);  // level, facing north
     await setHash(start);
     const frames = (await viewer.status()).frames;
     await viewer.page.keyboard.down("KeyW");
     await viewer.page.waitForTimeout(300);
     await viewer.page.keyboard.up("KeyW");
     await viewer.page.waitForFunction((h) => location.hash !== h, start);
-    const [x, y, z, yaw, pitch] = (await viewer.page.evaluate(() => location.hash)).slice(1).split(",").map(Number);
-    expect(y).toBeGreaterThan(5);  // moved north
-    expect([x, z, yaw, pitch]).toEqual([0, 100, 0, 0]);
+    const [lat, lon, h, yaw, pitch] = (await viewer.page.evaluate(() => location.hash)).slice(1).split(",").map(Number);
+    const [lon0, lat0] = toLonLat(0, 0);
+    expect((lat! - lat0) * 110_574).toBeGreaterThan(5);  // moved north, m
+    expect(lon).toBeCloseTo(lon0, 6);
+    expect([h, yaw, pitch]).toEqual([100, 0, 0]);
     expect((await viewer.status()).frames).toBeGreaterThan(frames + 3);
   });
 });

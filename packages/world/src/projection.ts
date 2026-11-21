@@ -1,18 +1,25 @@
-// Lat/lon → local flat meters (x east, y north) around an origin.
+// Lat/lon → x, y meters on a frame's tangent plane (decision 20).
 //
-// Equirectangular around the origin. Within a few km the scale error is a few
-// hundredths of a percent, far below OSM's own accuracy.
+// Points are placed exactly on the WGS84 ellipsoid (h = 0) and expressed in
+// the frame; z is dropped. Within a level-13 cell (≲ 1 km from its anchor)
+// that flattens the surface by at most a few centimeters. Terrain will bring
+// real heights, and z with them.
 
-export interface LatLon {
-  lat: number;
-  lon: number;
+import { ecefToGeodetic, ecefToLocal, geodeticToEcef, localToEcef, type Frame } from "./geodesy.ts";
+
+export type Projection = (lon: number, lat: number) => [x: number, y: number];
+
+export function enuProjection(frame: Frame): Projection {
+  return (lon, lat) => {
+    const [x, y] = ecefToLocal(frame, geodeticToEcef({ lat, lon, h: 0 }));
+    return [x, y];
+  };
 }
 
-const EARTH_RADIUS_M = 6_371_008.8; // mean radius
-const DEG = Math.PI / 180;
-
-export function localProjection(origin: LatLon): (lon: number, lat: number) => [x: number, y: number] {
-  const kx = EARTH_RADIUS_M * DEG * Math.cos(origin.lat * DEG);
-  const ky = EARTH_RADIUS_M * DEG;
-  return (lon, lat) => [(lon - origin.lon) * kx, (lat - origin.lat) * ky];
+/** The inverse: tangent-plane meters → the (lon, lat) on the ellipsoid below them. */
+export function enuUnprojection(frame: Frame): (x: number, y: number) => [lon: number, lat: number] {
+  return (x, y) => {
+    const { lat, lon } = ecefToGeodetic(localToEcef(frame, [x, y, 0]));
+    return [lon, lat];
+  };
 }
