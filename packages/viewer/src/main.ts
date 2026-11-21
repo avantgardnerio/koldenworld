@@ -165,6 +165,7 @@ async function start(): Promise<void> {
   };
 
   const render = () => {
+    const t0 = performance.now();
     refreshCells();
     const dpr = devicePixelRatio;
     const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
@@ -193,22 +194,29 @@ async function start(): Promise<void> {
     for (const { g, model } of cells) g.buildings?.draw(f, model, SUN);
     if (status.graphOverlay) for (const { g, model } of cells) g.graph?.draw(f, model);
     status.frames++;
+    cpuMs = performance.now() - t0;
     const c = status.cells;
     hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · alt ${camera.h.toFixed(0)} m · ` +
       `${speed(local, false).toFixed(0)} m/s (Shift ×4) · cells ${c.ready - c.missing}` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
-      `within ${(status.radius / 1000).toFixed(1)} km`;
+      `within ${(status.radius / 1000).toFixed(1)} km · ${running ? `${fps.toFixed(0)} fps` : "idle"}, ${cpuMs.toFixed(1)} ms CPU`;
   };
 
   // --- frame loop, running only while there is input ---
   let running = false;
   let last = 0;
+  let fps = 0;    // smoothed while running
+  let cpuMs = 0;  // last frame's CPU time: culling, matrices and draw submission (not GPU time)
   const frame = (now: number) => {
-    const dt = Math.min(MAX_DT, (now - last) / 1000);
+    const raw = (now - last) / 1000;
+    const dt = Math.min(MAX_DT, raw);
     last = now;
+    if (raw > 0) fps = fps === 0 ? 1 / raw : 0.9 * fps + 0.1 / raw;
     const input = keys.take();
     if (isIdle(input)) {
       running = false;
+      fps = 0;
+      render();  // the HUD shows idle
       history.replaceState(null, "", formatGlobeHash(camera));
       return;
     }

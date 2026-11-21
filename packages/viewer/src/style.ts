@@ -50,7 +50,7 @@ export const SUN: [number, number, number] = (() => {
 
 /** Fog closes in at the edge of what is loaded, so the world fades out instead of ending. */
 export function fogRange(loadRadius: number): [start: number, end: number] {
-  return [0.35 * loadRadius, loadRadius];
+  return [0.6 * loadRadius, loadRadius];
 }
 
 /** Lane markings blend into the asphalt before they get thinner than a pixel. */
