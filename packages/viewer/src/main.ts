@@ -25,6 +25,7 @@ import { createFlatLayer, type FlatLayer } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
 import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
+import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import {
   BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, GROUND, MARKING_FADE, SKY, SUN, SURFACE_COLORS,
@@ -33,7 +34,7 @@ import {
 export interface ViewerStatus {
   state: "loading" | "ready" | "error";
   error?: string;
-  cells: { ready: number; loading: number; queued: number; failed: number; missing: number };
+  cells: { ready: number; loading: number; queued: number; failed: number; missing: number; drawn: number };
   radius: number;
   nodes: number;
   edges: number;
@@ -62,7 +63,7 @@ const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 400, rot:
 const params = new URLSearchParams(location.search);
 const fixedRadius = params.has("radius") ? Number(params.get("radius")) : undefined;
 const status: ViewerStatus = (window.viewer = {
-  state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0 }, radius: 0,
+  state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0, drawn: 0 }, radius: 0,
   nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0,
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
@@ -79,9 +80,17 @@ async function getBlob(path: string): Promise<Uint8Array | null> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
+/** Farthest horizontal distance of interleaved points from the origin. */
+function reach(points: ArrayLike<number>, stride: number): number {
+  let r2 = 0;
+  for (let i = 0; i < points.length; i += stride) r2 = Math.max(r2, points[i]! ** 2 + points[i + 1]! ** 2);
+  return Math.sqrt(r2);
+}
+
 interface CellGpu {
   frame: CellFrame;
   missing: boolean;
+  radius: number;  // bounding sphere around the frame's origin, m: ground, roads, buildings to their tops
   ground: FlatLayer;
   roads?: FlatLayer;
   graph?: FlatLayer;
@@ -99,18 +108,24 @@ async function start(): Promise<void> {
     const token = cellToken(cell);
     const blobs = await Promise.all(CELL_TABLES.map((t) => getBlob(`/cells/${token}/${t}.arrow`)));
     const frame = cellFrame(cell);
-    const ground = createFlatLayer(gl!, { ...cellGroundMesh(cell, frame), dims: 3 }, { mode: gl!.TRIANGLES, colors: GROUND, fadeToBase: false });
     const zero = { nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0 };
-    if (blobs.some((b) => b === null)) return { frame, missing: true, ground, counts: zero };
+    const groundMesh = cellGroundMesh(cell, frame);
+    const ground = createFlatLayer(gl!, { ...groundMesh, dims: 3 }, { mode: gl!.TRIANGLES, colors: GROUND, fadeToBase: false });
+    const groundReach = reach(groundMesh.positions, 3);
+    if (blobs.some((b) => b === null)) return { frame, missing: true, radius: groundReach, ground, counts: zero };
     const files = Object.fromEntries(CELL_TABLES.map((t, i) => [t, blobs[i]!])) as unknown as CellFiles;
     const c = cellFromArrow(files);
     if (c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);
     const surface = roadSurfaceMesh(c.graph);
     const lines = roadLineMesh(c.graph);
     const tris = buildingMesh(c.buildings);
+    // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
+    const flat = Math.max(groundReach, reach(c.graph.points, 2) + 20, reach(c.buildings.points, 2));
+    const top = c.buildings.height.reduce((m, v) => Math.max(m, v), 0);
     return {
       frame,
       missing: false,
+      radius: Math.hypot(flat, top),
       ground,
       roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fadeToBase: true }),
       graph: createFlatLayer(gl!, { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
@@ -161,7 +176,7 @@ async function start(): Promise<void> {
       if (g.missing) missing++;
     }
     const { ready, loading, queued, failed } = streamer.counts();
-    Object.assign(status, totals, { cells: { ready, loading, queued, failed, missing } });
+    Object.assign(status, totals, { cells: { ready, loading, queued, failed, missing, drawn: status.cells.drawn } });
     if (status.state === "loading" && streamer.settled) status.state = "ready";
   };
 
@@ -188,7 +203,13 @@ async function start(): Promise<void> {
     };
     // Each cell's frame → the view frame, computed in f64, then cast (decision 20).
     const vf = viewFrame(camera);
-    const cells = [...streamer.ready()].map(([, g]) => ({ g, model: Float32Array.from(frameToFrame(g.frame, vf)) }));
+    // Frustum culling: a cell's frame origin lands at the model matrix's translation.
+    const planes = frustumPlanes(f.view);
+    const cells = [...streamer.ready()]
+      .map(([, g]) => ({ g, m: frameToFrame(g.frame, vf) }))
+      .filter(({ g, m }) => sphereVisible(planes, m[12]!, m[13]!, m[14]!, g.radius))
+      .map(({ g, m }) => ({ g, model: Float32Array.from(m) }));
+    status.cells.drawn = cells.length;
     // Ground layers in painter's order across all cells (writing depth), then depth-tested buildings.
     for (const { g, model } of cells) g.ground.draw(f, model);
     for (const { g, model } of cells) g.roads?.draw(f, model);
@@ -198,7 +219,7 @@ async function start(): Promise<void> {
     cpuMs = performance.now() - t0;
     const c = status.cells;
     hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · alt ${camera.h.toFixed(0)} m · ` +
-      `${speed(local, false).toFixed(0)} m/s (Shift ×4) · cells ${c.ready - c.missing}` +
+      `${speed(local, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing}` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
       `within ${(status.radius / 1000).toFixed(1)} km · ${running ? `${fps.toFixed(0)} fps` : "idle"}, ${cpuMs.toFixed(1)} ms CPU`;
   };

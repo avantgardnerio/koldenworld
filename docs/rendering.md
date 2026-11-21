@@ -31,7 +31,8 @@ each frame: model = frameToFrame(cell frame → ENU at the camera), f64 → f32 
 - **Draw order:** segments are sorted by class, least important first, so major roads paint over minor ones without a depth buffer.
 - **Style** (colors per class) lives in the viewer, not in the map data.
 - **Limits:** lane data is sparse: in 80205 only 8 edges are tagged with 2+ lanes each way, so most arterials render as 1+1. Roads that cross without sharing a node (bridges) overlap flat. Roofs are all flat (`roof:shape` is on only 29 buildings in 80205). Lane-count changes show as small bulges at the node disc.
-- **Not yet:** frustum culling (every loaded cell is drawn), LOD for anything past 5 km (towers and mountains beyond the horizon of the ground), meshes built in workers (they are built on the main thread as cells arrive).
+- **Frustum culling:** each cell has a bounding sphere around its frame origin (its ground, the roads and buildings it owns, which reach past its edge, up to its tallest building). Each frame the sphere is tested against the six planes of the view-projection matrix (`frustum.ts`); cells entirely outside aren't drawn. The HUD shows drawn / loaded.
+- **Not yet:** LOD for anything past 5 km (towers and mountains beyond the horizon of the ground), meshes built in workers (they are built on the main thread as cells arrive).
 
 ## Static world
 

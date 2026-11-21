@@ -88,6 +88,9 @@ describe("viewer", () => {
     expect(s).toMatchObject({ state: "ready", nodes: 5, edges: 4, buildings: 2, buildingTriangles: 2 * (8 + 2), graphOverlay: false });
     expect(s.cells.ready).toBeGreaterThan(1);
     expect(s.cells).toMatchObject({ missing: s.cells.ready - 1, failed: 0, loading: 0, queued: 0 });
+    // Looking straight down from ~260 m: only cells under the view are drawn.
+    expect(s.cells.drawn).toBeGreaterThan(0);
+    expect(s.cells.drawn).toBeLessThan(s.cells.ready);
     expect(s.radius).toBe(1000);
     expect(s.surfaceTriangles).toBeGreaterThan(0);
     expect(s.frames).toBeGreaterThan(0);
