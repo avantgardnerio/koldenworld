@@ -26,7 +26,10 @@ export function serve(port: number, log: (msg: string) => void): Promise<void> {
         res.writeHead(200, {
           "Content-Type": "application/vnd.apache.arrow.file",
           "Content-Length": files[table].length,
-          "Cache-Control": "no-cache",
+          // Not even the browser's disk cache: it turned every cell into 3 cache files in $HOME,
+          // and this server answers from its own cache in under a millisecond. Content-hashed,
+          // immutable URLs are the plan once cells are served from somewhere remote.
+          "Cache-Control": "no-store",
           "Access-Control-Allow-Origin": "*",
         });
         res.end(files[table]);
