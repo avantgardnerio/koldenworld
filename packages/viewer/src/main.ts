@@ -52,7 +52,7 @@ declare global {
 }
 
 /** Beyond this, the horizon needs coarser data (level of detail), which doesn't exist yet. */
-const MAX_RADIUS = 15_000;
+const MAX_RADIUS = 25_000;
 /** Cells stay loaded out to this multiple of the load radius, so the edge doesn't thrash. */
 const KEEP_FACTOR = 1.3;
 /** Recompute the wanted cells once the camera has moved this far (m). */
