@@ -5,7 +5,7 @@ export {
 } from "./geodesy.ts";
 export {
   cellCenter, cellChildren, cellContains, cellCorners, cellEdgeNeighbors, cellFace, cellFrame, cellFromInt64,
-  cellFromLatLon, cellFromToken, cellLevel, cellParent, cellPoint, cellToInt64, cellToken, MAX_LEVEL, type CellId,
+  cellFromLatLon, cellFromToken, cellLevel, cellOutline, cellParent, cellPoint, cellToInt64, cellToken, MAX_LEVEL, type CellId,
 } from "./s2.ts";
 export {
   buildCell, CELL_LEVEL, CELL_TABLES, CELL_VERSION, cellFromArrow, cellGroundMesh, cellsWithin, cellToArrow, horizonDistance,

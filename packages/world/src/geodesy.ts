@@ -90,24 +90,27 @@ export function localToEcef(f: Frame, [x, y, z]: Vec3): Vec3 {
 
 /**
  * The rigid transform taking `from`-local coordinates to `to`-local ones, as a
- * column-major 4×4 (WebGL layout). Computed in f64; the translation is a
- * difference of nearby origins, so casting the result to f32 loses nothing
- * that matters when the frames are close.
+ * column-major 4×4 (WebGL layout), into `out` if given (a Float32Array
+ * receives the f64 results rounded once, with no intermediate f32 math).
+ * The translation is a difference of nearby origins, so the f32 result loses
+ * nothing that matters when the frames are close.
  */
-export function frameToFrame(from: Frame, to: Frame): Float64Array {
+export function frameToFrame(from: Frame, to: Frame, out: Float64Array | Float32Array = new Float64Array(16)) {
   const axes = [from.east, from.north, from.up];
-  const d: Vec3 = [from.origin[0] - to.origin[0], from.origin[1] - to.origin[1], from.origin[2] - to.origin[2]];
-  const m = new Float64Array(16);
   for (let c = 0; c < 3; c++) {
-    m[c * 4] = dot(axes[c]!, to.east);
-    m[c * 4 + 1] = dot(axes[c]!, to.north);
-    m[c * 4 + 2] = dot(axes[c]!, to.up);
+    const a = axes[c]!;
+    out[c * 4] = dot(a, to.east);
+    out[c * 4 + 1] = dot(a, to.north);
+    out[c * 4 + 2] = dot(a, to.up);
+    out[c * 4 + 3] = 0;
   }
-  m[12] = dot(d, to.east);
-  m[13] = dot(d, to.north);
-  m[14] = dot(d, to.up);
-  m[15] = 1;
-  return m;
+  // The origin difference in f64 first: it is the large part (decision 20).
+  const dx = from.origin[0] - to.origin[0], dy = from.origin[1] - to.origin[1], dz = from.origin[2] - to.origin[2];
+  out[12] = dx * to.east[0] + dy * to.east[1] + dz * to.east[2];
+  out[13] = dx * to.north[0] + dy * to.north[1] + dz * to.north[2];
+  out[14] = dx * to.up[0] + dy * to.up[1] + dz * to.up[2];
+  out[15] = 1;
+  return out;
 }
 
 /** Apply a column-major 4×4 rigid transform to a point. */

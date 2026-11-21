@@ -45,6 +45,11 @@ export class CellStreamer<T> {
     this.pump();
   }
 
+  /** Each loaded cell's data, without allocating (for the render loop). */
+  forEachReady(fn: (data: T) => void): void {
+    for (const slot of this.slots.values()) if (slot.state === "ready") fn(slot.data!);
+  }
+
   /** Loaded cells and their data. */
   *ready(): Generator<[CellId, T]> {
     for (const [cell, slot] of this.slots) if (slot.state === "ready") yield [cell, slot.data!];

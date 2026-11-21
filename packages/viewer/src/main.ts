@@ -17,11 +17,11 @@
 // what was drawn without decoding screenshots.
 
 import {
-  buildingMesh, CELL_TABLES, cellFromArrow, cellFrame, cellGroundMesh, cellsWithin, cellToken, frameToFrame,
-  geodeticToEcef, horizonDistance, roadLineMesh, roadSurfaceMesh, type CellFiles, type CellId, type Frame as CellFrame,
+  buildingMesh, CELL_LEVEL, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellGroundMesh, cellsWithin, cellToken,
+  frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, type CellFiles, type CellId, type Frame as CellFrame,
 } from "@game/world";
 import { fromYawPitch, speed, viewProjection } from "./camera.ts";
-import { createFlatLayer, type FlatLayer } from "./flat-layer.ts";
+import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
 import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
@@ -55,8 +55,8 @@ declare global {
 const MAX_RADIUS = 25_000;
 /** Cells stay loaded out to this multiple of the load radius, so the edge doesn't thrash. */
 const KEEP_FACTOR = 1.3;
-/** Recompute the wanted cells once the camera has moved this far (m). */
-const REFRESH_M = 50;
+/** The load radius moves in steps of this (m), so climbing doesn't recompute the wanted cells every frame. */
+const RADIUS_STEP = 500;
 const MAX_DT = 0.1;  // s; a stalled tab must not teleport the camera
 const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 400, rot: fromYawPitch(0, -35 * Math.PI / 180) };
 
@@ -69,7 +69,8 @@ const status: ViewerStatus = (window.viewer = {
 });
 
 /** What can be seen from this height, out to MAX_RADIUS. */
-const loadRadius = (h: number) => fixedRadius ?? Math.min(MAX_RADIUS, horizonDistance(h));
+const loadRadius = (h: number) =>
+  fixedRadius ?? Math.min(MAX_RADIUS, Math.ceil(horizonDistance(h) / RADIUS_STEP) * RADIUS_STEP);
 
 /** Platform adapter (architecture.md): in the browser, blobs come over HTTP and the HTTP cache. null: no such file. */
 async function getBlob(path: string): Promise<Uint8Array | null> {
@@ -91,8 +92,10 @@ interface CellGpu {
   frame: CellFrame;
   missing: boolean;
   radius: number;  // bounding sphere around the frame's origin, m: ground, roads, buildings to their tops
+  model: Float32Array;  // this frame's cell → view transform, reused every frame
   ground: FlatLayer;
   roads?: FlatLayer;
+  lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
   graph?: FlatLayer;
   buildings?: SolidLayer;
   counts: { nodes: number; edges: number; surfaceTriangles: number; buildings: number; buildingTriangles: number };
@@ -112,7 +115,8 @@ async function start(): Promise<void> {
     const groundMesh = cellGroundMesh(cell, frame);
     const ground = createFlatLayer(gl!, { ...groundMesh, dims: 3 }, { mode: gl!.TRIANGLES, colors: GROUND, fadeToBase: false });
     const groundReach = reach(groundMesh.positions, 3);
-    if (blobs.some((b) => b === null)) return { frame, missing: true, radius: groundReach, ground, counts: zero };
+    const model = new Float32Array(16);
+    if (blobs.some((b) => b === null)) return { frame, missing: true, radius: groundReach, model, ground, counts: zero };
     const files = Object.fromEntries(CELL_TABLES.map((t, i) => [t, blobs[i]!])) as unknown as CellFiles;
     const c = cellFromArrow(files);
     if (c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);
@@ -126,10 +130,10 @@ async function start(): Promise<void> {
       frame,
       missing: false,
       radius: Math.hypot(flat, top),
+      model,
       ground,
       roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fadeToBase: true }),
-      graph: createFlatLayer(gl!, { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
-        { mode: gl!.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false }),
+      lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB),
       counts: {
         nodes: c.graph.nodes.count, edges: c.graph.edges.count, surfaceTriangles: surface.indices.length / 3,
@@ -152,15 +156,14 @@ async function start(): Promise<void> {
   let camera: GlobeCamera = parseGlobeHash(location.hash) ?? DEFAULT_CAMERA;
   history.replaceState(null, "", formatGlobeHash(camera));
 
-  // --- which cells: refreshed when the camera has moved enough ---
-  let refreshedAt: [number, number, number] | null = null;
+  // --- which cells: refreshed when the camera enters another cell or the radius steps ---
+  let refreshedCell: CellId | null = null;
   let refreshedRadius = 0;
   const refreshCells = () => {
     const radius = loadRadius(camera.h);
-    const p = geodeticToEcef({ lat: camera.lat, lon: camera.lon, h: 0 });
-    if (refreshedAt && radius === refreshedRadius
-        && Math.hypot(p[0] - refreshedAt[0], p[1] - refreshedAt[1], p[2] - refreshedAt[2]) < REFRESH_M) return;
-    refreshedAt = p;
+    const here = cellFromLatLon(camera.lat, camera.lon, CELL_LEVEL);
+    if (here === refreshedCell && radius === refreshedRadius) return;
+    refreshedCell = here;
     refreshedRadius = radius;
     status.radius = radius;
     const around = cellsWithin(camera.lat, camera.lon, radius * KEEP_FACTOR);
@@ -180,6 +183,7 @@ async function start(): Promise<void> {
     if (status.state === "loading" && streamer.settled) status.state = "ready";
   };
 
+  const visible: CellGpu[] = [];  // reused every frame
   const render = () => {
     const t0 = performance.now();
     refreshCells();
@@ -202,19 +206,25 @@ async function start(): Promise<void> {
       fade: MARKING_FADE,
     };
     // Each cell's frame → the view frame, computed in f64, then cast (decision 20).
-    const vf = viewFrame(camera);
     // Frustum culling: a cell's frame origin lands at the model matrix's translation.
+    const vf = viewFrame(camera);
     const planes = frustumPlanes(f.view);
-    const cells = [...streamer.ready()]
-      .map(([, g]) => ({ g, m: frameToFrame(g.frame, vf) }))
-      .filter(({ g, m }) => sphereVisible(planes, m[12]!, m[13]!, m[14]!, g.radius))
-      .map(({ g, m }) => ({ g, model: Float32Array.from(m) }));
-    status.cells.drawn = cells.length;
+    visible.length = 0;
+    streamer.forEachReady((g) => {
+      frameToFrame(g.frame, vf, g.model);
+      if (sphereVisible(planes, g.model[12]!, g.model[13]!, g.model[14]!, g.radius)) visible.push(g);
+    });
+    status.cells.drawn = visible.length;
     // Ground layers in painter's order across all cells (writing depth), then depth-tested buildings.
-    for (const { g, model } of cells) g.ground.draw(f, model);
-    for (const { g, model } of cells) g.roads?.draw(f, model);
-    for (const { g, model } of cells) g.buildings?.draw(f, model, SUN);
-    if (status.graphOverlay) for (const { g, model } of cells) g.graph?.draw(f, model);
+    for (const g of visible) g.ground.draw(f, g.model);
+    for (const g of visible) g.roads?.draw(f, g.model);
+    for (const g of visible) g.buildings?.draw(f, g.model, SUN);
+    if (status.graphOverlay) {
+      for (const g of visible) {
+        if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false });
+        g.graph?.draw(f, g.model);
+      }
+    }
     status.frames++;
     cpuMs = performance.now() - t0;
     const c = status.cells;

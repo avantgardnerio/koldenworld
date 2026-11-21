@@ -18,7 +18,7 @@ GET /cells/<token>/nodes, edges, buildings.arrow ─▶ cellFromArrow (zero-copy
 each frame: model = frameToFrame(cell frame → ENU at the camera), f64 → f32 (decision 20)
 ```
 
-- **Cells and streaming** (decision 22): the load radius is the distance to the horizon from the camera's height (`horizonDistance`), capped at 25 km until there is LOD; `?radius=<m>` fixes it. Cells out to 1.3 × the radius stay loaded, so the edge doesn't thrash; the wanted set is recomputed after 50 m of movement. A cell with no files (404) is bare ground; a failed one (e.g. the server could not reach Overpass) is retried after 30 s.
+- **Cells and streaming** (decision 22): the load radius is the distance to the horizon from the camera's height (`horizonDistance`), capped at 25 km until there is LOD; `?radius=<m>` fixes it. Cells out to 1.3 × the radius stay loaded, so the edge doesn't thrash; the wanted set is recomputed only when the camera enters another cell or the radius moves a 500 m step (about 7 ms for the 3,100 cells of a 25 km ring with its keep margin). A cell with no files (404) is bare ground; a failed one (e.g. the server could not reach Overpass) is retried after 30 s.
 - **Frames:** everything is drawn in the ENU frame on the ground below the camera, so the camera is always at (0, 0, alt) and nothing the GPU sees is large. Each cell is placed by its own rigid transform; the Earth's curvature comes out of those transforms (the ground 5 km away is 2 m below the camera's horizon plane).
 - **Road surface** (`road-surface.ts`, decision 18): each edge is a mitered ribbon whose width comes from lanes × the class's lane width plus shoulders; every node gets a disc as wide as its widest road, which fills intersection corners and rounds dead ends. Markings on tertiary roads and above: double yellow center line on two-way roads, dashed white (3 m dash, 9 m gap) between same-direction lanes, stopping short of intersections. 80205: 140k triangles.
 - **Flat layers** (`flat-layer.ts`): one shader for every mesh on the ground (2D on a cell's tangent plane, or 3D for the curved ground), with a material index per vertex and a per-layer palette. They are painted in order (depth test `ALWAYS`), all cells' ground first, then all cells' roads, but still write depth.
@@ -31,12 +31,14 @@ each frame: model = frameToFrame(cell frame → ENU at the camera), f64 → f32 
 - **Draw order:** segments are sorted by class, least important first, so major roads paint over minor ones without a depth buffer.
 - **Style** (colors per class) lives in the viewer, not in the map data.
 - **Limits:** lane data is sparse: in 80205 only 8 edges are tagged with 2+ lanes each way, so most arterials render as 1+1. Roads that cross without sharing a node (bridges) overlap flat. Roofs are all flat (`roof:shape` is on only 29 buildings in 80205). Lane-count changes show as small bulges at the node disc.
+- **No per-frame garbage:** each cell keeps its own model matrix, written in place each frame (`frameToFrame(…, out)`), and the visible list is reused; the graph overlay's mesh is kept on the CPU and uploaded only the first time the overlay is drawn.
 - **Frustum culling:** each cell has a bounding sphere around its frame origin (its ground, the roads and buildings it owns, which reach past its edge, up to its tallest building). Each frame the sphere is tested against the six planes of the view-projection matrix (`frustum.ts`); cells entirely outside aren't drawn. The HUD shows drawn / loaded.
 - **Not yet:** LOD for anything past 5 km (towers and mountains beyond the horizon of the ground), meshes built in workers (they are built on the main thread as cells arrive).
 
 ## Static world
 
 - Each partition's meshes come from operators, already merged into a few vertex buffers per partition and LOD. That keeps draw calls to a few hundred instead of one per building.
+- **No per-frame garbage:** each cell keeps its own model matrix, written in place each frame (`frameToFrame(…, out)`), and the visible list is reused; the graph overlay's mesh is kept on the CPU and uploaded only the first time the overlay is drawn.
 - **Frustum culling:** test partition bounds against the camera frustum. Nearly free, and removes most of the city.
 - **LOD by distance:** full detail near the camera; simplified footprints, merged blocks or impostors far away.
 - **Draw distance and fog:** caps the cost and hides streaming.

@@ -93,9 +93,8 @@ function fromFaceIJ(face: number, i: number, j: number): CellId {
 const lsb = (id: CellId) => id & -id;
 
 export function cellLevel(id: CellId): number {
-  let l = MAX_LEVEL;
-  for (let b = lsb(id); b > 1n; b >>= 2n) l--;
-  return l;
+  // The lowest set bit is a power of two below 2^61, so Number() and log2 are exact.
+  return MAX_LEVEL - Math.log2(Number(lsb(id))) / 2;
 }
 
 export const cellFace = (id: CellId) => Number(id >> 61n);
@@ -126,9 +125,12 @@ export function cellFromLatLon(lat: number, lon: number, level = MAX_LEVEL): Cel
 /** Face and the cell's (i, j) at its own level (0 ≤ i, j < 2^level). */
 function cellFaceIJ(id: CellId): { face: number; i: number; j: number; level: number } {
   const face = cellFace(id), level = cellLevel(id);
+  // Two 32-bit halves as numbers: no bigint work per level.
+  const hi = Number(id >> 32n), lo = Number(id & 0xffffffffn);
   let orient = face & SWAP, i = 0, j = 0;
   for (let k = 0; k < level; k++) {
-    const pos = Number((id >> BigInt(59 - 2 * k)) & 3n);
+    const bit = 59 - 2 * k;  // the position's low bit; the one at bit 31 straddles the halves
+    const pos = bit >= 32 ? (hi >>> (bit - 32)) & 3 : bit === 31 ? ((hi & 1) << 1) | (lo >>> 31) : (lo >>> bit) & 3;
     const ij = POS_TO_IJ[orient]![pos]!;
     i = i * 2 + (ij >> 1);
     j = j * 2 + (ij & 1);
@@ -154,6 +156,14 @@ export function cellCorners(id: CellId): { lat: number; lon: number }[] {
   const n = 2 ** level;
   return [[0, 0], [1, 0], [1, 1], [0, 1]].map(([di, dj]) =>
     xyzToLatLon(faceUVToXyz(face, stToUV((i + di!) / n), stToUV((j + dj!) / n))));
+}
+
+/** cellCenter and cellCorners from one decode of the id, for loops over many cells. */
+export function cellOutline(id: CellId): { center: { lat: number; lon: number }; corners: { lat: number; lon: number }[] } {
+  const { face, i, j, level } = cellFaceIJ(id);
+  const n = 2 ** level;
+  const at = (fi: number, fj: number) => xyzToLatLon(faceUVToXyz(face, stToUV(fi / n), stToUV(fj / n)));
+  return { center: at(i + 0.5, j + 0.5), corners: [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)] };
 }
 
 /** The point at fractions (fs, ft) ∈ [0, 1]² across the cell, in its (s, t) square. */

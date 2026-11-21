@@ -17,7 +17,7 @@ import { enuProjection } from "./projection.ts";
 import { roadGraphFromArrow, roadGraphToArrow } from "./road-graph-arrow.ts";
 import { buildRoadGraph, ROAD_GRAPH_VERSION, type RoadGraph, type RoadWayInput } from "./road-graph.ts";
 import {
-  cellCenter, cellCorners, cellEdgeNeighbors, cellFrame, cellFromLatLon, cellFromToken, cellLevel, cellPoint, cellToken,
+  cellEdgeNeighbors, cellFrame, cellFromLatLon, cellFromToken, cellLevel, cellOutline, cellPoint, cellToken,
   type CellId,
 } from "./s2.ts";
 
@@ -111,8 +111,9 @@ export function cellsWithin(lat: number, lon: number, radius: number, level = CE
   const out: { cell: CellId; distance: number }[] = [];
   while (queue.length > 0) {
     const c = queue.pop()!;
-    const center = ecef(cellCenter(c));
-    const reach = Math.max(...cellCorners(c).map((k) => dist(center, ecef(k))));
+    const o = cellOutline(c);
+    const center = ecef(o.center);
+    const reach = Math.max(...o.corners.map((k) => dist(center, ecef(k))));
     const d = Math.max(0, dist(center, p) - reach);
     if (d > radius && c !== start) continue;
     out.push({ cell: c, distance: d });
