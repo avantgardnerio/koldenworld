@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import pg from "pg";
-import { MIGRATIONS_DATABASE_URL, MIGRATIONS_DIR } from "./config.ts";
+import { clientConfig, MIGRATIONS_DATABASE_URL, MIGRATIONS_DIR } from "./config.ts";
 
 export interface Migration {
   version: string;   // filename without .sql, e.g. "0002_roads"
@@ -33,7 +33,7 @@ export async function migrate(
   url = MIGRATIONS_DATABASE_URL,
   log: (msg: string) => void = () => {},
 ): Promise<string[]> {
-  const client = new pg.Client({ connectionString: url });
+  const client = new pg.Client(clientConfig(url));
   await client.connect();
   try {
     await client.query(`

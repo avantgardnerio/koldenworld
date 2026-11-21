@@ -1,6 +1,6 @@
 import type { BuildingInput, HeightSource, OsmType, RoadClass, RoadWayInput } from "@game/world";
 import pg from "pg";
-import { DATABASE_URL } from "./config.ts";
+import { clientConfig, DATABASE_URL } from "./config.ts";
 
 export interface Bbox { south: number; west: number; north: number; east: number }
 
@@ -13,7 +13,7 @@ export interface FetchInfo {
 }
 
 async function withClient<T>(url: string, fn: (c: pg.Client) => Promise<T>): Promise<T> {
-  const client = new pg.Client({ connectionString: url });
+  const client = new pg.Client(clientConfig(url));
   await client.connect();
   try {
     return await fn(client);

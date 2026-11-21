@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { hasFetch, loadBuildings, loadRoadWays, type Bbox } from "@game/db";
+import { fetchAreas, hasFetch, loadBuildings, loadRoadWays, type Bbox } from "@game/db";
 import type { OverpassResponse } from "@game/osm-import";
 import {
   BUILDINGS_VERSION, buildCell, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
@@ -62,6 +62,7 @@ async function writeAtomic(file: string, data: Uint8Array | string): Promise<voi
 export class CellService {
   private queue: Promise<unknown> = Promise.resolve();  // downloads, one at a time
   private fetches = new Map<CellId, Promise<void>>();
+  private covered?: Promise<Set<string>>;  // areas already imported, loaded once
   private builds = new Map<CellId, Promise<CellFiles>>();
 
   private log: (msg: string) => void;
@@ -95,12 +96,24 @@ export class CellService {
 
   private async build(cell: CellId, dir: string, manifest: string): Promise<CellFiles> {
     const token = cellToken(cell);
-    await Promise.all(fetchCellsFor(cell).map((f) => this.ensureFetched(f)));
-    const box = cellBox(cell, MARGIN_M);
-    const [ways, buildingInputs] = await Promise.all([loadRoadWays(box), loadBuildings(box)]);
     const t0 = performance.now();
+    const stage: string[] = [];
+    let t = t0;
+    const lap = (name: string) => {
+      const now = performance.now();
+      stage.push(`${name} ${(now - t).toFixed(0)}`);
+      t = now;
+    };
+    await Promise.all(fetchCellsFor(cell).map((f) => this.ensureFetched(f)));
+    lap("deps");
+    const box = cellBox(cell, MARGIN_M);
+    const [ways, buildingInputs] = await Promise.all([
+      loadRoadWays(box).then((w) => { lap("roads"); return w; }),
+      loadBuildings(box).then((b) => { lap("buildings"); return b; }),
+    ]);
     const contents = buildCell(cell, ways, buildingInputs);
     const files = cellToArrow(contents);
+    lap("build");
     await mkdir(dir, { recursive: true });
     for (const t of CELL_TABLES) await writeAtomic(path.join(dir, `${t}.arrow`), files[t]);
     await writeAtomic(manifest, JSON.stringify({
@@ -108,8 +121,10 @@ export class CellService {
       edges: contents.graph.edges.count, buildings: contents.buildings.count,
       bytes: Object.fromEntries(CELL_TABLES.map((t) => [t, files[t].length])),
     }, null, 2) + "\n");
+    lap("write");
     this.log(`cell ${token}: ${contents.graph.edges.count} edges, ${contents.buildings.count} buildings ` +
-             `(${ways.length} ways, ${buildingInputs.length} buildings loaded; ${(performance.now() - t0).toFixed(0)} ms)`);
+             `(${ways.length} ways, ${buildingInputs.length} buildings loaded; ${(performance.now() - t0).toFixed(0)} ms: ` +
+             `${stage.join(", ")})`);
     return files;
   }
 
@@ -127,7 +142,8 @@ export class CellService {
 
   private async fetch(fetchCell: CellId): Promise<void> {
     const area = fetchArea(fetchCell);
-    if (await hasFetch(area)) return;
+    this.covered ??= fetchAreas("s2:");
+    if ((await this.covered).has(area) || await hasFetch(area)) return;
     const run = this.queue.then(() => this.download(fetchCell, area));
     this.queue = run.catch(() => {});
     await run;

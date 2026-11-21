@@ -1,6 +1,6 @@
 import type { RoadWay } from "@game/osm-import";
 import pg from "pg";
-import { DATABASE_URL } from "./config.ts";
+import { clientConfig, DATABASE_URL } from "./config.ts";
 import { upsertFetch, type OsmFetch } from "./fetches.ts";
 
 export interface ImportOptions {
@@ -28,7 +28,7 @@ export interface ImportResult {
 export async function importRoadWays(
   fetch: OsmFetch, ways: RoadWay[], opts: ImportOptions = {}, url = DATABASE_URL,
 ): Promise<ImportResult> {
-  const client = new pg.Client({ connectionString: url });
+  const client = new pg.Client(clientConfig(url));
   await client.connect();
   try {
     await client.query("BEGIN");

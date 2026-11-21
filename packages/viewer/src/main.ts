@@ -51,7 +51,7 @@ declare global {
 }
 
 /** Beyond this, the horizon needs coarser data (level of detail), which doesn't exist yet. */
-const MAX_RADIUS = 5000;
+const MAX_RADIUS = 15_000;
 /** Cells stay loaded out to this multiple of the load radius, so the edge doesn't thrash. */
 const KEEP_FACTOR = 1.3;
 /** Recompute the wanted cells once the camera has moved this far (m). */
@@ -125,6 +125,7 @@ async function start(): Promise<void> {
 
   const streamer = new CellStreamer<CellGpu>({
     load: loadCell,
+    concurrency: 8,
     dispose: (g) => [g.ground, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose()),
     onChange: () => {
       updateStatus();

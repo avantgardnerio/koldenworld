@@ -1,6 +1,6 @@
 import type { OsmBuilding } from "@game/osm-import";
 import pg from "pg";
-import { DATABASE_URL } from "./config.ts";
+import { clientConfig, DATABASE_URL } from "./config.ts";
 import { upsertFetch, type OsmFetch } from "./fetches.ts";
 import type { ImportOptions, ImportResult } from "./roads.ts";
 
@@ -17,7 +17,7 @@ const multipolygonWkt = (polygons: [number, number][][][]) =>
 export async function importBuildings(
   fetch: OsmFetch, buildings: OsmBuilding[], opts: ImportOptions = {}, url = DATABASE_URL,
 ): Promise<ImportResult> {
-  const client = new pg.Client({ connectionString: url });
+  const client = new pg.Client(clientConfig(url));
   await client.connect();
   try {
     await client.query("BEGIN");

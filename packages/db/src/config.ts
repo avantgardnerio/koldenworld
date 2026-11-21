@@ -12,3 +12,10 @@ export const MIGRATIONS_DATABASE_URL =
   process.env.MIGRATIONS_DATABASE_URL ?? "postgres://game_migrations@/game?host=/var/run/postgresql";
 
 export const MIGRATIONS_DIR = path.resolve(import.meta.dirname, "../../../db/migrations");
+
+/**
+ * Client settings for every connection. JIT is off: the planner overestimates
+ * our small spatial queries (one cell's rows) and spends ~90 ms compiling each
+ * one, for queries that run in ~35 ms without it.
+ */
+export const clientConfig = (url: string) => ({ connectionString: url, options: "-c jit=off" });
