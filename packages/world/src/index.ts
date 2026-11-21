@@ -1,5 +1,13 @@
 export { localProjection, type LatLon } from "./projection.ts";
 export {
+  ecefToGeodetic, ecefToLocal, enuFrame, frameToFrame, geodeticToEcef, localToEcef, transformPoint, WGS84_A, WGS84_B,
+  WGS84_F, type Frame, type Geodetic, type Vec3,
+} from "./geodesy.ts";
+export {
+  cellCenter, cellChildren, cellContains, cellCorners, cellEdgeNeighbors, cellFace, cellFrame, cellFromInt64,
+  cellFromLatLon, cellFromToken, cellLevel, cellParent, cellToInt64, cellToken, MAX_LEVEL, type CellId,
+} from "./s2.ts";
+export {
   buildRoadGraph, componentSizes, ROAD_CLASSES, ROAD_GRAPH_VERSION,
   type RoadClass, type RoadEdges, type RoadGraph, type RoadNodes, type RoadWayInput,
 } from "./road-graph.ts";

@@ -25,9 +25,14 @@ Splitting ways into segments at intersections and building the road graph happen
 
 ## Coordinates
 
-- Local flat coordinates in meters: x east, y north, z up. Each world has an origin (lat/lon) and a projection.
-- `f32` positions are precise enough within roughly 10 km of the origin. Larger worlds need origin rebasing (open question, see [roadmap.md](roadmap.md)).
-- Lat/lon only exists at the import boundary.
+See decision 20 in [decisions.md](decisions.md).
+
+- **Global:** WGS84 ECEF, meters, `f64`. Used for partition anchors, the camera, the player and streaming. Never stored in `f32` and never sent to the GPU.
+- **Local:** east-north-up (ENU) meters, `f32`: x east, y north, z up, relative to an anchor. Every partition has one (its center); the sim has one near the player that rebases as they travel; the renderer works relative to the camera.
+- Local positions come from true lat/lon/height, so neighboring partitions agree exactly at shared points.
+- Heights are WGS84 ellipsoidal; geoid-based sources (most elevation models) are converted at import.
+- Lat/lon only exists at the import boundary and in Postgres.
+- Today exports still use one equirectangular frame per fetch area with ground at z = 0; this section describes the target.
 
 ## IDs
 

@@ -21,8 +21,11 @@
 - **Name** of the game.
 - **Gameplay loop:** timed deliveries, taxi runs, chases, checkpoint races, free roam first?
 - **On foot:** is walking around part of the game, or only driving?
-- **Partition scheme:** quadtree cells vs R-tree node groups; target items per partition.
-- **Large worlds:** origin rebasing for `f32` precision beyond ~10 km; stable entity IDs across partitions.
+- **Partition sizing:** S2 cells (decision 21); target items per partition and the rule for choosing cell levels.
+- **Large worlds:** stable entity IDs across partitions. (Precision is settled by decision 20.)
+- **Terrain source:** USGS 3DEP for the US, a global DEM (Copernicus GLO-30) elsewhere; resolution, and how roads are fitted to it (cuts, fills, bridges, tunnels).
+- **Long view distances** for flight: distant terrain LOD and depth precision (reversed-Z or logarithmic depth).
+- **Bulk OSM:** continent-scale imports from regional extracts (such as Geofabrik) instead of Overpass snapshots.
 - **Cross-engine determinism:** do replays need to match in Firefox and Safari, or is V8 (Node + Chrome) enough?
 - **IndexedDB:** deferred; revisit for offline play or caching client-built meshes.
 - **Missing buildings:** how good should an unmapped suburb look; procedural filler or not.

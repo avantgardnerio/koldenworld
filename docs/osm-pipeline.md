@@ -63,7 +63,7 @@ All OSM interpretation lives in TS so the server, CLI and tests share it.
 
 Built (`@game/world` + `cli export`):
 - Cut ways into edges at nodes shared with another way (OSM intersections are shared node ids, not geometric crossings, so bridges stay unconnected). Nodes and edges are numbered densely in `osm_way_id` order, so output is reproducible.
-- Project lat/lon to local meters around the area's bbox center (equirectangular; error is negligible at this scale).
+- Project lat/lon to local meters around the area's bbox center (equirectangular on a sphere; good to about 0.25% here). To be replaced by per-partition ENU frames on WGS84 (decision 20).
 - Build CSR incidence lists (each node's incident edges).
 - Write Arrow IPC files (decision 15) and check the round trip before writing.
 

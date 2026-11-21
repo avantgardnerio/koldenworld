@@ -10,8 +10,9 @@ Keeping these separate means "what gets rebuilt" and "how we search" can change 
 ## Partitions
 
 - Adaptive, split by item count, so downtown and rural areas cost about the same per partition. Fixed-size tiles were rejected for this reason.
-- Candidate schemes (open question): quadtree cells, or groups of R-tree nodes at a fixed level. Quadtree cells have simple, stable boundaries, which helps cache keys.
+- Partitions are cells of one global hierarchy, not something defined per fetch, so every place on Earth has a stable address and every partition uses the same coordinate logic. The hierarchy is S2 (decision 21): a partition is an S2 cell, and adaptivity comes from choosing the cell level per region. Partition ids are S2 cell ids.
 - Partitions must be deterministic for a given data snapshot: the same input always yields the same partition IDs.
+- Each partition has an anchor frame (ENU at its center) and stores geometry in `f32` relative to it (decision 20).
 
 ### Objects crossing boundaries
 

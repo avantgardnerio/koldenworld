@@ -117,3 +117,25 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Rendering:** ground layers keep painter's order but write depth; buildings are depth-tested and back-face culled. This avoids z-fighting between coplanar ground layers without needing polygon offset.
 - **Rejected for now:** roof shapes (too rare in the data to justify the work), textures and windows, splitting `import` into separate road and building commands (one `import` reads the snapshot once).
 
+## 20. Coordinates: the real globe, small local frames for everything else
+
+- **Chosen:** one global frame and three kinds of local frame.
+  - **Global:** ECEF (Earth-centered, Earth-fixed) on the WGS84 ellipsoid, meters, `f64` (a plain JS `number`). It answers "where on Earth" for partition anchors, the camera, the player and streaming. It never goes to the GPU.
+  - **Partition:** each partition has an anchor (its center in ECEF) and the east-north-up (ENU) basis there. Its static geometry is `f32` meters in that frame. Vertices come from true lat/lon/height, not from a plane, so a partition is slightly curved in its own frame (about 8 cm of drop 1 km from the anchor) and neighbors meet exactly: a shared OSM node lands on the same ECEF point from both sides.
+  - **Sim:** physics, collision and the dynamic grid run in an ENU frame near the player, in `f32`, rebased when the player moves about a kilometer or two from its anchor (threshold to be measured). Partitions enter it through a rigid transform computed in `f64`. Gravity is the frame's −z; within a couple of km the true vertical differs by a few hundredths of a degree.
+  - **Render:** camera-relative. Each frame, each partition's partition→camera transform is computed in `f64` and only then cast to `f32`. The camera's orientation is relative to the ENU at its position, so north and up are always local.
+- **Heights:** ellipsoidal (WGS84) inside the game. Elevation models usually give heights above the geoid (EGM96/EGM2008), so they are converted at import; around Denver the difference is about −17 m.
+- **Terrain is in scope:** roads, buildings and the camera sit on an elevation model, not on z = 0.
+- **Flight is in scope:** the frames work at any altitude; the sim frame just rebases more often at speed. Long view distances need distant terrain LOD and a depth-precision strategy (reversed-Z or logarithmic depth), both still open.
+- **Rejected:** one flat projected world (UTM, Lambert conformal conic, Web Mercator), because across a continent scale error reaches 1–2% or more, up turns about 14° between Denver and Chicago, and `f32` still needs rebasing; the per-area equirectangular projection exports use today, because areas don't share a frame and a spherical radius misstates scale (about +0.15% north, −0.25% east at Denver); ECEF in `f32`, because at Earth's radius its spacing is half a meter.
+- **Why:** the goal is a continuous world you can drive or fly across in real time, such as Denver to Chicago (about 1,600 km, 14 hours). Precision then doesn't depend on where on Earth you are.
+- **Status:** not built yet. Exports still project around the fetch bbox center (`packages/world/src/projection.ts`) with ground at z = 0.
+
+## 21. Partitions are S2 cells
+
+- **Chosen:** Google's S2 cell hierarchy as the one global grid: the sphere projected onto a cube, a 30-level quadtree per face, cells numbered along a Hilbert curve into 64-bit ids. A partition is an S2 cell; dense areas use deeper levels than sparse ones, and ids stay stable because the grid doesn't depend on the data. Each cell's anchor frame is ENU at its center (decision 20). Implemented in `packages/world/src/s2.ts` (ids, parents, children, containment, centers, corners, edge neighbors including across cube faces, tokens, signed `bigint` for Postgres), checked against s2sphere reference values (`test/s2-golden.py`).
+- **Rejected:** H3 (children only approximately cover their parent, which breaks containment and LOD; pentagons; hexagons are awkward for terrain grids); k-d trees or R-trees as the addressing scheme (boundaries move when data changes, which breaks cache keys, and they cover nothing over empty land or ocean, where terrain still lives; they stay as indexes inside a cell); Web Mercator z/x/y (cells shrink with latitude, about half size at 60°, and it stops at ±85°).
+- **Why:** exact nesting, cell areas within about 2× of each other at a level anywhere on Earth, poles included, and nearby cells get nearby ids, so Postgres range scans and prefetching stay cheap. The same quadtree can serve partitions, terrain LOD and the far horizon when flying.
+- **Details:** ids are `bigint` in TS. Cells are defined on lat/lon treated as spherical, like every S2 implementation, so ids interoperate with other tools; geometry inside a cell still uses WGS84. Cell edges are great-circle arcs, so a lat/lon polygon through the corners is padded when used in queries. For scale: a level-13 cell averages about 1.1 km across, level 11 about 4.5 km.
+- **We wrote our own** port of the few hundred lines we need instead of depending on a JS port we would have to audit.
+
