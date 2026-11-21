@@ -15,6 +15,7 @@ import { buildBuildings, BUILDINGS_VERSION, type BuildingInput, type Buildings }
 import { ecefToLocal, geodeticToEcef, type Frame, type Vec3 } from "./geodesy.ts";
 import { enuProjection } from "./projection.ts";
 import { flatTerrain, terrainFromArrow, terrainToArrow, type CellTerrain } from "./terrain.ts";
+import { emptyWater, waterFromArrow, waterToArrow, type WaterMesh } from "./water.ts";
 import { roadGraphFromArrow, roadGraphToArrow } from "./road-graph-arrow.ts";
 import { buildRoadGraph, ROAD_GRAPH_VERSION, type RoadGraph, type RoadWayInput } from "./road-graph.ts";
 import {
@@ -26,7 +27,7 @@ import {
 export const CELL_LEVEL = 13;
 
 /** Bump when a cell's contents change for the same input (ownership rules, layout). */
-export const CELL_VERSION = 2;
+export const CELL_VERSION = 3;
 
 export interface CellContents {
   cell: CellId;
@@ -34,6 +35,7 @@ export interface CellContents {
   graph: RoadGraph;
   buildings: Buildings;
   terrain: CellTerrain;  // flat (h = 0) until draped
+  water: WaterMesh;      // empty until added (cellWater)
 }
 
 /** A point owning a building: the area centroid of its first outer ring (lon, lat). */
@@ -70,6 +72,7 @@ export function buildCell(cell: CellId, ways: RoadWayInput[], buildings: Buildin
     graph: buildRoadGraph(ways, project, owns),
     buildings: buildBuildings(buildings.filter((b) => owns(...ownerPoint(b))), project),
     terrain: flatTerrain(),
+    water: emptyWater(),
   };
 }
 
@@ -78,8 +81,9 @@ export interface CellFiles {
   edges: Uint8Array;
   buildings: Uint8Array;
   terrain: Uint8Array;
+  water: Uint8Array;
 }
-export const CELL_TABLES = ["nodes", "edges", "buildings", "terrain"] as const satisfies readonly (keyof CellFiles)[];
+export const CELL_TABLES = ["nodes", "edges", "buildings", "terrain", "water"] as const satisfies readonly (keyof CellFiles)[];
 
 export function cellToArrow(c: CellContents, metadata: FileMetadata = {}): CellFiles {
   const meta = {
@@ -88,6 +92,7 @@ export function cellToArrow(c: CellContents, metadata: FileMetadata = {}): CellF
   };
   return {
     ...roadGraphToArrow(c.graph, meta), buildings: buildingsToArrow(c.buildings, meta), terrain: terrainToArrow(c.terrain, meta),
+    water: waterToArrow(c.water, meta),
   };
 }
 
@@ -96,7 +101,8 @@ export function cellFromArrow(files: CellFiles): CellContents & { metadata: File
   const { buildings } = buildingsFromArrow(files.buildings);
   if (typeof metadata.cell !== "string") throw new Error("cell files have no cell token in their metadata");
   const cell = cellFromToken(metadata.cell);
-  return { cell, frame: cellFrame(cell), graph, buildings, terrain: terrainFromArrow(files.terrain), metadata };
+  return { cell, frame: cellFrame(cell), graph, buildings, terrain: terrainFromArrow(files.terrain),
+    water: waterFromArrow(files.water), metadata };
 }
 
 // --- around a point -------------------------------------------------------------

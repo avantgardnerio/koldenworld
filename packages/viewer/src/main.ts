@@ -29,7 +29,7 @@ import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import {
-  BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, GROUND, MARKING_FADE, SKY, SUN, SURFACE_COLORS,
+  BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, GROUND, MARKING_FADE, SKY, SUN, SURFACE_COLORS, WATER,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -65,6 +65,8 @@ const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 1975, rot
 const TERRAIN_LOD_DISTANCES = [4000, 8000, 16_000];
 /** Roads drawn this far toward the camera from the ground they lie on (m, plus 0.1% of distance). */
 const ROAD_BIAS = 0.3;
+/** Water a little less than roads, so a road over a stream wins. */
+const WATER_BIAS = 0.2;
 
 const params = new URLSearchParams(location.search);
 const fixedRadius = params.has("radius") ? Number(params.get("radius")) : undefined;
@@ -104,6 +106,7 @@ interface CellGpu {
   ground: SolidLayer;
   lods: { start: number; count: number }[];
   roads?: FlatLayer;
+  water?: FlatLayer;
   lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
   graph?: FlatLayer;
   buildings?: SolidLayer;
@@ -149,6 +152,10 @@ async function start(): Promise<void> {
       ground,
       lods: tm.lods,
       roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fadeToBase: true, bias: ROAD_BIAS }),
+      water: c.water.material.length === 0 ? undefined : createFlatLayer(gl!, {
+        positions: c.water.positions, dims: 3, material: c.water.material,
+        indices: Uint32Array.from({ length: c.water.material.length }, (_, i) => i),
+      }, { mode: gl!.TRIANGLES, colors: WATER, fadeToBase: false, bias: WATER_BIAS }),
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB),
       counts: {
@@ -161,7 +168,7 @@ async function start(): Promise<void> {
   const streamer = new CellStreamer<CellGpu>({
     load: loadCell,
     concurrency: 8,
-    dispose: (g) => [g.ground, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose()),
+    dispose: (g) => [g.ground, g.water, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose()),
     onChange: () => {
       updateStatus();
       if (!running) render();
@@ -252,6 +259,7 @@ async function start(): Promise<void> {
       while (lod < TERRAIN_LOD_DISTANCES.length && d > TERRAIN_LOD_DISTANCES[lod]!) lod++;
       g.ground.draw(f, g.model, SUN, g.lods[lod]);
     }
+    for (const g of visible) g.water?.draw(f, g.model);
     for (const g of visible) g.roads?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     if (status.graphOverlay) {

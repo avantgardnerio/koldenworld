@@ -7,6 +7,8 @@ const palette = (hexes: string[]) => new Float32Array(hexes.flatMap(rgb));
 
 export const SKY = palette(["#a9c8e6"]);
 export const GROUND = palette(["#5b7f3a"]);
+/** vec3 per WaterMaterial: lake, river, stream. */
+export const WATER = palette(["#3b6a8c", "#4a7690", "#55809a"]);
 
 const SURFACE: Record<keyof typeof SurfaceMaterial, string> = {
   Asphalt: "#2e3034",

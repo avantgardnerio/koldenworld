@@ -31,3 +31,7 @@ export {
 export { buildingsFromArrow, buildingsToArrow } from "./buildings-arrow.ts";
 export { BUILDING_MATERIALS, buildingMesh, idShade, type BuildingMesh } from "./building-mesh.ts";
 export type { FileMetadata } from "./arrow-util.ts";
+export {
+  cellWater, clipPolygon, clipPolyline, emptyWater, WaterMaterial, waterFromArrow, waterToArrow,
+  type WaterAreaInput, type WaterMesh, type WaterwayInput,
+} from "./water.ts";

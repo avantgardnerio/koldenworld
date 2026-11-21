@@ -10,3 +10,7 @@ export {
 export {
   blobData, pbfBlocks, readHeader, readPrimitiveBlock, type Inflate, type PbfBlock, type PbfHeader, type PbfVisitor,
 } from "./pbf.ts";
+export {
+  extractWater, isWaterway, WATERWAY_WIDTH, waterAreaKind,
+  type WaterArea, type WaterAreaKind, type Waterway, type WaterStats,
+} from "./water.ts";

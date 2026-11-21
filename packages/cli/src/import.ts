@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { importBuildings, importRoadWays, type ImportOptions, type OsmFetch } from "@game/db";
-import { extractBuildings, extractRoadWays, type OsmElement, type OverpassResponse } from "@game/osm-import";
+import { importBuildings, importRoadWays, importWater, type ImportOptions, type OsmFetch } from "@game/db";
+import { extractBuildings, extractRoadWays, extractWater, type OsmElement, type OverpassResponse } from "@game/osm-import";
 import { osmPaths } from "./paths.ts";
 
 /** Converts a downloaded area's raw OSM into road ways and buildings and upserts them into Postgres. */
@@ -21,7 +21,7 @@ export async function importArea(area: string, log: (msg: string) => void): Prom
   }, log);
 }
 
-/** Converts one raw snapshot (elements from Overpass JSON or a PBF) into road ways and buildings and upserts them. */
+/** Converts one raw snapshot (elements from Overpass JSON or a PBF) into road ways, buildings and water and upserts them. */
 export async function importSnapshot(
   elements: OsmElement[], fetch: OsmFetch, log: (msg: string) => void, opts: ImportOptions = {},
 ): Promise<void> {
@@ -36,4 +36,9 @@ export async function importSnapshot(
       `heights from height ${h.height}, levels ${h.levels}, default ${h.default}`);
   const b = await importBuildings(fetch, buildings, opts);
   log(`buildings: fetch ${b.fetchId}, upserted ${b.upserted}, deleted ${b.deleted}`);
+
+  const water = extractWater(elements);
+  log(`${water.stats.areas} water areas, ${water.stats.lines} waterways (${water.stats.skipped} skipped)`);
+  const w = await importWater(fetch, water.areas, water.lines, opts);
+  log(`water: fetch ${w.fetchId}, upserted ${w.upserted}, deleted ${w.deleted}`);
 }

@@ -164,3 +164,11 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Rejected:** USGS 30 m (misses road cuts and sharp ridges); Copernicus GLO-30 (global, but a surface model: canopy and buildings are in the "ground", which would double up with generated trees and OSM buildings).
 - **Not yet:** road grading (cuts and fills: the DEM alone smooths them, and roads can sink below or float a little over the 17 m lattice in steep terrain), bridges and tunnels (they follow the ground today), distant terrain for the far horizon, ground color by land cover and elevation, data outside Colorado (missing heights fall back to 0 m).
 
+## 25. Water: OSM lakes, river surfaces and waterways, clipped per cell
+
+- **Chosen:** water areas (closed ways and multipolygons tagged `natural=water`, `waterway=riverbank`, `landuse=reservoir`/`basin`) and waterway lines (`waterway=river/stream/canal/ditch/drain`, not tunnelled or intermittent) are extracted in TS, stored in `water_areas` and `waterways` (migration 0004), and imported with roads and buildings from both Overpass and PBF extracts.
+- **Clipped, not owned:** a reservoir or a 50 km river would stretch far past any owner cell, so each cell clips water to its own square (`cellWater`: Sutherland–Hodgman for areas, Cyrus–Beck for lines) and neighbors' pieces meet along the shared edge.
+- **Heights:** lakes are flat at the median ground height sampled inside them. USGS elevation is hydro-flattened (a lake is one height in the data), so every cell sampling the same lake gets the same level. River surfaces are cut into a 20 m grid and every vertex is draped. Waterway lines become ribbons of their `width` (or a default by kind: river 12 m, canal 6 m, stream 2.5 m, ditch 1.5 m), level across, following the centerline's ground.
+- **Format:** `water.arrow`, a plain triangle list (one row per vertex: position, material lake / river / stream). Drawn after terrain, nudged toward the camera slightly less than roads, so a road over a stream wins.
+- **Not yet:** reflections, waves or transparency (flat color by kind), shorelines carved into terrain where the DEM isn't flattened (small ponds can sit under the ground or float slightly), intermittent streams (left out: often dry beds).
+

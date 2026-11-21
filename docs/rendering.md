@@ -12,6 +12,7 @@ The project is first an efficient world renderer; the game sits on top of it. Re
 camera (lat, lon, alt) ─▶ cellsWithin(horizon, ≤ 5 km) ─▶ CellStreamer: nearest first, 4 at a time
 GET /cells/<token>/nodes, edges, buildings, terrain.arrow ─▶ cellFromArrow (zero-copy views) ─▶ per cell:
   ├─▶ terrainMesh (world operator)     ─▶ terrain: lit 65 × 65 lattice, 4 levels of detail + skirts
+  ├─▶ water.arrow (cellWater on the server) ─▶ water layer: lakes, rivers, streams, 1 draw call
   ├─▶ roadSurfaceMesh (world operator) ─▶ road layer: asphalt + markings, 1 draw call
   ├─▶ roadLineMesh (world operator)    ─▶ graph overlay (G): 1 px lines by class, 1 draw call
   └─▶ buildingMesh (world operator)    ─▶ building layer, 1 draw call

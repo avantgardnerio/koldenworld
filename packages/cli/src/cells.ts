@@ -9,10 +9,10 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fetchAreas, hasFetch, loadBuildings, loadRoadWays, type Bbox } from "@game/db";
+import { fetchAreas, hasFetch, loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
 import type { OverpassResponse } from "@game/osm-import";
 import {
-  BUILDINGS_VERSION, buildCell, drapeCell, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
+  BUILDINGS_VERSION, buildCell, cellWater, drapeCell, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
   cellToken, geodeticToEcef, ROAD_GRAPH_VERSION, type CellFiles, type CellId,
 } from "@game/world";
 import { Elevation } from "./elevation.ts";
@@ -128,15 +128,17 @@ export class CellService {
     await Promise.all(fetchCellsFor(cell).map((f) => this.ensureFetched(f)));
     lap("deps");
     const box = cellBox(cell, MARGIN_M);
-    const [ways, buildingInputs] = await Promise.all([
+    const [ways, buildingInputs, water] = await Promise.all([
       loadRoadWays(box).then((w) => { lap("roads"); return w; }),
       loadBuildings(box).then((b) => { lap("buildings"); return b; }),
+      loadWater(cellBox(cell, 50)).then((w) => { lap("water"); return w; }),
     ]);
     const flat = buildCell(cell, ways, buildingInputs);
     lap("build");
     const height = await this.elevation.region(contentBox(flat, 100));
     lap("dem");
-    const contents = drapeCell(flat, height);
+    const draped = drapeCell(flat, height);
+    const contents = { ...draped, water: cellWater(cell, draped.frame, water.areas, water.lines, height) };
     const files = cellToArrow(contents);
     lap("drape");
     await mkdir(dir, { recursive: true });
