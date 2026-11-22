@@ -2,6 +2,7 @@
 //! Douglas–Peucker to within a tolerance, in metres, before anything is built from them. A way's ends and every node
 //! it shares with a way (or with itself) stay, so the graph's junctions are the same; only the points between them go.
 
+use crate::aeroways::Aeroways;
 use crate::buildings::Buildings;
 use crate::clip::UNITS;
 use crate::geom::Metric;
@@ -54,6 +55,26 @@ pub fn simplify_water(water: &Water, face: u32, metric: &Metric, tolerance: f64)
         }
     }
     water.keep_points(&keep)
+}
+
+/// The airports with only the points needed to stay within `tolerance` m of each line and ring (their ends kept).
+pub fn simplify_aeroways(a: &Aeroways, face: u32, metric: &Metric, tolerance: f64) -> Aeroways {
+    let metres = |i: usize| {
+        let [lon, lat] = a.lonlat[i];
+        metric.metres(DVec2::from_array(s2::face_st(face, lat, lon)))
+    };
+    let mut keep = vec![false; a.lonlat.len()];
+    for runs in [&a.line_start, &a.ring_start] {
+        for r in runs.windows(2) {
+            let (first, end) = (r[0] as usize, r[1] as usize);
+            if end > first {
+                keep[first] = true;
+                keep[end - 1] = true;
+                douglas_peucker(first, end - 1, &metres, tolerance, &mut keep);
+            }
+        }
+    }
+    a.keep_points(&keep)
 }
 
 /// The buildings with only the points needed to stay within `tolerance` m of each ring (its first and last, the

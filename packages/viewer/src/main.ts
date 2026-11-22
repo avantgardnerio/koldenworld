@@ -41,7 +41,7 @@ import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
-  AEROWAY, BUILDING_COLORS_RGB, GROUND, CLASS_COLORS_RGB, fogRange, MASSING, SKY, SUN,
+  BUILDING_COLORS_RGB, GROUND, CLASS_COLORS_RGB, fogRange, MASSING, SKY, SUN,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -86,8 +86,6 @@ const MAX_DT = 0.1;  // s; a stalled tab must not teleport the camera
 const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 1975, rot: fromYawPitch(0, -35 * Math.PI / 180) };
 /** Cars and planes drawn this far toward the camera from the ground they're on (m, plus 0.1% of distance). */
 const ROAD_BIAS = 0.3;
-/** Airport surfaces nudged toward the camera from the ground they lie on (the ground doesn't know them yet). */
-const AEROWAY_BIAS = 0.25;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
 const CAR_DISTANCE = 1500;
 
@@ -154,7 +152,6 @@ interface CellGpu {
   model: Float32Array;  // this frame's cell → view transform, reused every frame
   terrain: CellTerrain;  // heights, for cars and the camera
   ground: SolidLayer;  // every point of the cell one kind of ground, draped on the terrain: from the Rust generator
-  aeroways?: FlatLayer;
   lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
   traffic?: TrafficCell;  // this cell's roads in the traffic sim
   graph?: FlatLayer;
@@ -237,10 +234,6 @@ async function start(): Promise<void> {
       model,
       terrain,
       ground: layer,
-      aeroways: c.aeroways.material.length === 0 ? undefined : createFlatLayer(gl!, {
-        positions: c.aeroways.positions, dims: 3, material: c.aeroways.material,
-        indices: Uint32Array.from({ length: c.aeroways.material.length }, (_, i) => i),
-      }, { mode: gl!.TRIANGLES, colors: AEROWAY, bias: AEROWAY_BIAS }),
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       traffic: c.graph.edges.count === 0 ? undefined
         : traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model),
@@ -261,7 +254,7 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 16,  // the cell server builds on a pool of workers
     dispose: (g) => {
-      [g.ground, g.aeroways, g.graph, g.buildings, g.massing, g.signs].forEach((l) => l?.dispose());
+      [g.ground, g.graph, g.buildings, g.massing, g.signs].forEach((l) => l?.dispose());
       if (g.traffic) traffic.remove(g.traffic);
     },
     onChange: () => {
@@ -405,7 +398,7 @@ async function start(): Promise<void> {
       if (g.traffic) g.traffic.visible = seen;
     });
     status.cells.drawn = visible.length;
-    // The ground first, then airport surfaces nudged toward the camera, then buildings; everything depth-tested.
+    // The ground first (airports are part of it), then buildings; everything depth-tested.
     // Fine ground marks the stencil; coarse ground draws only where it isn't marked, so a coarse tile shows only
     // where its fine cells haven't loaded.
     gl.enable(gl.STENCIL_TEST);
@@ -416,7 +409,6 @@ async function start(): Promise<void> {
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
     for (const g of visible) if (g.coarse) g.ground.draw(f, g.model, SUN);
     gl.disable(gl.STENCIL_TEST);
-    for (const g of visible) g.aeroways?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     // Coarse tiles' massing, less the shapes in fine cells that have their own buildings.
     for (const g of visible) {

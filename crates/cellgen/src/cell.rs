@@ -10,8 +10,8 @@
 
 use crate::ways::{ROAD_CLASSES, RoadWays};
 use crate::{
-    buildings, clip, crossings, draw, elevation, faces, geodesy, geom, graph, ground_arrow,
-    markings, mesh, polygon, s2, simplify, terrain, water, ways, widths,
+    aeroways, buildings, clip, crossings, draw, elevation, faces, geodesy, geom, graph,
+    ground_arrow, markings, mesh, polygon, s2, simplify, terrain, water, ways, widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
 use deadpool_postgres::Pool;
@@ -20,10 +20,10 @@ use std::path::Path;
 use std::time::Instant;
 
 /// The kinds of ground, in material order.
-pub const KINDS: [&str; 7] = [
-    "asphalt", "yellow", "white", "grass", "sidewalk", "lot", "water",
+pub const KINDS: [&str; 10] = [
+    "asphalt", "yellow", "white", "grass", "sidewalk", "lot", "water", "runway", "taxiway", "apron",
 ];
-const COLORS: [[u8; 3]; 7] = [
+const COLORS: [[u8; 3]; 10] = [
     [72, 72, 76],
     [232, 190, 40],
     [240, 240, 236],
@@ -31,6 +31,9 @@ const COLORS: [[u8; 3]; 7] = [
     [196, 194, 186],
     [126, 170, 92],
     [64, 120, 190],
+    [164, 166, 170],
+    [125, 128, 134],
+    [143, 145, 150],
 ];
 /// How closely round water ends and bends follow their arcs, m, at full detail.
 const ARC_TOLERANCE: f64 = 0.05;
@@ -158,6 +161,7 @@ impl Cell {
 pub struct Inputs {
     ways: RoadWays,
     water: water::Water,
+    aeroways: aeroways::Aeroways,
     heights: Heights,
     buildings: Option<buildings::Buildings>,
 }
@@ -172,7 +176,7 @@ impl Inputs {
     pub async fn load(pool: &Pool, data: &Path, c: &Cell) -> Result<Inputs, LoadError> {
         let [west, south, east, north] = c.load_box();
         let dem = data.join("dem");
-        let (ways, water, buildings, heights) = tokio::try_join!(
+        let (ways, water, aeroways, buildings, heights) = tokio::try_join!(
             async {
                 let db = pool.get().await?;
                 ways::load_road_ways(&db, west, south, east, north).await
@@ -180,6 +184,10 @@ impl Inputs {
             async {
                 let db = pool.get().await?;
                 water::load_water(&db, west, south, east, north).await
+            },
+            async {
+                let db = pool.get().await?;
+                aeroways::load(&db, [west, south, east, north]).await
             },
             async {
                 if c.level > COARSE_LEVEL {
@@ -203,6 +211,7 @@ impl Inputs {
         Ok(Inputs {
             ways,
             water,
+            aeroways,
             heights: Heights::Dem(heights),
             buildings,
         })
@@ -214,6 +223,7 @@ impl Inputs {
         Inputs {
             ways: ways.clone(),
             water: water::Water::empty(),
+            aeroways: aeroways::Aeroways::empty(),
             heights: Heights::Flat(height),
             buildings: (c.level <= COARSE_LEVEL).then(buildings::Buildings::default),
         }
@@ -258,6 +268,7 @@ pub fn build(
     let Inputs {
         mut ways,
         water,
+        aeroways,
         heights,
         buildings: owned,
     } = inputs;
@@ -277,10 +288,13 @@ pub fn build(
     if options.simplify > 0.0 {
         ways = simplify::simplify(&ways, &metric, options.simplify);
     }
-    let water = if options.simplify > 0.0 {
-        simplify::simplify_water(&water, face, &metric, options.simplify)
+    let (water, aeroways) = if options.simplify > 0.0 {
+        (
+            simplify::simplify_water(&water, face, &metric, options.simplify),
+            simplify::simplify_aeroways(&aeroways, face, &metric, options.simplify),
+        )
     } else {
-        water
+        (water, aeroways)
     };
     let (ways, crossed) = crossings::split(&ways);
     let mut graph = graph::build_graph(&ways);
@@ -427,20 +441,29 @@ pub fn build(
         .concat(),
         nonzero,
     );
+    // Airports: road wins (service roads cross aprons), then runways over taxiways over aprons.
+    let arc = options.simplify.max(ARC_TOLERANCE);
+    let [runway, taxiway, apron] = aeroways.paths(face, &metric, arc);
+    let mut taken = road.clone();
+    let [runway, taxiway, apron] = [runway, taxiway, apron].map(|kind| {
+        let mine = difference_64(&intersect_64(&kind, &square, nonzero), &taken, nonzero);
+        taken = union_subjects_64(&[taken.clone(), mine.clone()].concat(), nonzero);
+        mine
+    });
+    // Water takes what road and airports don't; grass and lots what's left.
     let water = difference_64(
-        &intersect_64(
-            &water.paths(face, &metric, options.simplify.max(ARC_TOLERANCE)),
-            &square,
-            nonzero,
-        ),
-        &road,
+        &intersect_64(&water.paths(face, &metric, arc), &square, nonzero),
+        &taken,
         nonzero,
     );
-    let grass = difference_64(&merge(1), &water, nonzero);
-    let lots = difference_64(&merge(3), &water, nonzero);
+    let covered = union_subjects_64(&[taken, water.clone()].concat(), nonzero);
+    let grass = difference_64(&merge(1), &covered, nonzero);
+    let lots = difference_64(&merge(3), &covered, nonzero);
 
-    // 4. The check: seven kinds summing to the square with nothing uncovered, so nothing overlapping.
-    let kinds = [&asphalt, &yellow, &white, &grass, &sidewalk, &lots, &water];
+    // 4. The check: every kind summing to the square with nothing uncovered, so nothing overlapping.
+    let kinds = [
+        &asphalt, &yellow, &white, &grass, &sidewalk, &lots, &water, &runway, &taxiway, &apron,
+    ];
     let [sum, uncovered] = clip::tally(&square, &kinds);
     let square_m2 = clip::area(&square);
     let areas: Vec<String> = KINDS

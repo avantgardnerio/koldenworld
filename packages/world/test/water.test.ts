@@ -1,26 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  carveWater, CELL_LEVEL, cellCenter, cellEdgeNeighbors, cellFromLatLon, cellLattice, clipPolygon, clipPolyline, enuFrame,
+  carveWater, CELL_LEVEL, cellCenter, cellEdgeNeighbors, cellFromLatLon, cellLattice, enuFrame,
   enuUnprojection, groundSampler, WATER_CARVE, type HeightFn,
 } from "../src/index.ts";
 
 const square = [[0, 0], [10, 0], [10, 10], [0, 10]] as [number, number][];
 const area = (p: [number, number][]) => p.reduce((s, [x, y], i) => s + (x * p[(i + 1) % p.length]![1] - p[(i + 1) % p.length]![0] * y), 0) / 2;
-
-describe("clipping to a convex window", () => {
-  it("clips a polygon, concave ones too", () => {
-    expect(area(clipPolygon([[-5, -5], [5, -5], [5, 5], [-5, 5]], square))).toBeCloseTo(25, 9);
-    // An L shape half outside: only the part inside counts.
-    const L: [number, number][] = [[-5, 2], [8, 2], [8, 4], [2, 4], [2, 15], [-5, 15]];
-    expect(area(clipPolygon(L, square))).toBeCloseTo(8 * 2 + 2 * 6, 9);
-    expect(clipPolygon([[20, 20], [30, 20], [30, 30]], square)).toEqual([]);
-  });
-
-  it("clips a polyline into the pieces inside", () => {
-    const pieces = clipPolyline([[-5, 5], [5, 5], [5, 15], [8, 15], [8, 5], [15, 5]], square);
-    expect(pieces).toEqual([[[0, 5], [5, 5], [5, 10]], [[8, 10], [8, 5], [10, 5]]]);
-  });
-});
 
 // Two neighboring cells in Denver; a lake straddling their shared edge.
 const a = cellFromLatLon(39.758861, -104.964699, CELL_LEVEL);

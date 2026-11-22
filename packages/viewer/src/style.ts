@@ -6,14 +6,17 @@ const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 
 const palette = (hexes: string[]) => new Float32Array(hexes.flatMap(rgb));
 
 export const SKY = palette(["#a9c8e6"]);
-/** vec3 per ground material from the Rust cell generator: asphalt, yellow, white, grass, sidewalk, lot, water. */
-export const GROUND = palette(["#48484c", "#e8be28", "#f0f0ec", "#68964a", "#c4c2ba", "#7eaa5c", "#4078be"]);
+/**
+ * vec3 per ground material from the Rust cell generator: asphalt, yellow, white, grass, sidewalk, lot, water, and the
+ * airports' runway, taxiway, apron (concrete, the runway lightest).
+ */
+export const GROUND = palette([
+  "#48484c", "#e8be28", "#f0f0ec", "#68964a", "#c4c2ba", "#7eaa5c", "#4078be", "#a4a6aa", "#7d8086", "#8f9196",
+]);
 
 /** vec3 per massing material from the Rust cell generator (a coarse tile's buildings): wall, roof. */
 export const MASSING = palette(["#d2c6b2", "#8e7e6e"]);
 
-/** vec3 per AerowayMaterial: apron, taxiway, runway (concrete, the runway lightest). */
-export const AEROWAY = palette(["#8f9196", "#7d8086", "#a4a6aa"]);
 
 const CLASS_COLORS: Record<RoadClass, string> = {
   motorway: "#e8803a", motorway_link: "#e8803a",

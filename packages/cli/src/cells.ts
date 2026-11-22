@@ -9,10 +9,10 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fetchAreas, hasFetch, loadAeroways, loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
+import { fetchAreas, hasFetch, loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
 import type { OverpassResponse } from "@game/osm-import";
 import {
-  BUILDINGS_VERSION, buildCell, carveWater, cellAeroways, cellFromLatLon, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
+  BUILDINGS_VERSION, buildCell, carveWater, cellFromLatLon, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
   cellToken, geodeticToEcef, ROAD_GRAPH_VERSION, type CellFiles, type CellId,
 } from "@game/world";
 import { Elevation } from "./elevation.ts";
@@ -161,15 +161,13 @@ export class CellService {
     // Objects reach into neighbors and are placed on the neighbors' terrain lattices, which need
     // elevation (and water, for carving) over those whole cells.
     const region = cellsBox(contentBox(flat, 100), cellLevel(cell));
-    const [dem, water, aeroways] = await Promise.all([this.elevation.region(region), loadWater(region), loadAeroways(cellBox(cell, 50))]);
-    lap("dem+water+aeroways");
+    const [dem, water] = await Promise.all([this.elevation.region(region), loadWater(region)]);
+    lap("dem+water");
     const ground = groundSampler(dem, cellLevel(cell), carveWater(water.areas));
     const draped = drapeCell(flat, ground);
     lap("drape");
-    const aerowayMesh = cellAeroways(cell, draped.frame, aeroways.areas, aeroways.lines, ground);
-    lap("aeroways");
     // The drawn ground (pavement, markings, grass, sidewalks, lots and water) comes from the Rust generator.
-    const contents = { ...draped, aeroways: aerowayMesh };
+    const contents = draped;
     const files = cellToArrow(contents);
     lap("arrow");
     await mkdir(dir, { recursive: true });

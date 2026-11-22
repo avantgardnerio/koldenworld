@@ -1,5 +1,4 @@
-// A mesh on the ground with a material index per vertex: airport surfaces and
-// the graph overlay. Positions are in a cell's frame, 2D (z = 0) or 3D; each
+// A mesh on the ground with a material index per vertex: the graph overlay. Positions are in a cell's frame, 2D (z = 0) or 3D; each
 // draw places the mesh with that cell's model matrix. Buffers are uploaded
 // once; each draw is one call. Layers hold GPU handles only, no game state.
 //

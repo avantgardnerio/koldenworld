@@ -5,4 +5,4 @@ export { upsertFetch, type OsmFetch } from "./fetches.ts";
 export { importRoadWays, type ImportOptions, type ImportResult } from "./roads.ts";
 export { fetchAreas, hasFetch, latestFetch, loadBuildings, loadRoadWays, type Bbox, type FetchInfo } from "./export.ts";
 export { importWater, loadWater } from "./water.ts";
-export { importAeroways, loadAeroways } from "./aeroways.ts";
+export { importAeroways } from "./aeroways.ts";

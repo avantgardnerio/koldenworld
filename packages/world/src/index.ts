@@ -32,13 +32,9 @@ export { buildingsFromArrow, buildingsToArrow } from "./buildings-arrow.ts";
 export { BUILDING_MATERIALS, buildingMesh, idShade, type BuildingMesh } from "./building-mesh.ts";
 export type { FileMetadata } from "./arrow-util.ts";
 export {
-  carveWater, clipPolygon, clipPolyline, WATER_CARVE,
+  carveWater, WATER_CARVE,
   type WaterAreaInput, type WaterwayInput,
 } from "./water.ts";
-export {
-  AEROWAY_LIFT, AerowayMaterial, aerowaysFromArrow, aerowaysToArrow, cellAeroways, emptyAeroways,
-  type AerowayAreaInput, type AerowayLineInput, type AerowayMesh,
-} from "./aeroways.ts";
 export { SIGN_SETBACK, signText, streetSigns, type StreetSign } from "./signs.ts";
 export { readGlb, type ModelMesh } from "./glb.ts";
 export {
