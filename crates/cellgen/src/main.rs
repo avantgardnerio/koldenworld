@@ -7,6 +7,7 @@ mod graph;
 mod markings;
 mod polygon;
 mod s2;
+mod terrain;
 mod water;
 mod ways;
 mod widths;
@@ -356,6 +357,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let spacing = metric.to_m.col(0).length() * (cell[2] - cell[0]) / n as f64;
     draw::draw_heights(&heights, n, spacing, "target/heights.png")?;
+
+    // The ground draped: every kind cut by the terrain grid, each vertex at its triangle's height.
+    let started = std::time::Instant::now();
+    let terrain = terrain::Terrain::new(n, heights, cell);
+    let draped = terrain.cut(&kinds, &metric);
+    let took = started.elapsed();
+    let lost: Vec<String> = (0..kinds.len())
+        .map(|k| {
+            format!(
+                "{:.3}",
+                clip::area(kinds[k]) - terrain.area(&draped, k as u8, &metric)
+            )
+        })
+        .collect();
+    let (lo, hi) = draped
+        .h
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
+    println!(
+        "draped in {took:.0?}: {} pieces, {} vertices, {lo:.2}..{hi:.2} m; area lost per kind (m²): {}",
+        draped.kind.len(),
+        draped.st.len(),
+        lost.join(", ")
+    );
+    let spacing = glam::DVec2::new(
+        metric.to_m.col(0).length() * (cell[2] - cell[0]),
+        metric.to_m.col(1).length() * (cell[3] - cell[1]),
+    ) / n as f64;
+    draw::draw_draped(
+        &draped,
+        &colors,
+        |tri| terrain.light(tri, spacing),
+        &cell_frame,
+        "target/draped.png",
+    )?;
 
     // Close up: the busiest marked junction in the cell (most marked roads meeting), 70 m across.
     let marked = |e: usize| widths::profile(ways.class[graph.edge_way[e] as usize]).2;

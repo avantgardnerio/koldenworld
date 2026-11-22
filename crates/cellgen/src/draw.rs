@@ -120,3 +120,61 @@ pub fn draw_heights(
     pixmap.save_png(path)?;
     Ok(())
 }
+
+/// Draped ground: each piece in its kind's color, shaded by its terrain triangle (`light`, 0..1); the pieces of one
+/// kind in one triangle filled together (nonzero), so holes show.
+pub fn draw_draped(
+    d: &crate::terrain::Draped,
+    colors: &[[u8; 3]],
+    light: impl Fn(u32) -> f64,
+    frame: &View,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let View { view, size, .. } = *frame;
+    let mut pixmap = tiny_skia::Pixmap::new(size, size).ok_or("bad image size")?;
+    pixmap.fill(tiny_skia::Color::WHITE);
+    let to_px = |p: glam::DVec2| {
+        (
+            ((p.x - view[0]) / (view[2] - view[0]) * size as f64) as f32,
+            ((view[3] - p.y) / (view[3] - view[1]) * size as f64) as f32,
+        )
+    };
+    let mut p = 0;
+    while p < d.kind.len() {
+        let (kind, tri) = (d.kind[p], d.tri[p]);
+        let mut all = tiny_skia::PathBuilder::new();
+        while p < d.kind.len() && d.kind[p] == kind && d.tri[p] == tri {
+            for (k, &q) in d.st[d.start[p] as usize..d.start[p + 1] as usize]
+                .iter()
+                .enumerate()
+            {
+                let (x, y) = to_px(q);
+                if k == 0 {
+                    all.move_to(x, y)
+                } else {
+                    all.line_to(x, y)
+                }
+            }
+            all.close();
+            p += 1;
+        }
+        let shade = 0.55 + 0.6 * light(tri);
+        let [r, g, b] = colors[kind as usize].map(|c| (c as f64 * shade).min(255.0) as u8);
+        let paint = tiny_skia::Paint {
+            shader: tiny_skia::Shader::SolidColor(tiny_skia::Color::from_rgba8(r, g, b, 255)),
+            anti_alias: false,
+            ..Default::default()
+        };
+        if let Some(path) = all.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+    }
+    pixmap.save_png(path)?;
+    Ok(())
+}
