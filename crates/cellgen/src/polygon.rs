@@ -84,10 +84,6 @@ impl Polygon {
         p
     }
 
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
     /// A cursor on the ring's first vertex, or None if it's empty.
     pub fn first(&mut self) -> Option<Cursor<'_>> {
         let at = self.head;

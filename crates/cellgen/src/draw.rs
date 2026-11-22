@@ -1,9 +1,6 @@
 //! Debug pictures: what we built, top-down in (s, t), as a PNG.
 
-use crate::graph::RoadGraph;
-use crate::pavement::Pavement;
 use crate::polygon::Polygon;
-use crate::ways::RoadWays;
 
 /// What a picture shows: `view` (s0, t0, s1, t1) fills a `size` px square; `cell` (s0, t0, s1, t1) is outlined.
 #[derive(Clone, Copy)]
@@ -13,15 +10,10 @@ pub struct View {
     pub size: u32,
 }
 
-/// What we built, in (s, t) on the cell's face: each grass island filled in its own pale color; pavement strips
-/// in grey and junctions darker; nodes as dots by degree (dead end red, 2 grey, 3–4
-/// blue, 5+ magenta); and the cell's square in red, framed by `frame`, s to the right
-/// and t up.
+/// What we built, in (s, t) on the cell's face: each set of `fills` in its color, in order, then the cell's square
+/// in red, framed by `frame` (s to the right, t up). Ground no fill reaches stays white.
 pub fn draw_png(
-    ways: &RoadWays,
-    graph: &RoadGraph,
-    grass: &[&Polygon],
-    pavement: &Pavement,
+    fills: &[(Vec<&Polygon>, [u8; 3])],
     frame: &View,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -59,19 +51,8 @@ pub fn draw_png(
     };
     let identity = tiny_skia::Transform::identity();
 
-    for (f, poly) in grass.iter().enumerate() {
-        if poly.len() < 3 || poly.signed_area() <= 0.0 {
-            continue;
-        }
-        paint.set_color_rgba8(pale(f, 0), pale(f, 1), pale(f, 2), 255);
-        if let Some(p) = path_of(&mut poly.positions().map(|p| p.to_array()), true) {
-            pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, identity, None);
-        }
-    }
-
-    // Pavement: strips mid grey, junctions darker, so the tiling shows.
-    for (polys, grey) in [(&pavement.strips, 125), (&pavement.junctions, 85)] {
-        paint.set_color_rgba8(grey, grey, grey, 255);
+    for (polys, [r, g, b]) in fills {
+        paint.set_color_rgba8(*r, *g, *b, 255);
         for poly in polys {
             if let Some(p) = path_of(&mut poly.positions().map(|p| p.to_array()), true) {
                 pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, identity, None);
@@ -88,29 +69,6 @@ pub fn draw_png(
         pixmap.stroke_path(&p, &paint, &stroke, identity, None);
     }
 
-    for n in 0..graph.node_count() {
-        let (color, radius) = match graph.degree(n) {
-            1 => ([220, 40, 40], 3.0),
-            2 => ([150, 150, 150], 2.0),
-            3 | 4 => ([30, 60, 200], 3.5),
-            _ => ([210, 0, 210], 6.0),
-        };
-        paint.set_color_rgba8(color[0], color[1], color[2], 255);
-        let (x, y) = to_px(ways.st[graph.node_point[n] as usize]);
-        if let Some(dot) = tiny_skia::PathBuilder::from_circle(x, y, radius) {
-            pixmap.fill_path(&dot, &paint, tiny_skia::FillRule::Winding, identity, None);
-        }
-    }
-
     pixmap.save_png(path)?;
     Ok(())
-}
-
-/// A pale color channel for face f: a hash of its index, kept between 170 and 250.
-fn pale(f: usize, channel: u32) -> u8 {
-    let h = (f as u32 ^ (channel.wrapping_mul(0x9e37_79b9)))
-        .wrapping_mul(0x85eb_ca6b)
-        .rotate_left(13)
-        .wrapping_mul(0xc2b2_ae35);
-    170 + (h >> 24) as u8 % 81
 }

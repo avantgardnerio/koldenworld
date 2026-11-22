@@ -1,7 +1,9 @@
+mod bands;
 mod draw;
 mod faces;
 mod geom;
 mod graph;
+mod layer;
 mod pavement;
 mod polygon;
 mod s2;
@@ -123,9 +125,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         2 * pieces
     );
 
-    // Every block shrunk by half a road (4 m, until widths come from lanes), its self-crossings cut away.
+    // Layers, each the one before shrunk further, every vertex still knowing its dart: the kerb (blocks shrunk by
+    // half a road, 4 m until widths come from lanes), the back of the grass (1.5 m in), the back of the sidewalk
+    // (1.8 m further). What's left inside is the lot.
+    let area = |ps: &mut dyn Iterator<Item = &polygon::Polygon>| -> f64 {
+        ps.map(|p| p.signed_area().max(0.0)).sum::<f64>() * m2_per_st2 / 1e6
+    };
     let mut stats = shrink::ShrinkStats::default();
-    let islands: Vec<Vec<polygon::Polygon>> = polygons
+    let kerb: Vec<Vec<polygon::Polygon>> = polygons
         .iter()
         .map(|p| {
             if p.signed_area() > 0.0 {
@@ -135,34 +142,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .collect();
-    let shrunk: Vec<&polygon::Polygon> = islands.iter().flatten().collect();
-    let area = |ps: &mut dyn Iterator<Item = &polygon::Polygon>| -> f64 {
-        ps.map(|p| p.signed_area().max(0.0)).sum::<f64>() * m2_per_st2 / 1e6
-    };
-    println!(
-        "shrunk by 4 m: {} islands from {} blocks; {stats:?}; block area {:.3} km² → {:.3} km²",
-        shrunk.len(),
-        blocks.len(),
-        area(&mut polygons.iter()),
-        area(&mut shrunk.iter().copied())
-    );
-
-    let mut sizes: Vec<f64> = shrunk
-        .iter()
-        .map(|p| p.signed_area() * m2_per_st2)
-        .collect();
-    sizes.sort_by(f64::total_cmp);
-    println!(
-        "smallest islands: {:?} m²",
-        sizes
+    println!("kerb, 4 m in: {stats:?}");
+    let shrink_layer = |layer: &[Vec<polygon::Polygon>], d: f64, name: &str| {
+        let mut stats = shrink::ShrinkStats::default();
+        let next: Vec<Vec<polygon::Polygon>> = layer
             .iter()
-            .take(5)
-            .map(|a| format!("{a:.2e}"))
-            .collect::<Vec<_>>()
-    );
+            .map(|islands| {
+                islands
+                    .iter()
+                    .flat_map(|p| p.shrink(d, &metric, &mut stats))
+                    .collect()
+            })
+            .collect();
+        println!("{name}, {d} m further: {stats:?}");
+        next
+    };
+    let grass_back = shrink_layer(&kerb, 1.5, "back of the grass");
+    let lot_islands = shrink_layer(&grass_back, 1.8, "back of the sidewalk");
+    let lot_polygons: Vec<&polygon::Polygon> = lot_islands.iter().flatten().collect();
+    let [kerb, grass_back, lots] =
+        [&kerb, &grass_back, &lot_islands].map(|l| layer::Layer::new(&graph, &faces, l));
 
-    // The roads in the void: strips along edges and junctions at nodes, from the islands' corners.
-    let pavement = pavement::pave(&graph, &faces, &islands);
+    // The roads in the void, then the bands between the layers.
+    let pavement = pavement::pave(&graph, &kerb);
+    let grass = bands::band(&graph, &kerb, &grass_back);
+    let sidewalk = bands::band(&graph, &grass_back, &lots);
     println!(
         "pavement: {} strips ({} missing), {} junctions ({} missing); {:.3} km²; failed strip sides: {:?}",
         pavement.strips.len(),
@@ -172,6 +176,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         area(&mut pavement.strips.iter().chain(&pavement.junctions)),
         pavement.why
     );
+    for (name, b) in [("grass", &grass), ("sidewalk", &sidewalk)] {
+        println!(
+            "{name}: {} pieces ({} missing: {:?}); {:.3} km²",
+            b.pieces.len(),
+            b.missing,
+            b.why,
+            area(&mut b.pieces.iter())
+        );
+    }
+    println!(
+        "lots: {} islands; {:.3} km² (blocks were {:.3} km²)",
+        lot_polygons.len(),
+        area(&mut lot_polygons.iter().copied()),
+        area(&mut polygons.iter())
+    );
 
     let path = "target/five-points.png";
     let frame = draw::View {
@@ -179,7 +198,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cell,
         size: 4096,
     };
-    draw::draw_png(&ways, &graph, &shrunk, &pavement, &frame, path)?;
+    fn all(ps: &[polygon::Polygon]) -> Vec<&polygon::Polygon> {
+        ps.iter().collect()
+    }
+    let pavement_polygons = all(&pavement.strips)
+        .into_iter()
+        .chain(&pavement.junctions)
+        .collect();
+    let fills = [
+        (lot_polygons, [214, 205, 178]),          // lots: dry earth
+        (pavement_polygons, [72, 72, 76]),        // asphalt
+        (all(&grass.pieces), [104, 150, 72]),     // grass
+        (all(&sidewalk.pieces), [196, 194, 186]), // concrete
+    ];
+    draw::draw_png(&fills, &frame, path)?;
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
         cell[0], cell[2], cell[1], cell[3]
