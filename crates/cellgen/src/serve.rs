@@ -100,7 +100,15 @@ async fn table(
 fn build(app: &App, c: &Cell) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let started = std::time::Instant::now();
     let mut db = postgres::Client::connect(&app.db, postgres::NoTls)?;
-    let built = cell::build(&mut db, &app.data, c, None).map_err(|e| e.to_string())?;
+    let built = cell::build(
+        cell::Source::Postgres {
+            db: &mut db,
+            data: &app.data,
+        },
+        c,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
     let dir = app.cache.join(&c.token);
     std::fs::create_dir_all(&dir)?;
     for (name, bytes) in TABLES.iter().zip([&built.ground, &built.triangles]) {

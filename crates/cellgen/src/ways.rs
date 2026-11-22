@@ -23,7 +23,7 @@ pub const ROAD_CLASSES: [&str; 15] = [
 
 /// Road ways as columns (no object per way or point): per-way columns, and per-node columns
 /// with each way's nodes at node_start[w]..node_start[w + 1] (CSR).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct RoadWays {
     pub osm_id: Vec<i64>,
     pub class: Vec<u8>,        // index into ROAD_CLASSES
@@ -115,6 +115,69 @@ pub fn load_road_ways(
             tag(12),
             tag(13),
         ));
+    }
+    Ok(ways)
+}
+
+/// Road ways from JSON: an array of the TS RoadWayInput (osmWayId, nodeIds, points as [lon, lat], class, name,
+/// lanesFwd, lanesBack, speedLimitMps, and optionally sidewalks: bits, default none). For fixtures and tests.
+pub fn from_json(text: &str) -> Result<RoadWays, Box<dyn std::error::Error>> {
+    let input: serde_json::Value = serde_json::from_str(text)?;
+    let mut ways = RoadWays {
+        node_start: vec![0],
+        names: vec![String::new()],
+        ..Default::default()
+    };
+    let mut name_index = std::collections::HashMap::new();
+    for w in input.as_array().ok_or("expected an array of ways")? {
+        let field = |k: &str| w.get(k).ok_or_else(|| format!("a way without {k}"));
+        let id = field("osmWayId")?
+            .as_i64()
+            .ok_or("osmWayId isn't an integer")?;
+        let class = field("class")?.as_str().ok_or("class isn't a string")?;
+        let node_ids: Vec<i64> = field("nodeIds")?
+            .as_array()
+            .ok_or("nodeIds isn't an array")?
+            .iter()
+            .filter_map(|v| v.as_i64())
+            .collect();
+        let points = field("points")?.as_array().ok_or("points isn't an array")?;
+        if points.len() != node_ids.len() {
+            return Err(format!(
+                "way {id}: {} node ids but {} points",
+                node_ids.len(),
+                points.len()
+            )
+            .into());
+        }
+        for p in points {
+            let p = p.as_array().ok_or("a point isn't [lon, lat]")?;
+            ways.lonlat
+                .push([p[0].as_f64().unwrap_or(0.0), p[1].as_f64().unwrap_or(0.0)]);
+        }
+        ways.osm_id.push(id);
+        ways.class.push(
+            ROAD_CLASSES
+                .iter()
+                .position(|c| *c == class)
+                .ok_or(format!("way {id}: unknown class {class}"))? as u8,
+        );
+        ways.name
+            .push(match w.get("name").and_then(|n| n.as_str()) {
+                None | Some("") => 0,
+                Some(n) => *name_index.entry(n.to_string()).or_insert_with(|| {
+                    ways.names.push(n.to_string());
+                    (ways.names.len() - 1) as u32
+                }),
+            });
+        ways.node_id.extend_from_slice(&node_ids);
+        ways.node_start.push(ways.node_id.len() as u32);
+        ways.lanes_fwd
+            .push(field("lanesFwd")?.as_u64().unwrap_or(1) as u8);
+        ways.lanes_back
+            .push(field("lanesBack")?.as_u64().unwrap_or(0) as u8);
+        ways.sidewalks
+            .push(w.get("sidewalks").and_then(|s| s.as_u64()).unwrap_or(0) as u8);
     }
     Ok(ways)
 }

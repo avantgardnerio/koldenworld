@@ -276,6 +276,7 @@ dependencies = [
  "glam",
  "postgres",
  "robust",
+ "serde_json",
  "tiff",
  "tiny-skia",
  "tokio",

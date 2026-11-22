@@ -62,6 +62,15 @@ pub fn load_water(
 }
 
 impl Water {
+    /// No water at all.
+    pub fn empty() -> Water {
+        Water {
+            line_start: vec![0],
+            ring_start: vec![0],
+            ..Default::default()
+        }
+    }
+
     /// All the water as Clipper paths around the cell: lines buffered half their width either side (round ends, so
     /// segments join smoothly), and the areas, unioned.
     pub fn paths(&self, face: u32, metric: &Metric) -> Paths64 {

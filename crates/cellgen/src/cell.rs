@@ -8,6 +8,7 @@
 //! 5. The terrain lattice's heights, the ground cut by its triangles and draped (terrain.rs), and triangulated into
 //!    buffers in the cell's ENU frame (mesh.rs), checked against the cell's own area at the ground's height.
 
+use crate::ways::RoadWays;
 use crate::{
     clip, draw, elevation, faces, geodesy, geom, graph, ground_arrow, markings, mesh, polygon, s2,
     terrain, water, ways, widths,
@@ -83,11 +84,40 @@ impl Cell {
     }
 }
 
-/// Builds a cell from Postgres (`db`) and the elevation data under `data` (data/dem). With `pictures`, also draws
-/// cell.png, heights.png, draped.png and mesh.png there.
+/// Where a cell's roads, water and heights come from.
+pub enum Source<'a> {
+    /// Postgres (road_ways, waterways, water_areas) and the elevation data under `data` (data/dem).
+    Postgres { db: &'a mut Client, data: &'a Path },
+    /// Fixed ways (every one of them, whatever the cell), no water, and flat terrain `height` m above the ellipsoid:
+    /// for tests and fixtures, no database or elevation data needed.
+    Fixture { ways: &'a RoadWays, height: f64 },
+}
+
+/// Ground heights: the elevation data, or flat.
+enum Heights {
+    Dem(elevation::Elevation),
+    Flat(f64),
+}
+
+impl Heights {
+    fn height(&self, lat: f64, lon: f64) -> f64 {
+        match self {
+            Heights::Dem(e) => e.height(lat, lon),
+            Heights::Flat(h) => *h,
+        }
+    }
+
+    fn missing(&self) -> usize {
+        match self {
+            Heights::Dem(e) => e.missing.get(),
+            Heights::Flat(_) => 0,
+        }
+    }
+}
+
+/// Builds a cell from `source`. With `pictures`, also draws cell.png, heights.png, draped.png and mesh.png there.
 pub fn build(
-    db: &mut Client,
-    data: &Path,
+    source: Source,
     c: &Cell,
     pictures: Option<&Path>,
 ) -> Result<Built, Box<dyn std::error::Error>> {
@@ -100,8 +130,17 @@ pub fn build(
     let m = 0.25 * (cell[2] - cell[0]);
     let view = [cell[0] - m, cell[1] - m, cell[2] + m, cell[3] + m];
     let [west, south, east, north] = s2::lat_lon_bounds(face, view, 0.001);
-    let mut ways = ways::load_road_ways(db, west, south, east, north)?;
-    let water = water::load_water(db, west, south, east, north)?;
+    let bbox = [west, south, east, north];
+    let (mut ways, water, heights) = match source {
+        Source::Postgres { db, data } => (
+            ways::load_road_ways(db, west, south, east, north)?,
+            water::load_water(db, west, south, east, north)?,
+            Heights::Dem(elevation::Elevation::region(&data.join("dem"), bbox)?),
+        ),
+        Source::Fixture { ways, height } => {
+            (ways.clone(), water::Water::empty(), Heights::Flat(height))
+        }
+    };
     ways.st = ways
         .lonlat
         .iter()
@@ -269,9 +308,8 @@ pub fn build(
 
     // 5. Terrain heights on the lattice, the ground draped on its triangles, and the buffers.
     let started = Instant::now();
-    let elevation = elevation::Elevation::region(&data.join("dem"), [west, south, east, north])?;
     let n = TERRAIN_N;
-    let heights: Vec<f64> = (0..=n)
+    let lattice: Vec<f64> = (0..=n)
         .flat_map(|b| (0..=n).map(move |a| (a, b)))
         .map(|(a, b)| {
             let st = [
@@ -279,10 +317,10 @@ pub fn build(
                 cell[1] + (cell[3] - cell[1]) * b as f64 / n as f64,
             ];
             let (lat, lon) = s2::st_to_lat_lon(face, st);
-            elevation.height(lat, lon)
+            heights.height(lat, lon)
         })
         .collect();
-    let terrain = terrain::Terrain::new(n, heights, cell);
+    let terrain = terrain::Terrain::new(n, lattice, cell);
     let draped = terrain.cut(&kinds, &metric);
     let lost = (0..kinds.len())
         .map(|k| (clip::area(kinds[k]) - terrain.area(&draped, k as u8, &metric)).abs())
@@ -294,7 +332,7 @@ pub fn build(
          {} vertices, {} triangles ({} failed); top-down {flat:.2} m², the cell at the ground's height {cell_m2:.2} m²",
         started.elapsed(),
         terrain.heights.len(),
-        elevation.missing.get(),
+        heights.missing(),
         draped.kind.len(),
         mesh.positions.len(),
         mesh.indices.len() / 3,
