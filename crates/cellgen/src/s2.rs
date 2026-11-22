@@ -30,6 +30,32 @@ pub fn cell_square([s, t]: [f64; 2], level: u32) -> [f64; 4] {
     [i / n, j / n, (i + 1.0) / n, (j + 1.0) / n]
 }
 
+/// Metres per unit of s and t across a cell, east and north: the columns of the 2×2 matrix taking a small (s, t)
+/// step to metres on the ground, measured across the cell (central differences between its edges' midpoints).
+/// Over a level-13 cell the true local scale varies by about 1 part in 10,000, so one matrix serves the cell.
+pub fn cell_metric(face: u32, [s0, t0, s1, t1]: [f64; 4]) -> [[f64; 2]; 2] {
+    let c = [(s0 + s1) / 2.0, (t0 + t1) / 2.0];
+    let (lat0, lon0) = st_to_lat_lon(face, c);
+    // WGS84 radii of curvature at the cell's latitude: meridian (north) and prime vertical (east).
+    let (a, e2) = (6_378_137.0, 0.006_694_379_990_141_317);
+    let w = 1.0 - e2 * (lat0 * DEG).sin().powi(2);
+    let (r_north, r_east) = (
+        a * (1.0 - e2) / w.powf(1.5),
+        a / w.sqrt() * (lat0 * DEG).cos(),
+    );
+    let metres = |st: [f64; 2]| {
+        let (lat, lon) = st_to_lat_lon(face, st);
+        [(lon - lon0) * DEG * r_east, (lat - lat0) * DEG * r_north]
+    };
+    let (e0, e1) = (metres([s0, c[1]]), metres([s1, c[1]]));
+    let (n0, n1) = (metres([c[0], t0]), metres([c[0], t1]));
+    let (ds, dt) = (s1 - s0, t1 - t0);
+    [
+        [(e1[0] - e0[0]) / ds, (e1[1] - e0[1]) / ds],
+        [(n1[0] - n0[0]) / dt, (n1[1] - n0[1]) / dt],
+    ]
+}
+
 /// A lon/lat box (west, south, east, north) around an (s, t) rectangle on a face: its corners, padded by `pad`
 /// degrees (its edges bow a little in lon/lat).
 pub fn lat_lon_bounds(face: u32, [s0, t0, s1, t1]: [f64; 4], pad: f64) -> [f64; 4] {

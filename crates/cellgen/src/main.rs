@@ -1,4 +1,5 @@
 mod draw;
+mod faces;
 mod graph;
 mod s2;
 mod ways;
@@ -77,8 +78,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // The polygons of the raw graph: its faces. Blocks are counterclockwise (positive area), each connected
+    // piece's outside clockwise; a piece with no loop at all has one face of zero area.
+    let faces = faces::trace_faces(&graph);
+    let metric = s2::cell_metric(face, cell);
+    let m2_per_st2 = (metric[0][0] * metric[1][1] - metric[1][0] * metric[0][1]).abs();
+    let mut outline = Vec::new();
+    let mut blocks: Vec<f64> = Vec::new();
+    let (mut outsides, mut flat) = (0, 0);
+    for f in 0..faces.count() {
+        faces.outline(f, &graph, &ways, &mut outline);
+        let area = faces::signed_area(&outline) * m2_per_st2;
+        if area > 0.0 {
+            blocks.push(area);
+        } else if area < 0.0 {
+            outsides += 1;
+        } else {
+            flat += 1;
+        }
+    }
+    blocks.sort_by(f64::total_cmp);
+    println!(
+        "faces: {} ({} blocks, {outsides} outsides, {flat} with no area); blocks from {:.0} m² to {:.0} m², \
+         median {:.0} m²",
+        faces.count(),
+        blocks.len(),
+        blocks.first().unwrap_or(&0.0),
+        blocks.last().unwrap_or(&0.0),
+        blocks.get(blocks.len() / 2).unwrap_or(&0.0)
+    );
+    // Euler's formula, a check that the faces are a planar map: V − E + F = 2 per connected piece.
+    let pieces = graph.component_count();
+    println!(
+        "Euler: V − E + F = {} − {} + {} = {}; 2 × {pieces} pieces = {}",
+        graph.node_count(),
+        graph.edge_count(),
+        faces.count(),
+        graph.node_count() as i64 - graph.edge_count() as i64 + faces.count() as i64,
+        2 * pieces
+    );
+
     let path = "target/five-points.png";
-    draw::draw_png(&ways, &graph, view, cell, 1024, path)?;
+    draw::draw_png(&ways, &graph, &faces, view, cell, 4096, path)?;
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
         cell[0], cell[2], cell[1], cell[3]
