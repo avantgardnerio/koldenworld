@@ -1,8 +1,9 @@
 //! The draped ground as GPU buffers: positions (f32, in the cell's ENU frame: x east, y north, z up, from its center
 //! on the ellipsoid, as the TS cellFrame), normals (i8 × 127, and a zero to make four bytes, as the GPU takes them), a
 //! material per vertex (the kind), and indices, one range per kind. Each piece is triangulated with earcut, holes and
-//! all; every vertex of a piece lies in one flat terrain triangle, so its normal is that triangle's. Vertices alike in
-//! all three (position, normal, material) are one vertex. Open ground (lots) takes its material from its triangle's land
+//! all; every vertex of a piece lies in one flat terrain triangle, and its normal is interpolated across that triangle
+//! from the lattice's smooth normals at its corners (central differences, from a lattice with a rim outside the cell,
+//! so neighbors agree along their edge). Vertices alike in all three (position, normal, material) are one vertex. Open ground (lots) takes its material from its triangle's land
 //! cover (grass, forest, rock, snow), so a lot's pieces can be any of four materials.
 
 use crate::geodesy::{self, Frame};
@@ -32,7 +33,15 @@ pub struct Covers {
 }
 
 /// The draped ground triangulated, in the ENU frame at the cell's center. `face` and `cell` place (s, t).
-pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4], covers: &Covers) -> Mesh {
+/// `rim` is the lattice's heights with a one-point rim around it ((n + 3)², rows from t = t0 − one spacing).
+pub fn build(
+    d: &Draped,
+    terrain: &Terrain,
+    rim: &[f64],
+    face: u32,
+    cell: [f64; 4],
+    covers: &Covers,
+) -> Mesh {
     let (clat, clon) =
         s2::st_to_lat_lon(face, [(cell[0] + cell[2]) / 2.0, (cell[1] + cell[3]) / 2.0]);
     let frame = Frame::at(clat, clon, 0.0);
@@ -64,8 +73,39 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4], covers: &
         let [a, b, c] = corners(tri).map(|k| lattice[k]);
         (b - a).cross(c - a).normalize()
     };
-    let normal = |tri: u32| {
-        let nm = unit_normal(tri) * 127.0;
+    // Smooth normals at the lattice points: across the points either side, from the rim's positions.
+    let wide = n + 3;
+    let rim_at = |a: usize, b: usize| {
+        let st = DVec2::new(
+            cell[0] + (cell[2] - cell[0]) * (a as f64 - 1.0) / n as f64,
+            cell[1] + (cell[3] - cell[1]) * (b as f64 - 1.0) / n as f64,
+        );
+        local(st, rim[b * wide + a])
+    };
+    let smooth: Vec<DVec3> = (0..side * side)
+        .map(|k| {
+            let (a, b) = (k % side + 1, k / side + 1);
+            let across = rim_at(a + 1, b) - rim_at(a - 1, b);
+            let along = rim_at(a, b + 1) - rim_at(a, b - 1);
+            across.cross(along).normalize()
+        })
+        .collect();
+    // A point's normal: its triangle's corners' smooth normals, weighted by where in the triangle it is.
+    let normal = |tri: u32, st: DVec2| {
+        let [ka, kb, kc] = corners(tri);
+        let g = (st - DVec2::new(cell[0], cell[1]))
+            / DVec2::new(cell[2] - cell[0], cell[3] - cell[1])
+            * n as f64;
+        let (i, j) = ((ka % side) as f64, (ka / side) as f64);
+        let (u, v) = ((g.x - i).clamp(0.0, 1.0), (g.y - j).clamp(0.0, 1.0));
+        // Below the diagonal the corners are (a, b, d), above it (a, d, c).
+        let w = if tri.is_multiple_of(2) {
+            [1.0 - u, u - v, v]
+        } else {
+            [1.0 - v, u, v - u]
+        };
+        let nm = (smooth[ka] * w[0] + smooth[kb] * w[1] + smooth[kc] * w[2]).normalize_or(DVec3::Z)
+            * 127.0;
         [nm.x, nm.y, nm.z].map(|c| c.round() as i8)
     };
     // What a piece of `kind` in triangle `tri` is drawn as: open ground by its triangle's cover.
@@ -99,7 +139,6 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4], covers: &
             .take_while(|&q| d.kind[q] == kind && d.tri[q] == tri)
             .collect();
         p += group.len();
-        let nm = normal(tri);
         let mat = material(kind, tri);
         if buckets.len() <= mat as usize {
             buckets.resize(mat as usize + 1, Vec::new());
@@ -133,6 +172,7 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4], covers: &
                 .iter()
                 .map(|&v| {
                     let at = local(d.st[v], d.h[v]).as_vec3().to_array();
+                    let nm = normal(tri, d.st[v]);
                     *welded
                         .entry((at.map(f32::to_bits), nm, mat))
                         .or_insert_with(|| {

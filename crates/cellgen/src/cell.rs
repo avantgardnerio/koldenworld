@@ -531,8 +531,10 @@ pub fn build(
     // 5. Terrain heights on the lattice, the ground draped on its triangles, and the buffers.
     let started = Instant::now();
     let n = options.terrain;
-    let lattice: Vec<f64> = (0..=n)
-        .flat_map(|b| (0..=n).map(move |a| (a, b)))
+    // The lattice with a one-point rim outside the cell (rows and columns −1 to n + 1), so the normals at the cell's
+    // edge see the ground beyond it, as the neighbor's do.
+    let rim: Vec<f64> = (-1..=n as i64 + 1)
+        .flat_map(|b| (-1..=n as i64 + 1).map(move |a| (a, b)))
         .map(|(a, b)| {
             let st = [
                 cell[0] + (cell[2] - cell[0]) * a as f64 / n as f64,
@@ -542,12 +544,16 @@ pub fn build(
             heights.height(lat, lon)
         })
         .collect();
+    let lattice: Vec<f64> = (1..=n + 1)
+        .flat_map(|b| (1..=n + 1).map(move |a| (a, b)))
+        .map(|(a, b)| rim[b * (n + 3) + a])
+        .collect();
     let terrain = terrain::Terrain::new(n, lattice, cell);
     let draped = terrain.cut(&kinds, &metric);
     let lost = (0..kinds.len())
         .map(|k| (clip::area(kinds[k]) - terrain.area(&draped, k as u8, &metric)).abs())
         .fold(0.0, f64::max);
-    let mesh = mesh::build(&draped, &terrain, face, cell, &COVERS);
+    let mesh = mesh::build(&draped, &terrain, &rim, face, cell, &COVERS);
     let (flat, cell_m2) = mesh_check(&mesh, &terrain, face, cell);
     log.push(format!(
         "terrain and mesh in {:.0?}: {} heights ({} without data), {} pieces (area lost at most {lost:.3} m² a kind), \
