@@ -55,7 +55,7 @@ void main() {
 
 export interface SolidLayer {
   /** hidden: the fine cells (bits 0–63, as two 32-bit halves) whose shapes not to draw, for a mesh with children. */
-  draw(f: Frame, model: Float32Array, sun: readonly [number, number, number], hidden?: readonly [number, number]): void;
+  draw(f: Frame, model: Float32Array, sun: readonly [number, number, number], hidden?: readonly [number, number]): number;  // triangles drawn (hidden ones included)
   dispose(): void;
 }
 
@@ -119,7 +119,7 @@ export function createSolidLayer(
 
   return {
     draw(f, model, sun, hidden = [0, 0]) {
-      if (count === 0) return;
+      if (count === 0) return 0;
       gl.useProgram(p);
       // Without a child per vertex, a_child is a constant (context state, not the vertex array's): never hidden.
       if (!mesh.child) gl.vertexAttribI4ui(4, 64, 0, 0, 0);
@@ -137,6 +137,7 @@ export function createSolidLayer(
       gl.drawElements(gl.TRIANGLES, count, indexType, 0);
       gl.bindVertexArray(null);
       gl.disable(gl.CULL_FACE);
+      return count / 3;
     },
     dispose() {
       for (const b of buffers) gl.deleteBuffer(b);

@@ -59,6 +59,8 @@ export interface ViewerStatus {
   carModels: number;      // vehicle models loaded (0 until they are)
   cars: number;           // cars in the simulation
   carTriangles: number;   // drawn last frame
+  /** Triangles drawn last frame, by what: ground (every tier), fine cells' buildings, coarse massing, cars. */
+  drawn: { ground: number; buildings: number; massing: number; cars: number };
   simTime: number;        // s of traffic simulated
   aircraft: number;       // live aircraft known (drawn wherever they are)
   graphOverlay: boolean;
@@ -105,7 +107,7 @@ const moving = showCars && params.get("traffic") !== "0";
 const showPlanes = params.get("planes") !== "0";
 const status: ViewerStatus = (window.viewer = {
   state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0, coarse: 0, drawn: 0 }, radius: 0,
-  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0, simTime: 0, aircraft: 0,
+  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0, drawn: { ground: 0, buildings: 0, massing: 0, cars: 0 }, simTime: 0, aircraft: 0,
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
 
@@ -425,13 +427,15 @@ async function start(): Promise<void> {
     gl.enable(gl.STENCIL_TEST);
     gl.stencilFunc(gl.ALWAYS, 1, 0xff);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-    for (const g of visible) if (!g.coarse) g.ground.draw(f, g.model, SUN);
+    const drawn = status.drawn;
+    drawn.ground = drawn.buildings = drawn.massing = 0;
+    for (const g of visible) if (!g.coarse) drawn.ground += g.ground.draw(f, g.model, SUN);
     gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
-    for (const g of visible) if (g.coarse && !g.far) g.ground.draw(f, g.model, SUN);
+    for (const g of visible) if (g.coarse && !g.far) drawn.ground += g.ground.draw(f, g.model, SUN);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-    for (const g of visible) if (g.far) g.ground.draw(f, g.model, SUN);
+    for (const g of visible) if (g.far) drawn.ground += g.ground.draw(f, g.model, SUN);
     gl.disable(gl.STENCIL_TEST);
-    for (const g of visible) g.buildings?.draw(f, g.model, SUN);
+    for (const g of visible) drawn.buildings += g.buildings?.draw(f, g.model, SUN) ?? 0;
     // Coarse tiles' massing, less the shapes in fine cells that have their own buildings.
     for (const g of visible) {
       const { massing, children, hidden } = g;
@@ -441,7 +445,7 @@ async function start(): Promise<void> {
         const fine = streamer.get(child);
         if (fine && !fine.missing) hidden[i >> 5] = (hidden[i >> 5]! | (1 << (i & 31))) >>> 0;
       });
-      massing.draw(f, g.model, SUN, hidden);
+      drawn.massing += massing.draw(f, g.model, SUN, hidden);
     }
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
     let carTriangles = 0;
@@ -459,6 +463,7 @@ async function start(): Promise<void> {
       planeRenderer.draw(f, SUN, ROAD_BIAS, planeInstances);
     }
     const cars = traffic.cars.count;
+    drawn.cars = carTriangles;
     Object.assign(status, { cars, carTriangles, simTime: traffic.simTime, aircraft: air.count });
     if (contrailLayer) {
       // Last: blended over everything, without writing depth.
@@ -477,10 +482,12 @@ async function start(): Promise<void> {
     // Before the fine cell under the camera loads (or from high up, where none do), its coarse tile's height.
     const below = roughGroundAt(camera.lat, camera.lon);
     const agl = camera.h - below;
+    const m = (t: number) => (t / 1e6).toFixed(2);
     hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
       `(${below.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
-      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars (${(carTriangles / 1e6).toFixed(1)}M tris) · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
+      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU · ` +
+      `M tris: ground ${m(status.drawn.ground)}, buildings ${m(status.drawn.buildings)}, massing ${m(status.drawn.massing)}, cars ${m(status.drawn.cars)}`;
   };
 
   // --- frame loop: running while there is input, or while traffic or aircraft move ---
