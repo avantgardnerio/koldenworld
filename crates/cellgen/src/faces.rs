@@ -6,6 +6,7 @@
 //! each connected piece's outside clockwise (negative area), and a dead end is walked out and back.
 
 use crate::graph::RoadGraph;
+use crate::polygon::Polygon;
 use crate::ways::RoadWays;
 
 /// Faces as indices: face f is the darts face_darts[face_start[f]..face_start[f + 1]], in order (CSR).
@@ -24,19 +25,20 @@ impl Faces {
         &self.face_darts[self.face_start[f] as usize..self.face_start[f + 1] as usize]
     }
 
-    /// A face's outline in (s, t): every point along its darts, each junction once.
-    pub fn outline(&self, f: usize, g: &RoadGraph, ways: &RoadWays, out: &mut Vec<[f64; 2]>) {
-        out.clear();
+    /// A face as a polygon: every point along its darts, each junction once, each vertex sourced from its OSM point.
+    pub fn polygon(&self, f: usize, g: &RoadGraph, ways: &RoadWays) -> Polygon {
+        let mut points: Vec<u32> = Vec::new();
         for &h in self.darts(f) {
             let e = (h / 2) as usize;
-            let (first, last) = (g.edge_first[e] as usize, g.edge_last[e] as usize);
+            let (first, last) = (g.edge_first[e], g.edge_last[e]);
             // Every point of the dart but its last: the next dart starts there.
             if h % 2 == 0 {
-                out.extend_from_slice(&ways.st[first..last]);
+                points.extend(first..last);
             } else {
-                out.extend(ways.st[first + 1..=last].iter().rev());
+                points.extend((first + 1..=last).rev());
             }
         }
+        Polygon::from_points(points.into_iter().map(|k| (ways.st[k as usize], k)))
     }
 }
 
@@ -81,16 +83,4 @@ pub fn trace_faces(g: &RoadGraph) -> Faces {
         faces.face_start.push(faces.face_darts.len() as u32);
     }
     faces
-}
-
-/// Signed area of an outline in (s, t) units (shoelace, relative to its first point to keep precision): positive
-/// counterclockwise.
-pub fn signed_area(points: &[[f64; 2]]) -> f64 {
-    let o = points[0];
-    let mut twice = 0.0;
-    for k in 1..points.len().saturating_sub(1) {
-        let (a, b) = (points[k], points[k + 1]);
-        twice += (a[0] - o[0]) * (b[1] - o[1]) - (b[0] - o[0]) * (a[1] - o[1]);
-    }
-    twice / 2.0
 }

@@ -1,17 +1,17 @@
 //! Debug pictures: what we built, top-down in (s, t), as a PNG.
 
-use crate::faces::{self, Faces};
 use crate::graph::RoadGraph;
+use crate::polygon::Polygon;
 use crate::ways::RoadWays;
 
-/// The graph's faces in (s, t) on the cell's face: each block (counterclockwise face) filled in its own pale color,
+/// The graph's faces (as polygons) in (s, t) on the cell's face: each block (counterclockwise face) filled in its own pale color,
 /// outsides (clockwise faces) left white; edges in dark grey; nodes as dots by degree (dead end red, 2 grey, 3–4
 /// blue, 5+ magenta); and the cell's square in red. `view` (s0, t0, s1, t1) fills a `size` px square, s to the right
 /// and t up.
 pub fn draw_png(
     ways: &RoadWays,
     graph: &RoadGraph,
-    faces: &Faces,
+    polygons: &[Polygon],
     view: [f64; 4],
     cell: [f64; 4],
     size: u32,
@@ -50,14 +50,12 @@ pub fn draw_png(
     };
     let identity = tiny_skia::Transform::identity();
 
-    let mut outline = Vec::new();
-    for f in 0..faces.count() {
-        faces.outline(f, graph, ways, &mut outline);
-        if outline.len() < 3 || faces::signed_area(&outline) <= 0.0 {
+    for (f, poly) in polygons.iter().enumerate() {
+        if poly.len() < 3 || poly.signed_area() <= 0.0 {
             continue;
         }
         paint.set_color_rgba8(pale(f, 0), pale(f, 1), pale(f, 2), 255);
-        if let Some(p) = path_of(&mut outline.iter().copied(), true) {
+        if let Some(p) = path_of(&mut poly.positions(), true) {
             pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, identity, None);
         }
     }

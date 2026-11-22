@@ -1,6 +1,7 @@
 mod draw;
 mod faces;
 mod graph;
+mod polygon;
 mod s2;
 mod ways;
 
@@ -81,14 +82,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The polygons of the raw graph: its faces. Blocks are counterclockwise (positive area), each connected
     // piece's outside clockwise; a piece with no loop at all has one face of zero area.
     let faces = faces::trace_faces(&graph);
+    let mut polygons: Vec<polygon::Polygon> = (0..faces.count())
+        .map(|f| faces.polygon(f, &graph, &ways))
+        .collect();
     let metric = s2::cell_metric(face, cell);
     let m2_per_st2 = (metric[0][0] * metric[1][1] - metric[1][0] * metric[0][1]).abs();
-    let mut outline = Vec::new();
     let mut blocks: Vec<f64> = Vec::new();
     let (mut outsides, mut flat) = (0, 0);
-    for f in 0..faces.count() {
-        faces.outline(f, &graph, &ways, &mut outline);
-        let area = faces::signed_area(&outline) * m2_per_st2;
+    for p in &polygons {
+        let area = p.signed_area() * m2_per_st2;
         if area > 0.0 {
             blocks.push(area);
         } else if area < 0.0 {
@@ -118,8 +120,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         2 * pieces
     );
 
+    // Riding the rubber band on the largest block: once around, then a vertex inserted and removed again.
+    let largest = (0..polygons.len())
+        .max_by(|&a, &b| {
+            polygons[a]
+                .signed_area()
+                .total_cmp(&polygons[b].signed_area())
+        })
+        .ok_or("no polygons")?;
+    let p = &mut polygons[largest];
+    let before = (p.len(), p.signed_area());
+    let mut v = p.first().ok_or("empty polygon")?;
+    let (mut steps, mut sourced) = (0, 0);
+    loop {
+        sourced += (v.source() != polygon::MADE) as usize;
+        steps += 1;
+        v.next();
+        if v.index() == 0 {
+            break;
+        }
+    }
+    let (a, b) = (v.pos(), v.next_pos());
+    let made = v.insert_after([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], polygon::MADE);
+    let grown = p.len();
+    p.cursor(made).remove();
+    println!(
+        "largest block: {} vertices, {steps} steps once around ({sourced} from OSM); {grown} with a midpoint \
+         inserted, {} after removing it; area unchanged: {}",
+        before.0,
+        p.len(),
+        p.signed_area() == before.1
+    );
+
     let path = "target/five-points.png";
-    draw::draw_png(&ways, &graph, &faces, view, cell, 4096, path)?;
+    draw::draw_png(&ways, &graph, &polygons, view, cell, 4096, path)?;
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
         cell[0], cell[2], cell[1], cell[3]
