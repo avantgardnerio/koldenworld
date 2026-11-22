@@ -111,6 +111,19 @@ impl Polygon {
         self.len >= 3 && self.signed_area() > 0.0
     }
 
+    /// Whether a point is inside the ring (even-odd). For picking which polygon something lies in, not for geometry.
+    pub fn contains(&self, q: DVec2) -> bool {
+        let ring: Vec<DVec2> = self.positions().collect();
+        let mut inside = false;
+        for i in 0..ring.len() {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            if (a.y > q.y) != (b.y > q.y) && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
     /// The same ring in metres around the cell (from (s, t)), and back.
     pub fn in_metres(&self, metric: &Metric) -> Polygon {
         Polygon::from_points(self.vertices().map(|(p, s)| (metric.metres(p), s)))

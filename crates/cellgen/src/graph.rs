@@ -46,8 +46,8 @@ impl RoadGraph {
         self.ends_at(n).len()
     }
 
-    /// Connected pieces (union-find over the edges).
-    pub fn component_count(&self) -> usize {
+    /// Each node's connected piece: the index of a node in the same piece (union-find over the edges).
+    pub fn components(&self) -> Vec<u32> {
         let mut parent: Vec<u32> = (0..self.node_count() as u32).collect();
         fn root(parent: &mut [u32], mut i: u32) -> u32 {
             while parent[i as usize] != i {
@@ -64,8 +64,14 @@ impl RoadGraph {
             parent[a as usize] = b;
         }
         (0..self.node_count() as u32)
-            .filter(|&i| root(&mut parent, i) == i)
-            .count()
+            .map(|i| root(&mut parent, i))
+            .collect()
+    }
+
+    /// How many connected pieces.
+    pub fn component_count(&self) -> usize {
+        let c = self.components();
+        (0..c.len()).filter(|&i| c[i] == i as u32).count()
     }
 
     /// An edge's street name ("" when unnamed).

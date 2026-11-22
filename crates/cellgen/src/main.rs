@@ -213,58 +213,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (all(&sidewalk.pieces), [196, 194, 186]), // concrete
     ];
     draw::draw_png(&fills, &frame, "target/five-points-ours.png")?;
-    // Every block by Clipper2: nested offsets, the ground their differences.
+    // The cell's ground by Clipper2. Regions: every block, with the road pieces inside it (their outside faces) as
+    // holes, and the cell itself around the network (its outer edge no road), with the network's outside as a hole.
     let started = std::time::Instant::now();
-    let grounds: Vec<clip::BlockGround> = polygons
+    let components = graph.components();
+    let piece = |f: usize| components[graph.edge_from[(faces.darts(f)[0] / 2) as usize] as usize];
+    let is_block = |f: usize| polygons[f].signed_area() > 0.0;
+    let mut holes_of: Vec<Vec<&polygon::Polygon>> = vec![Vec::new(); faces.count()];
+    let mut around: Vec<&polygon::Polygon> = Vec::new();
+    for f in (0..faces.count()).filter(|&f| !is_block(f)) {
+        // The innermost block of another piece this one lies in, if any.
+        let probe = polygons[f].positions().next().ok_or("empty face")?;
+        let host = (0..faces.count())
+            .filter(|&b| is_block(b) && piece(b) != piece(f) && polygons[b].contains(probe))
+            .min_by(|&a, &b| {
+                polygons[a]
+                    .signed_area()
+                    .total_cmp(&polygons[b].signed_area())
+            });
+        match host {
+            Some(b) => holes_of[b].push(&polygons[f]),
+            None => around.push(&polygons[f]),
+        }
+    }
+    // Whether a block's bounding box overlaps the cell's square (vertices alone miss a block round a corner).
+    let in_cell = |p: &polygon::Polygon| {
+        let (lo, hi) = p
+            .positions()
+            .fold((glam::DVec2::MAX, glam::DVec2::MIN), |(lo, hi), q| {
+                (lo.min(q), hi.max(q))
+            });
+        lo.x <= cell[2] && hi.x >= cell[0] && lo.y <= cell[3] && hi.y >= cell[1]
+    };
+    let mut regions: Vec<clip::Region> = (0..faces.count())
+        .filter(|&f| is_block(f))
+        .map(|f| clip::Region {
+            outer: clip::Outer::Road(&polygons[f]),
+            holes: std::mem::take(&mut holes_of[f]),
+        })
+        .filter(|r| matches!(r.outer, clip::Outer::Road(p) if in_cell(p)) || !r.holes.is_empty())
+        .collect();
+    regions.push(clip::Region {
+        outer: clip::Outer::Cell,
+        holes: around,
+    });
+    let square = clip::square(cell, &metric);
+    let grounds: Vec<clip::Ground> = regions
         .iter()
-        .filter(|p| p.signed_area() > 0.0)
-        .map(|p| clip::block_ground(p, &metric, 4.0, 1.5, 1.8))
+        .map(|r| clip::ground(r, &square, &metric, [4.0, 1.5, 1.8]))
         .collect();
     let took = started.elapsed();
+
+    // The checks: each region's ground adds up to it, the cell's to the square, and nothing overlaps (the union of
+    // every piece is as big as their sum).
     let mut sums = [0.0; 5];
     let mut known = [0; 2];
+    let mut off = 0;
     for g in &grounds {
         for (s, a) in sums.iter_mut().zip(g.areas) {
             *s += a;
         }
         known[0] += g.known[0];
         known[1] += g.known[1];
+        let [b, pav, gr, sw, lot] = g.areas;
+        off += ((b - (pav + gr + sw + lot)).abs() > 0.01) as usize;
     }
-    let [b, pav, gr, sw, lot] = sums.map(|a| a / 1e6);
+    let kind = |pick: fn(&clip::Ground) -> &Vec<polygon::Polygon>| -> Vec<&polygon::Polygon> {
+        grounds.iter().flat_map(|g| pick(g).iter()).collect()
+    };
+    let square_m2 = clip::area(&square);
+    let union_m2 = clip::union_area(&grounds);
+    let uncovered: f64 = clip::uncovered(&square, &grounds).iter().map(|l| l.0).sum();
+    let [_, pav, gr, sw, lot] = sums;
     println!(
-        "clipper, {} blocks in {took:.0?}: {b:.4} km² = pavement {pav:.4} + grass {gr:.4} + sidewalk {sw:.4} + lot \
-         {lot:.4} (off by {:.2} m²); ids known on {} of {} vertices",
-        grounds.len(),
-        (b - (pav + gr + sw + lot)) * 1e6,
+        "cell ground, {} regions in {took:.0?}: pavement {:.0} + grass {:.0} + sidewalk {:.0} + lot {:.0} = {:.2} m²; \
+         square {:.2} m²; union {:.2} m²; uncovered {:.3} m²; regions not adding up: {off}; ids known on {} of {} vertices",
+        regions.len(),
+        pav,
+        gr,
+        sw,
+        lot,
+        pav + gr + sw + lot,
+        square_m2,
+        union_m2,
+        uncovered,
         known[0],
         known[1]
     );
-    // The check: every block's ground adds up to the block (to a hundredth of a square metre).
-    let mut off: Vec<(f64, f64, usize)> = grounds
-        .iter()
-        .map(|g| {
-            let [b, pav, gr, sw, lot] = g.areas;
-            (b - (pav + gr + sw + lot), b, g.lot.len())
-        })
-        .filter(|o| o.0.abs() > 0.01)
-        .collect();
-    off.sort_by(|a, b| b.0.abs().total_cmp(&a.0.abs()));
-    println!(
-        "  blocks whose ground doesn't add up: {}; worst (off m², block m², lot pieces): {:?}",
-        off.len(),
-        &off[..off.len().min(6)]
-    );
-
-    let kind = |pick: fn(&clip::BlockGround) -> &Vec<polygon::Polygon>| -> Vec<&polygon::Polygon> {
-        grounds.iter().flat_map(|g| pick(g).iter()).collect()
-    };
     let clipped = [
         (kind(|g| &g.lot), [126, 170, 92]),
         (kind(|g| &g.pavement), [72, 72, 76]),
         (kind(|g| &g.grass), [104, 150, 72]),
         (kind(|g| &g.sidewalk), [196, 194, 186]),
     ];
-    draw::draw_png(&clipped, &frame, path)?;
+    let margin = 0.02 * (cell[2] - cell[0]);
+    let cell_frame = draw::View {
+        view: [
+            cell[0] - margin,
+            cell[1] - margin,
+            cell[2] + margin,
+            cell[3] + margin,
+        ],
+        cell,
+        size: 4096,
+    };
+    draw::draw_png(&clipped, &cell_frame, path)?;
 
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
