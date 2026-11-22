@@ -74,11 +74,6 @@ impl RoadGraph {
         (0..c.len()).filter(|&i| c[i] == i as u32).count()
     }
 
-    /// An edge's street name ("" when unnamed).
-    pub fn street_name<'a>(&self, ways: &'a RoadWays, e: usize) -> &'a str {
-        &ways.names[ways.name[self.edge_way[e] as usize] as usize]
-    }
-
     /// The point an end leaves its node toward: the nearest point along its edge at a different position (two OSM
     /// nodes can share coordinates), or None if the whole edge sits on the node.
     pub fn end_toward(&self, ways: &RoadWays, end: u32) -> Option<usize> {

@@ -80,6 +80,42 @@ pub fn token(id: u64) -> String {
     format!("{id:016x}").trim_end_matches('0').to_string()
 }
 
+/// A cell's face and (s, t) square from its token (as s2.ts cellFaceIJ), or None if the token isn't a cell.
+pub fn cell_from_token(token: &str) -> Option<(u32, [f64; 4])> {
+    const POS_TO_IJ: [[usize; 4]; 4] = [[0, 1, 3, 2], [0, 2, 3, 1], [3, 2, 0, 1], [3, 1, 0, 2]];
+    const POS_TO_ORIENTATION: [usize; 4] = [1, 0, 0, 3];
+    if token.is_empty() || token.len() > 16 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let id = u64::from_str_radix(&format!("{token:0<16}"), 16).ok()?;
+    if id == 0 {
+        return None;
+    }
+    let level = 30 - id.trailing_zeros() / 2;
+    let face = (id >> 61) as u32;
+    if face > 5 || id.trailing_zeros() % 2 != 0 {
+        return None;
+    }
+    let (mut orient, mut i, mut j) = (face as usize & 1, 0u64, 0u64);
+    for k in 0..level {
+        let pos = ((id >> (59 - 2 * k)) & 3) as usize;
+        let ij = POS_TO_IJ[orient][pos];
+        i = i * 2 + (ij >> 1) as u64;
+        j = j * 2 + (ij & 1) as u64;
+        orient ^= POS_TO_ORIENTATION[pos];
+    }
+    let n = (1u64 << level) as f64;
+    Some((
+        face,
+        [
+            i as f64 / n,
+            j as f64 / n,
+            (i + 1) as f64 / n,
+            (j + 1) as f64 / n,
+        ],
+    ))
+}
+
 /// A lon/lat box (west, south, east, north) around an (s, t) rectangle on a face: its corners, padded by `pad`
 /// degrees (its edges bow a little in lon/lat).
 pub fn lat_lon_bounds(face: u32, [s0, t0, s1, t1]: [f64; 4], pad: f64) -> [f64; 4] {

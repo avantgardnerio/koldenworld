@@ -17,19 +17,16 @@ use arrow_array::{
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
-/// Writes ground.arrow and ground_triangles.arrow into `dir`. `kinds` names the materials; `origin` is the frame's
-/// (lat, lon) on the ellipsoid.
-pub fn write(
+/// ground.arrow and ground_triangles.arrow, as bytes. `kinds` names the materials; `origin` is the frame's (lat, lon)
+/// on the ellipsoid.
+pub fn encode(
     mesh: &Mesh,
     kinds: &[&str],
     token: &str,
     origin: (f64, f64),
-    dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(dir)?;
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
     let ranges: Vec<[u32; 3]> = mesh
         .ranges
         .iter()
@@ -77,8 +74,7 @@ pub fn write(
     let (position, positions) = vec3("position", &mesh.positions);
     let (normal, normals) = vec3("normal", &mesh.normals);
     let material: ArrayRef = Arc::new(UInt8Array::from(mesh.material.clone()));
-    write_table(
-        &dir.join("ground.arrow"),
+    let ground = table(
         vec![
             position,
             normal,
@@ -89,34 +85,33 @@ pub fn write(
     )?;
 
     let item = Arc::new(Field::new("v", DataType::UInt32, false));
-    let triangles = FixedSizeListArray::new(
+    let list = FixedSizeListArray::new(
         item.clone(),
         3,
         Arc::new(UInt32Array::from(mesh.indices.clone())),
         None,
     );
-    write_table(
-        &dir.join("ground_triangles.arrow"),
+    let triangles = table(
         vec![Field::new(
             "vertices",
             DataType::FixedSizeList(item, 3),
             false,
         )],
-        vec![Arc::new(triangles)],
+        vec![Arc::new(list)],
         metadata,
-    )
+    )?;
+    Ok((ground, triangles))
 }
 
-fn write_table(
-    path: &Path,
+fn table(
     fields: Vec<Field>,
     columns: Vec<ArrayRef>,
     metadata: HashMap<String, String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
     let batch = RecordBatch::try_new(schema.clone(), columns)?;
-    let mut writer = FileWriter::try_new(std::fs::File::create(path)?, &schema)?;
+    let mut writer = FileWriter::try_new(Vec::new(), &schema)?;
     writer.write(&batch)?;
     writer.finish()?;
-    Ok(())
+    Ok(writer.into_inner()?)
 }
