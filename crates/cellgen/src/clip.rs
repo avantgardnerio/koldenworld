@@ -19,7 +19,7 @@ use glam::DVec2;
 
 /// Clipper's integer grid: micrometres. Clipping rounds new vertices to it, so the finer the grid the thinner the
 /// slivers that rounding leaves along a cut (millimetres left about 0.5 m² along a cell's 4 km of edge).
-const MM: f64 = 1_000_000.0;
+pub const UNITS: f64 = 1_000_000.0;
 /// A corner in a very sharp angle stops at this many offsets out.
 const MITER: f64 = 4.0;
 const NONZERO: FillRule = FillRule::NonZero;
@@ -37,13 +37,9 @@ pub enum Outer<'a> {
 
 #[derive(Default)]
 pub struct Ground {
-    pub pavement: Vec<Polygon>,
-    pub grass: Vec<Polygon>,
-    pub sidewalk: Vec<Polygon>,
-    pub lot: Vec<Polygon>,
     pub areas: [f64; 5], // m²: the region (in the cell), then pavement, grass, sidewalk, lot
     pub known: [usize; 2], // output vertices whose id survived, of all
-    pub native: Paths64, // every part as Clipper made it (micrometres), for checking without a round trip
+    pub parts: [Paths64; 4], // pavement, grass, sidewalk, lot as Clipper made them (micrometres)
 }
 
 /// The cell's square as a Clipper path (metres around the cell, as micrometres; no ids).
@@ -56,6 +52,17 @@ pub fn square(cell: [f64; 4], metric: &Metric) -> Paths64 {
             .map(|&c| point(metric.metres(DVec2::from_array(c)), MADE))
             .collect(),
     ]
+}
+
+/// The square's bounding box, metres around the cell.
+pub fn square_bounds(square: &Paths64) -> (DVec2, DVec2) {
+    square
+        .iter()
+        .flatten()
+        .fold((DVec2::MAX, DVec2::MIN), |(lo, hi), p| {
+            let v = DVec2::new(p.x as f64, p.y as f64) / UNITS;
+            (lo.min(v), hi.max(v))
+        })
 }
 
 /// The region split into its four kinds of ground, inside the cell's square. `widths[dart]` is that side's kerb,
@@ -111,7 +118,14 @@ pub fn ground(region: &Region, square: &Paths64, metric: &Metric, widths: &[[f64
             .iter()
             .filter(|(d, _)| *d > 0.0)
             .flat_map(|(d, paths)| {
-                inflate_paths_64(paths, d * MM, JoinType::Miter, EndType::Square, MITER, 0.0)
+                inflate_paths_64(
+                    paths,
+                    d * UNITS,
+                    JoinType::Miter,
+                    EndType::Square,
+                    MITER,
+                    0.0,
+                )
             })
             .collect();
         difference_64(&b, &union_subjects_64(&strips, NONZERO), NONZERO)
@@ -126,7 +140,7 @@ pub fn ground(region: &Region, square: &Paths64, metric: &Metric, widths: &[[f64
         s,
     ];
 
-    let m2 = |p: &Paths64| area_paths(p) / (MM * MM);
+    let m2 = |p: &Paths64| area_paths(p) / (UNITS * UNITS);
     let areas = [
         m2(&b),
         m2(&parts[0]),
@@ -136,48 +150,29 @@ pub fn ground(region: &Region, square: &Paths64, metric: &Metric, widths: &[[f64
     ];
     let points = parts.iter().flatten().flatten();
     let known = [points.clone().filter(|p| p.z != 0).count(), points.count()];
-    let native: Paths64 = parts.iter().flatten().cloned().collect();
-    let [pavement, grass, sidewalk, lot] = parts.map(|p| from_paths(&p, metric));
     Ground {
-        pavement,
-        grass,
-        sidewalk,
-        lot,
         areas,
         known,
-        native,
+        parts,
     }
 }
 
 /// Area of Clipper paths, m².
 pub fn area(paths: &Paths64) -> f64 {
-    area_paths(paths) / (MM * MM)
+    area_paths(paths) / (UNITS * UNITS)
 }
 
-/// Area of the union of all the grounds' parts, m²: equal to the sum of their areas only if none overlap.
-pub fn union_area(grounds: &[Ground]) -> f64 {
-    let all: Paths64 = grounds
-        .iter()
-        .flat_map(|g| g.native.iter().cloned())
-        .collect();
-    area(&union_subjects_64(&all, NONZERO))
-}
-
-/// What of the square no ground covers: each leftover's area (m²) and a point on it (metres).
-pub fn uncovered(square: &Paths64, grounds: &[Ground]) -> Vec<(f64, DVec2)> {
-    let all: Paths64 = grounds
-        .iter()
-        .flat_map(|g| g.native.iter().cloned())
-        .collect();
-    let left = difference_64(square, &union_subjects_64(&all, NONZERO), NONZERO);
-    left.iter()
-        .map(|p| {
-            (
-                area(&vec![p.clone()]),
-                DVec2::new(p[0].x as f64, p[0].y as f64) / MM,
-            )
-        })
-        .collect()
+/// Sum, union and what's left uncovered of the square, m², over sets of Clipper paths that should partition it: the
+/// sum equals the union only if no two pieces overlap, and the union equals the square only if nothing is missing.
+pub fn tally(square: &Paths64, sets: &[&Paths64]) -> [f64; 3] {
+    let all: Paths64 = sets.iter().flat_map(|s| s.iter().cloned()).collect();
+    let sum: f64 = sets.iter().map(|s| area(s)).sum();
+    let union = union_subjects_64(&all, NONZERO);
+    [
+        sum,
+        area(&union),
+        area(&difference_64(square, &union, NONZERO)),
+    ]
 }
 
 /// A ring cut into road sides: each maximal run of vertices on one dart's side, with the next run's first vertex as its
@@ -213,18 +208,20 @@ fn path_of(poly: &Polygon, metric: &Metric) -> Path64 {
         .collect()
 }
 
-fn point(metres: DVec2, id: u32) -> Point64 {
-    let m = metres * MM;
+/// A point in metres around the cell, on Clipper's grid, carrying an id (MADE: none).
+pub fn point(metres: DVec2, id: u32) -> Point64 {
+    let m = metres * UNITS;
     let z = if id == MADE { 0 } else { id as i64 + 1 };
     Point64::new_z(m.x.round() as i64, m.y.round() as i64, z)
 }
 
-fn from_paths(paths: &Paths64, metric: &Metric) -> Vec<Polygon> {
+/// Clipper paths back as polygons in (s, t), ids from z.
+pub fn from_paths(paths: &Paths64, metric: &Metric) -> Vec<Polygon> {
     paths
         .iter()
         .map(|path| {
             Polygon::from_points(path.iter().map(|p| {
-                let st = metric.st(DVec2::new(p.x as f64, p.y as f64) / MM);
+                let st = metric.st(DVec2::new(p.x as f64, p.y as f64) / UNITS);
                 (st, if p.z == 0 { MADE } else { (p.z - 1) as u32 })
             }))
         })

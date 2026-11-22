@@ -5,6 +5,7 @@ mod faces;
 mod geom;
 mod graph;
 mod layer;
+mod markings;
 mod pavement;
 mod polygon;
 mod s2;
@@ -280,34 +281,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let [b, pav, gr, sw, lot] = g.areas;
         off += ((b - (pav + gr + sw + lot)).abs() > 0.01) as usize;
     }
-    let kind = |pick: fn(&clip::Ground) -> &Vec<polygon::Polygon>| -> Vec<&polygon::Polygon> {
-        grounds.iter().flat_map(|g| pick(g).iter()).collect()
-    };
-    let square_m2 = clip::area(&square);
-    let union_m2 = clip::union_area(&grounds);
-    let uncovered: f64 = clip::uncovered(&square, &grounds).iter().map(|l| l.0).sum();
     let [_, pav, gr, sw, lot] = sums;
     println!(
-        "cell ground, {} regions in {took:.0?}: pavement {:.0} + grass {:.0} + sidewalk {:.0} + lot {:.0} = {:.2} m²; \
-         square {:.2} m²; union {:.2} m²; uncovered {:.3} m²; regions not adding up: {off}; ids known on {} of {} vertices",
+        "cell ground, {} regions in {took:.0?}: pavement {pav:.0}, grass {gr:.0}, sidewalk {sw:.0}, lot {lot:.0} m²; \
+         regions not adding up: {off}; ids known on {} of {} vertices",
         regions.len(),
-        pav,
-        gr,
-        sw,
-        lot,
-        pav + gr + sw + lot,
-        square_m2,
-        union_m2,
-        uncovered,
         known[0],
         known[1]
     );
-    let clipped = [
-        (kind(|g| &g.lot), [126, 170, 92]),
-        (kind(|g| &g.pavement), [72, 72, 76]),
-        (kind(|g| &g.grass), [104, 150, 72]),
-        (kind(|g| &g.sidewalk), [196, 194, 186]),
+
+    // Markings, cut out of the pavement where they're not in a junction zone: asphalt, yellow and white are kinds of
+    // ground like the rest, every point exactly one.
+    let started = std::time::Instant::now();
+    let merge = |k: usize| -> clipper2_rust::Paths64 {
+        grounds
+            .iter()
+            .flat_map(|g| g.parts[k].iter().cloned())
+            .collect()
+    };
+    let nonzero = clipper2_rust::FillRule::NonZero;
+    let pavement = clipper2_rust::union_subjects_64(&merge(0), nonzero);
+    let (lo, hi) = clip::square_bounds(&square);
+    let near = |p: glam::DVec2| {
+        p.x >= lo.x - 50.0 && p.x <= hi.x + 50.0 && p.y >= lo.y - 50.0 && p.y <= hi.y + 50.0
+    };
+    let half_width: Vec<f64> = (0..graph.edge_count())
+        .map(|e| dart_widths[2 * e][0].max(dart_widths[2 * e + 1][0]))
+        .collect();
+    let zones = markings::junction_zones(&graph, &ways, &metric, &half_width, near);
+    let lines = markings::lines(&graph, &ways, &metric, near);
+    let markable = clipper2_rust::difference_64(&pavement, &zones, nonzero);
+    let yellow = clipper2_rust::intersect_64(
+        &clipper2_rust::union_subjects_64(&lines.yellow, nonzero),
+        &markable,
+        nonzero,
+    );
+    let white = clipper2_rust::difference_64(
+        &clipper2_rust::intersect_64(
+            &clipper2_rust::union_subjects_64(&lines.white, nonzero),
+            &markable,
+            nonzero,
+        ),
+        &yellow,
+        nonzero,
+    );
+    let asphalt = clipper2_rust::difference_64(
+        &pavement,
+        &clipper2_rust::union_subjects_64(&[yellow.clone(), white.clone()].concat(), nonzero),
+        nonzero,
+    );
+    let (grass, sidewalk, lots) = (merge(1), merge(2), merge(3));
+    let kinds = [&asphalt, &yellow, &white, &grass, &sidewalk, &lots];
+    let [sum, union, uncovered] = clip::tally(&square, &kinds);
+    let m2: Vec<String> = kinds
+        .iter()
+        .map(|k| format!("{:.0}", clip::area(k)))
+        .collect();
+    println!(
+        "cell ground with markings, in {:.0?}: asphalt {} + yellow {} + white {} + grass {} + sidewalk {} + lot {} = \
+         {sum:.2} m²; square {:.2} m²; union {union:.2} m²; uncovered {uncovered:.3} m²",
+        started.elapsed(),
+        m2[0],
+        m2[1],
+        m2[2],
+        m2[3],
+        m2[4],
+        m2[5],
+        clip::area(&square)
+    );
+
+    let polys: Vec<Vec<polygon::Polygon>> =
+        kinds.iter().map(|k| clip::from_paths(k, &metric)).collect();
+    let colors = [
+        [72, 72, 76],
+        [232, 190, 40],
+        [240, 240, 236],
+        [104, 150, 72],
+        [196, 194, 186],
+        [126, 170, 92],
     ];
+    let fills: Vec<(Vec<&polygon::Polygon>, [u8; 3])> = polys
+        .iter()
+        .zip(colors)
+        .map(|(ps, c)| (ps.iter().collect(), c))
+        .collect();
     let margin = 0.02 * (cell[2] - cell[0]);
     let cell_frame = draw::View {
         view: [
@@ -319,7 +376,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cell,
         size: 4096,
     };
-    draw::draw_png(&clipped, &cell_frame, path)?;
+    draw::draw_png(&fills, &cell_frame, path)?;
+    // Close up: the busiest marked junction in the cell (most marked roads meeting), 70 m across.
+    let marked = |e: usize| widths::profile(ways.class[graph.edge_way[e] as usize]).2;
+    let in_cell =
+        |p: [f64; 2]| p[0] > cell[0] && p[0] < cell[2] && p[1] > cell[1] && p[1] < cell[3];
+    if let Some(n) = (0..graph.node_count())
+        .filter(|&n| graph.degree(n) >= 3 && in_cell(ways.st[graph.node_point[n] as usize]))
+        .max_by_key(|&n| {
+            graph
+                .ends_at(n)
+                .iter()
+                .filter(|&&h| marked((h / 2) as usize))
+                .count()
+        })
+    {
+        let c = ways.st[graph.node_point[n] as usize];
+        let r = 35.0 / metric.to_m.col(0).length();
+        let zoom = draw::View {
+            view: [c[0] - r, c[1] - r, c[0] + r, c[1] + r],
+            cell,
+            size: 1400,
+        };
+        draw::draw_png(&fills, &zoom, "target/junction.png")?;
+        let streets: Vec<&str> = graph
+            .ends_at(n)
+            .iter()
+            .map(|&h| graph.street_name(&ways, (h / 2) as usize))
+            .collect();
+        println!("junction close-up: {streets:?}");
+    }
 
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
