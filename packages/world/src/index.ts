@@ -9,7 +9,7 @@ export {
 } from "./s2.ts";
 export {
   buildCell, CELL_LEVEL, CELL_TABLES, CELL_VERSION, cellFromArrow, cellGroundMesh, cellsWithin, cellToArrow, horizonDistance,
-  ownerPoint, type CellContents, type CellFiles, type GroundMesh,
+  ownerPoint, packCellFiles, unpackCellFiles, type CellContents, type CellFiles, type GroundMesh,
 } from "./cell.ts";
 export {
   drapeCell, drapeRoadGraph, flatTerrain, footprintMax, groundNoise, groundSampler, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,

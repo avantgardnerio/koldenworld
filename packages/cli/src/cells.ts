@@ -97,17 +97,31 @@ async function writeAtomic(file: string, data: Uint8Array | string): Promise<voi
   await rename(tmp, file);
 }
 
+/** A cell's files from the disk cache, when they're there and current; no building. */
+export async function cachedCell(cell: CellId): Promise<CellFiles | null> {
+  const dir = path.join(cellsDir, cellToken(cell)), manifest = path.join(dir, "manifest.json");
+  if (!existsSync(manifest)) return null;
+  const m = JSON.parse(await readFile(manifest, "utf8")) as typeof MANIFEST_VERSION;
+  if (!Object.entries(MANIFEST_VERSION).every(([k, v]) => m[k as keyof typeof m] === v)) return null;
+  const files = await Promise.all(CELL_TABLES.map((t) => readFile(path.join(dir, `${t}.arrow`))));
+  return Object.fromEntries(CELL_TABLES.map((t, i) => [t, files[i]!])) as unknown as CellFiles;
+}
+
 export class CellService {
   private queue: Promise<unknown> = Promise.resolve();  // downloads, one at a time
   private fetches = new Map<CellId, Promise<void>>();
   private covered?: Promise<Set<string>>;  // areas already imported, loaded once
-  private elevation = new Elevation();
+  private elevation: Elevation;
   private builds = new Map<CellId, Promise<CellFiles>>();
 
   private log: (msg: string) => void;
+  private fetcher?: (fetchCell: CellId) => Promise<void>;
 
-  constructor(log: (msg: string) => void) {
+  /** fetcher: who makes sure OSM is downloaded (a worker asks the main thread, so each area downloads once). */
+  constructor(log: (msg: string) => void, opts: { elevationBlocks?: number; fetcher?: (fetchCell: CellId) => Promise<void> } = {}) {
     this.log = log;
+    this.elevation = new Elevation(opts.elevationBlocks);
+    this.fetcher = opts.fetcher;
   }
 
   /** The cell's files: from the disk cache, or generated (which may download OSM first). */
@@ -122,15 +136,7 @@ export class CellService {
 
   private async cachedOrBuild(cell: CellId): Promise<CellFiles> {
     const dir = path.join(cellsDir, cellToken(cell));
-    const manifest = path.join(dir, "manifest.json");
-    if (existsSync(manifest)) {
-      const m = JSON.parse(await readFile(manifest, "utf8")) as typeof MANIFEST_VERSION;
-      if (Object.entries(MANIFEST_VERSION).every(([k, v]) => m[k as keyof typeof m] === v)) {
-        const files = await Promise.all(CELL_TABLES.map((t) => readFile(path.join(dir, `${t}.arrow`))));
-        return Object.fromEntries(CELL_TABLES.map((t, i) => [t, files[i]!])) as unknown as CellFiles;
-      }
-    }
-    return this.build(cell, dir, manifest);
+    return (await cachedCell(cell)) ?? this.build(cell, dir, path.join(dir, "manifest.json"));
   }
 
   private async build(cell: CellId, dir: string, manifest: string): Promise<CellFiles> {
@@ -160,14 +166,18 @@ export class CellService {
     const ground = groundSampler(dem, cellLevel(cell), carveWater(water.areas));
     const draped = drapeCell(flat, ground);
     const heights = { dem, surface: groundSampler(dem, cellLevel(cell)), ground };
-    const contents = {
-      ...draped, water: cellWater(cell, draped.frame, water.areas, water.lines, heights),
-      aeroways: cellAeroways(cell, draped.frame, aeroways.areas, aeroways.lines, ground),
-      // Pavement, grass and sidewalk from every road around the cell, draped as its owner drapes it.
-      streets: cellStreets(cell, draped.frame, drapeRoadGraph(buildRoadGraph(ways, enuProjection(draped.frame)), draped.frame, ground)),
-    };
-    const files = cellToArrow(contents);
     lap("drape");
+    const waterMesh = cellWater(cell, draped.frame, water.areas, water.lines, heights);
+    const aerowayMesh = cellAeroways(cell, draped.frame, aeroways.areas, aeroways.lines, ground);
+    lap("water+aeroways");
+    // Pavement, grass and sidewalk from every road around the cell, draped as its owner drapes it.
+    const around = drapeRoadGraph(buildRoadGraph(ways, enuProjection(draped.frame)), draped.frame, ground);
+    lap("streets-drape");
+    const streets = cellStreets(cell, draped.frame, around);
+    lap("streets");
+    const contents = { ...draped, water: waterMesh, aeroways: aerowayMesh, streets };
+    const files = cellToArrow(contents);
+    lap("arrow");
     await mkdir(dir, { recursive: true });
     for (const t of CELL_TABLES) await writeAtomic(path.join(dir, `${t}.arrow`), files[t]);
     await writeAtomic(manifest, JSON.stringify({
@@ -182,7 +192,9 @@ export class CellService {
     return files;
   }
 
-  private ensureFetched(fetchCell: CellId): Promise<void> {
+  /** Makes sure the fetch cell's OSM is downloaded and imported, once. */
+  ensureFetched(fetchCell: CellId): Promise<void> {
+    if (this.fetcher) return this.fetcher(fetchCell);
     let p = this.fetches.get(fetchCell);
     if (!p) {
       p = this.fetch(fetchCell).catch((err: unknown) => {

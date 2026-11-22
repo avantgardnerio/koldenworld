@@ -8,13 +8,15 @@ import path from "node:path";
 import { defineConfig } from "vite";
 
 const repo = path.resolve(import.meta.dirname, "../..");
-const cellServer = process.env.CELL_SERVER ?? "http://localhost:5174";
+const cellServer = process.env.CELL_SERVER ?? "http://127.0.0.1:5174";
 
 export default defineConfig({
   root: import.meta.dirname,
   publicDir: process.env.VIEWER_DATA ?? path.join(repo, "data/export"),
   server: {
     port: 5173,
+    // Demos to friends: Caddy on bgdesktop terminates TLS and basic auth, then proxies here.
+    allowedHosts: ["koldenworld.squarelabs.net"],
     proxy: cellServer ? {
       "/cells": { target: cellServer, timeout: 600_000, proxyTimeout: 600_000 },
       "/aircraft": { target: cellServer },

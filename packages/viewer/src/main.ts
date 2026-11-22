@@ -18,7 +18,7 @@
 
 import {
   AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, enuUnprojection, streetSigns, streetsTriangles, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
-  frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
+  frameToFrame, unpackCellFiles, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, speed, viewProjection } from "./camera.ts";
@@ -157,7 +157,10 @@ async function start(): Promise<void> {
 
   async function loadCell(cell: CellId): Promise<CellGpu> {
     const token = cellToken(cell);
-    const blobs = await Promise.all(CELL_TABLES.map((t) => getBlob(`/cells/${token}/${t}.arrow`)));
+    // Every table in one response from the cell server; a file per table when served as static files.
+    const packed = await getBlob(`/cells/${token}.cell`);
+    const files = packed && unpackCellFiles(packed);
+    const blobs = files ? CELL_TABLES.map((t) => files[t]) : await Promise.all(CELL_TABLES.map((t) => getBlob(`/cells/${token}/${t}.arrow`)));
     const frame = cellFrame(cell);
     const zero = { nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0 };
     const missing = blobs.some((b) => b === null);
@@ -220,7 +223,7 @@ async function start(): Promise<void> {
 
   const streamer = new CellStreamer<CellGpu>({
     load: loadCell,
-    concurrency: 8,
+    concurrency: 16,  // the cell server builds on a pool of workers
     dispose: (g) => {
       [g.ground, g.water, g.aeroways, g.streets, g.roads, g.graph, g.buildings, g.signs].forEach((l) => l?.dispose());
       if (g.traffic) traffic.remove(g.traffic);

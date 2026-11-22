@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildCell, CELL_LEVEL, CELL_VERSION, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellGroundMesh, cellsWithin,
-  cellToArrow, ecefToLocal, enuFrame, enuUnprojection, frameToFrame, geodeticToEcef, horizonDistance, transformPoint,
-  type BuildingInput, type RoadWayInput, type Vec3,
+  buildCell, CELL_LEVEL, CELL_TABLES, CELL_VERSION, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellGroundMesh, cellsWithin,
+  cellToArrow, ecefToLocal, enuFrame, enuUnprojection, frameToFrame, geodeticToEcef, horizonDistance, packCellFiles, transformPoint,
+  unpackCellFiles, type BuildingInput, type CellFiles, type RoadWayInput, type Vec3,
 } from "../src/index.ts";
 
 // Two neighboring level-13 cells in Denver, and helpers to place things in
@@ -128,5 +128,18 @@ describe("horizon and ground", () => {
       const pb = transformPoint(frameToFrame(fb, mid), p(gb, 0));
       expect(Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2])).toBeLessThan(0.001);
     }
+  });
+});
+
+describe("packCellFiles", () => {
+  it("round-trips every table, empty ones included", () => {
+    const files = Object.fromEntries(CELL_TABLES.map((t, i) => [t, Uint8Array.from({ length: i * 3 }, (_, k) => k + i)])) as unknown as CellFiles;
+    const back = unpackCellFiles(packCellFiles(files));
+    for (const t of CELL_TABLES) expect(Array.from(back[t])).toEqual(Array.from(files[t]));
+  });
+
+  it("refuses a truncated blob", () => {
+    const files = Object.fromEntries(CELL_TABLES.map((t) => [t, new Uint8Array(5)])) as unknown as CellFiles;
+    expect(() => unpackCellFiles(packCellFiles(files).subarray(0, 20))).toThrow(/ends/);
   });
 });

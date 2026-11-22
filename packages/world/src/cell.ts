@@ -93,6 +93,38 @@ export interface CellFiles {
 }
 export const CELL_TABLES = ["nodes", "edges", "buildings", "terrain", "water", "aeroways", "streets"] as const satisfies readonly (keyof CellFiles)[];
 
+/**
+ * A cell's files as one blob, to send in one response (a browser has 6 connections per host, and
+ * a file per table queued its cells behind each other): per table in CELL_TABLES order, its length
+ * (uint32, little-endian), then its bytes.
+ */
+export function packCellFiles(files: CellFiles): Uint8Array {
+  let n = 0;
+  for (const t of CELL_TABLES) n += 4 + files[t].length;
+  const out = new Uint8Array(n), view = new DataView(out.buffer);
+  let at = 0;
+  for (const t of CELL_TABLES) {
+    view.setUint32(at, files[t].length, true);
+    out.set(files[t], at + 4);
+    at += 4 + files[t].length;
+  }
+  return out;
+}
+
+export function unpackCellFiles(bytes: Uint8Array): CellFiles {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), files: Partial<CellFiles> = {};
+  let at = 0;
+  for (const t of CELL_TABLES) {
+    if (at + 4 > bytes.length) throw new Error(`cell blob ends before ${t}`);
+    const n = view.getUint32(at, true);
+    if (at + 4 + n > bytes.length) throw new Error(`cell blob ends inside ${t}`);
+    files[t] = bytes.subarray(at + 4, at + 4 + n);
+    at += 4 + n;
+  }
+  if (at !== bytes.length) throw new Error(`cell blob has ${bytes.length - at} bytes past its tables`);
+  return files as CellFiles;
+}
+
 export function cellToArrow(c: CellContents, metadata: FileMetadata = {}): CellFiles {
   const meta = {
     cell: cellToken(c.cell), cellVersion: CELL_VERSION, roadGraphVersion: ROAD_GRAPH_VERSION,

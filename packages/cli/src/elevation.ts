@@ -78,6 +78,11 @@ export class Elevation {
   private images = new Map<string, Promise<GeoTIFFImage | null>>();
   private geoid?: Promise<Grid>;
   private blocks = new Map<string, Promise<Grid>>();  // LRU by insertion order
+  private maxBlocks: number;
+
+  constructor(maxBlocks = MAX_BLOCKS) {
+    this.maxBlocks = maxBlocks;
+  }
 
   private block(file: string, image: GeoTIFFImage, bx: number, by: number): Promise<Grid> {
     const key = `${file}:${bx}:${by}`;
@@ -85,7 +90,7 @@ export class Elevation {
     if (p) this.blocks.delete(key);
     else p = readBlock(image, bx, by);
     this.blocks.set(key, p);
-    if (this.blocks.size > MAX_BLOCKS) this.blocks.delete(this.blocks.keys().next().value!);
+    if (this.blocks.size > this.maxBlocks) this.blocks.delete(this.blocks.keys().next().value!);
     return p;
   }
   missing = 0;  // samples without data, since start

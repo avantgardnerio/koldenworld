@@ -16,7 +16,7 @@ const USAGE = `commands:
   import-pbf --file <x.osm.pbf> [--poly <file>] [--within lat,lon,km] [--force]
                                                    import every download cell an extract fully covers
   cell --token <s2 token>                          generate one cell's files (downloading OSM if needed)
-  serve [--port <port>]                            cell server: /cells/<token>/<table>.arrow, generated on a miss`;
+  serve [--port <port>] [--host <addr>]            cell server: /cells/<token>/<table>.arrow, generated on a miss`;
 
 const log = (msg: string) => console.log(msg);
 
@@ -63,8 +63,8 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "serve": {
-      const { values } = parseArgs({ args: rest, options: { port: { type: "string", default: "5174" } } });
-      await serve(Number(values.port), log);
+      const { values } = parseArgs({ args: rest, options: { port: { type: "string", default: "5174" }, host: { type: "string", default: "127.0.0.1" } } });
+      await serve(Number(values.port), values.host, log);
       return;
     }
     default:
