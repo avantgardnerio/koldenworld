@@ -22,7 +22,8 @@ import {
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, speed, viewProjection } from "./camera.ts";
-import { AirTraffic, emptyAircraftInstances } from "./air-traffic.ts";
+import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
+import { createContrailLayer } from "./contrail-layer.ts";
 import { createCarModels, createCarRenderer, type CarModels, type CarRenderer } from "./car-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
@@ -238,6 +239,8 @@ async function start(): Promise<void> {
   const planeRenderer = showPlanes
     ? createCarRenderer(gl, createCarModels(gl, aircraftMeshes(), new ImageData(new Uint8ClampedArray(AIRCRAFT_PALETTE), 16, 1)))
     : undefined;
+  const contrails = emptyContrails();
+  const contrailLayer = showPlanes ? createContrailLayer(gl) : undefined;
   air.onUpdate = () => wake();
 
   // --- which cells: refreshed when the camera enters another cell or the radius steps ---
@@ -343,6 +346,11 @@ async function start(): Promise<void> {
     }
     const cars = traffic.cars.count;
     Object.assign(status, { cars, carTriangles, simTime: traffic.simTime, aircraft: air.count });
+    if (contrailLayer) {
+      // Last: blended over everything, without writing depth.
+      air.contrails(vf, performance.now() / 1000, contrails);
+      contrailLayer.draw(f, contrails, h);
+    }
     if (status.graphOverlay) {
       for (const g of visible) {
         if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, bias: 1 });

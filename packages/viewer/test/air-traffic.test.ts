@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ecefToGeodetic, type AircraftReport, type Vec3 } from "@game/world";
-import { AirTraffic } from "../src/air-traffic.ts";
+import { ecefToGeodetic, enuFrame, type AircraftReport, type Vec3 } from "@game/world";
+import { AirTraffic, CONTRAIL_AGL, emptyContrails, TRAIL_S } from "../src/air-traffic.ts";
 
 const report = (over: Partial<AircraftReport>): AircraftReport => ({
   id: "a1", callsign: "UAL1", model: 0, lat: 39.8, lon: -104.7, h: 3000, ground: false,
@@ -38,6 +38,35 @@ describe("air traffic", () => {
     // And it ends up where the report says, on its new track.
     const end = ecefToGeodetic(frames.at(-1)!.at);
     expect(end.lon).toBeGreaterThan(-104.7 + 150 / 85_000);
+  });
+
+  it("leaves contrails behind planes high in the air (from the first sight), not on the ground or taking off and landing", () => {
+    const air = new AirTraffic(() => 1600);
+    air.update([
+      report({ h: 10_000 }),
+      report({ id: "g", ground: true, h: undefined, speed: 10 }),
+      report({ id: "low", h: 1600 + CONTRAIL_AGL - 500, climb: 20 }),  // climbing out: 500 m below where contrails start
+    ], 0);
+    const vf = enuFrame({ lat: 39.8, lon: -104.7, h: 0 }), mesh = emptyContrails();
+    air.contrails(vf, 0, mesh);
+    // One ribbon: TRAIL_S one-second samples behind it, plus where it is now; two vertices each.
+    expect(mesh.vertices).toBe(2 * (TRAIL_S + 1));
+    expect(mesh.count).toBe(6 * TRAIL_S);
+    const at = (v: number) => [...mesh.data.subarray(8 * v, 8 * v + 8)];
+    const [oldest, newest] = [at(0), at(mesh.vertices - 1)];
+    expect(oldest[6]).toBeCloseTo(1, 3);  // age
+    expect(newest[6]).toBe(0);
+    expect(newest[1]! - oldest[1]!).toBeCloseTo(120 * TRAIL_S, -1);  // it flies north at 120 m/s
+    expect(newest[4]).toBeCloseTo(1, 3);  // pointing north
+    // Later, the trail follows the plane and old samples drop off.
+    const ribbons = () => mesh.vertices / 2 - mesh.count / 6;  // points − segments: one more point than segments per ribbon
+    expect(ribbons()).toBe(1);
+    // The climbing plane is still 100 m short at 20 s; it crosses at 25 s and starts its own.
+    for (let s = 1; s <= 20; s++) air.contrails(vf, s, mesh);
+    expect(ribbons()).toBe(1);
+    expect(mesh.vertices).toBeLessThanOrEqual(2 * (TRAIL_S + 2));  // old samples drop off as new ones come
+    for (let s = 21; s <= 28; s++) air.contrails(vf, s, mesh);
+    expect(ribbons()).toBe(2);
   });
 
   it("taxis on the ground, holds still once stale, and is forgotten", () => {

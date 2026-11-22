@@ -10,6 +10,10 @@
 //   track without a jump.
 // - A plane that stops reporting holds still after STALE_S and is forgotten
 //   after FORGET_S.
+// - Planes high in the air (CONTRAIL_AGL above the ground: not taking off or
+//   landing) leave contrails: where they were drawn over the last TRAIL_S,
+//   sampled every TRAIL_STEP_S. A plane seen for the first time gets a trail
+//   behind it along its velocity, so contrails show right away.
 //
 // Not flight dynamics: no banking, and turns are a series of straight legs
 // blended together.
@@ -29,6 +33,10 @@ const RADIUS_NM = 60;
 const REFETCH_M = 20_000;
 /** A correction this large is a glitch or a long gap, not drift: the plane is just put there. */
 const SNAP_M = 3000;
+export const TRAIL_S = 40;
+const TRAIL_STEP_S = 1;
+/** m above the ground below which planes leave no contrail. */
+export const CONTRAIL_AGL = 3000;
 
 /** Ground height (m above the ellipsoid) at a point. */
 export type Ground = (lat: number, lon: number) => number;
@@ -45,7 +53,19 @@ interface Plane {
   ev: Vec3;       // correction at tc (velocity, m/s), fading
   tc: number;
   seen: number;   // s, last report
+  trail: Vec3[];  // ECEF, oldest first
+  trailT: number[];
 }
+
+/** Contrail ribbons: per vertex position (view frame), direction, age (0 new … 1 gone) and side (±1). */
+export interface ContrailMesh {
+  data: Float32Array;   // 8 floats per vertex
+  indices: Uint32Array;
+  vertices: number;
+  count: number;        // indices
+}
+
+export const emptyContrails = (): ContrailMesh => ({ data: new Float32Array(8 * 1024), indices: new Uint32Array(3 * 1024), vertices: 0, count: 0 });
 
 const add = (a: Vec3, b: Vec3, k = 1): Vec3 => [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k];
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -104,8 +124,17 @@ export class AirTraffic {
       const old = this.planes.get(r.id);
       const next: Plane = {
         model: r.model, ground: r.ground, t0: now - r.age, p0, v0, up: f.up, hint: dir ?? old?.hint ?? f.north,
-        e: [0, 0, 0], ev: [0, 0, 0], tc: now, seen: now,
+        e: [0, 0, 0], ev: [0, 0, 0], tc: now, seen: now, trail: old?.trail ?? [], trailT: old?.trailT ?? [],
       };
+      if (!old && !r.ground) {
+        // A trail behind it along its velocity, as if it had been seen all along.
+        for (let k = TRAIL_S; k >= TRAIL_STEP_S; k -= TRAIL_STEP_S) {
+          const at = add(p0, v0, now - k - next.t0);
+          if (!this.high(at)) continue;
+          next.trail.push(at);
+          next.trailT.push(now - k);
+        }
+      }
       if (old) {
         const e = sub(this.position(old, now), this.predicted(next, now));
         if (len(e) < SNAP_M) {
@@ -128,6 +157,12 @@ export class AirTraffic {
 
   private fade(p: Plane, t: number): number {
     return Math.exp(-Math.max(0, t - p.tc) / TAU_S);
+  }
+
+  /** Whether a point is high enough above the ground for a contrail. */
+  private high(at: Vec3): boolean {
+    const g = ecefToGeodetic(at);
+    return g.h - this.ground(g.lat, g.lon) > CONTRAIL_AGL;
   }
 
   /** Where a plane is drawn at t (ECEF). */
@@ -162,6 +197,58 @@ export class AirTraffic {
       data[o + 3] = dot(fwd, vf.east) / fl;
       data[o + 4] = dot(fwd, vf.north) / fl;
       data[o + 5] = dot(fwd, vf.up) / fl;
+    }
+  }
+
+  /** Every airborne plane's contrail at t, as ribbon vertices in the view frame (and samples new trail points). */
+  contrails(vf: Frame, t: number, out: ContrailMesh): void {
+    out.vertices = 0;
+    out.count = 0;
+    for (const p of this.planes.values()) {
+      while (p.trailT.length > 0 && t - p.trailT[0]! > TRAIL_S) { p.trail.shift(); p.trailT.shift(); }
+      const at = this.position(p, t), high = !p.ground && this.high(at);
+      if (high && t - p.seen < STALE_S && (p.trailT.length === 0 || t - p.trailT.at(-1)! >= TRAIL_STEP_S)) {
+        p.trail.push(at);
+        p.trailT.push(t);
+      }
+      if (p.trail.length === 0) continue;
+      // The trail, then where the plane is now (unless that was just sampled, or it's too low to leave one).
+      const tip = high && p.trailT.at(-1) !== t;
+      const pts = tip ? [...p.trail, at] : p.trail;
+      const ages = [...p.trailT.map((s) => Math.min(1, (t - s) / TRAIL_S)), ...(tip ? [0] : [])];
+      if (pts.length < 2) continue;
+      const need = out.vertices + 2 * pts.length;
+      if (8 * need > out.data.length) {
+        const grown = new Float32Array(Math.max(8 * need, 2 * out.data.length));
+        grown.set(out.data);
+        out.data = grown;
+      }
+      if (out.count + 6 * pts.length > out.indices.length) {
+        const grown = new Uint32Array(Math.max(out.count + 6 * pts.length, 2 * out.indices.length));
+        grown.set(out.indices);
+        out.indices = grown;
+      }
+      const base = out.vertices;
+      for (let i = 0; i < pts.length; i++) {
+        const q = sub(pts[i]!, vf.origin), d = sub(pts[Math.min(i + 1, pts.length - 1)]!, pts[Math.max(i - 1, 0)]!);
+        const dl = len(d) || 1;
+        for (const side of [-1, 1]) {
+          const o = 8 * out.vertices++;
+          out.data[o] = dot(q, vf.east);
+          out.data[o + 1] = dot(q, vf.north);
+          out.data[o + 2] = dot(q, vf.up);
+          out.data[o + 3] = dot(d, vf.east) / dl;
+          out.data[o + 4] = dot(d, vf.north) / dl;
+          out.data[o + 5] = dot(d, vf.up) / dl;
+          out.data[o + 6] = ages[i]!;
+          out.data[o + 7] = side;
+        }
+        if (i > 0) {
+          const a = base + 2 * (i - 1), b = base + 2 * i;
+          out.indices.set([a, a + 1, b, a + 1, b + 1, b], out.count);
+          out.count += 6;
+        }
+      }
     }
   }
 
