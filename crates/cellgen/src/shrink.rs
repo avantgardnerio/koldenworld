@@ -62,7 +62,7 @@ impl Polygon {
         for (to, also) in moved {
             v.set_pos(to);
             if let Some(also) = also {
-                v.insert_after(also, v.source());
+                v.insert_after(also, v.id());
                 v.next();
             }
             v.next();

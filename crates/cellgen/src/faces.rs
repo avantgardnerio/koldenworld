@@ -6,7 +6,7 @@
 //! each connected piece's outside clockwise (negative area), and a dead end is walked out and back.
 
 use crate::graph::RoadGraph;
-use crate::polygon::Polygon;
+use crate::polygon::{Polygon, corner_id, side_id};
 use crate::ways::RoadWays;
 use glam::DVec2;
 
@@ -26,24 +26,25 @@ impl Faces {
         &self.face_darts[self.face_start[f] as usize..self.face_start[f + 1] as usize]
     }
 
-    /// A face as a polygon: every point along its darts, each junction once, each vertex sourced from its OSM point.
+    /// A face as a polygon: every point along its darts, each junction once. Each vertex's id is the dart whose side
+    /// it's on, the first of each dart's points being the corner where that side starts.
     pub fn polygon(&self, f: usize, g: &RoadGraph, ways: &RoadWays) -> Polygon {
-        let mut points: Vec<u32> = Vec::new();
+        let mut points: Vec<(DVec2, u32)> = Vec::new();
         for &h in self.darts(f) {
             let e = (h / 2) as usize;
             let (first, last) = (g.edge_first[e], g.edge_last[e]);
             // Every point of the dart but its last: the next dart starts there.
-            if h % 2 == 0 {
-                points.extend(first..last);
+            let run: Vec<u32> = if h.is_multiple_of(2) {
+                (first..last).collect()
             } else {
-                points.extend((first + 1..=last).rev());
+                (first + 1..=last).rev().collect()
+            };
+            for (i, k) in run.into_iter().enumerate() {
+                let id = if i == 0 { corner_id(h) } else { side_id(h) };
+                points.push((DVec2::from_array(ways.st[k as usize]), id));
             }
         }
-        Polygon::from_points(
-            points
-                .into_iter()
-                .map(|k| (DVec2::from_array(ways.st[k as usize]), k)),
-        )
+        Polygon::from_points(points)
     }
 }
 

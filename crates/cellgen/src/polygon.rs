@@ -2,21 +2,54 @@
 //! inserting and removing as you go, each vertex remembering where it came from. Rings are counterclockwise: the
 //! inside is on the left of travel.
 //!
+//! Where it came from is its id: the graph dart (an edge end, traversed) whose side it lies on, and whether it's the
+//! corner where that dart's side starts (side_id, corner_id). A vertex duplicated keeps its id; one made at a
+//! crossing becomes the corner of the side it starts (crossing_id).
+//!
 //! Stored as columns with links (a doubly linked ring by index), so insert and remove are O(1) and never move other
 //! vertices: a vertex's index stays valid until it's removed. Removed slots go on a free list for reuse.
 
 use crate::geom::{self, Metric, Segment};
 use glam::DVec2;
 
-/// No source: a vertex we made rather than read.
+/// No id: a vertex made on no side we know.
 pub const MADE: u32 = u32::MAX;
+
+/// The id of a vertex on dart h's side.
+pub fn side_id(h: u32) -> u32 {
+    2 * h
+}
+
+/// The id of the corner where dart h's side starts.
+pub fn corner_id(h: u32) -> u32 {
+    2 * h + 1
+}
+
+pub fn is_corner(id: u32) -> bool {
+    id != MADE && id % 2 == 1
+}
+
+/// The dart whose side an id is on.
+fn dart_of(id: u32) -> u32 {
+    id / 2
+}
+
+/// The id of a vertex made where the side `before` it (the id of the vertex starting that side) meets the side
+/// `after` it: the corner of the side after, or still on the same side if both are one dart's.
+fn crossing_id(before: u32, after: u32) -> u32 {
+    match (before, after) {
+        (_, MADE) => MADE,
+        (b, a) if b != MADE && dart_of(b) == dart_of(a) => side_id(dart_of(a)),
+        (_, a) => corner_id(dart_of(a)),
+    }
+}
 /// No vertex.
 const NONE: u32 = u32::MAX;
 
 #[derive(Default)]
 pub struct Polygon {
-    pos: Vec<DVec2>,  // in (s, t) on the cell's face, or metres (in_metres)
-    source: Vec<u32>, // the OSM point (index into the ways' node columns) it came from, or MADE
+    pos: Vec<DVec2>, // in (s, t) on the cell's face, or metres (in_metres)
+    id: Vec<u32>,    // where it came from (side_id, corner_id) or MADE
     next: Vec<u32>,
     prev: Vec<u32>,
     free: Vec<u32>, // removed slots, for reuse
@@ -37,9 +70,9 @@ impl Polygon {
             head: NONE,
             ..Default::default()
         };
-        for (pos, source) in points {
+        for (pos, id) in points {
             p.pos.push(pos);
-            p.source.push(source);
+            p.id.push(id);
         }
         let n = p.pos.len() as u32;
         if n > 0 {
@@ -61,10 +94,10 @@ impl Polygon {
         (at != NONE).then_some(Cursor { poly: self, at })
     }
 
-    /// Every vertex's position and source, once around from the first.
+    /// Every vertex's position and id, once around from the first.
     pub fn vertices(&self) -> impl Iterator<Item = (DVec2, u32)> + '_ {
         self.run(self.head, self.len)
-            .map(|v| (self.pos[v as usize], self.source[v as usize]))
+            .map(|v| (self.pos[v as usize], self.id[v as usize]))
     }
 
     /// Every vertex's position, once around from the first.
@@ -91,13 +124,16 @@ impl Polygon {
         Polygon::from_points(self.vertices().map(|(p, s)| (metric.st(p), s)))
     }
 
-    /// Drops every vertex at the same position as the one after it, so no side has zero length.
+    /// Of every two vertices in a row at the same position, drops the second, so no side has zero length (and a
+    /// corner, the first of its side, is kept).
     pub fn drop_repeats(&mut self) {
         let Some(mut v) = self.first() else { return };
         let mut clean = 0;
         while clean < v.ring_len() && v.ring_len() > 1 {
             if v.pos() == v.side_out().b {
+                v.next();
                 v.remove();
+                v.prev();
                 clean = 0;
             } else {
                 v.next();
@@ -131,9 +167,9 @@ impl Cursor<'_> {
         self.poly.pos[self.at as usize] = pos;
     }
 
-    /// The OSM point it came from, or MADE.
-    pub fn source(&self) -> u32 {
-        self.poly.source[self.at as usize]
+    /// Where it came from (side_id, corner_id), or MADE.
+    pub fn id(&self) -> u32 {
+        self.poly.id[self.at as usize]
     }
 
     /// Whether the ring turns straight back on itself here (a dead end's tip): the sides in and out lie on one line,
@@ -169,18 +205,19 @@ impl Cursor<'_> {
 
     /// Splits the ring where this vertex's side out crosses w's side out, at x, into its two loops. The loop ahead
     /// (x, then this vertex's next … w) comes back as a new polygon; the loop behind (x, then w's next … this vertex)
-    /// stays, with x made after this vertex. In each loop x takes its two neighbors' source if they share one, else
-    /// it's MADE. The cursor stays here.
+    /// stays, with x made after this vertex. In each loop x is the corner of the side it starts (crossing_id). The
+    /// cursor stays here.
     pub fn split_off(&mut self, w: u32, x: DVec2) -> Polygon {
         let p = &*self.poly;
         let wn = p.next[w as usize];
         let ahead: Vec<(DVec2, u32)> = p
             .run(p.next[self.at as usize], usize::MAX)
             .take_while(|&v| v != wn)
-            .map(|v| (p.pos[v as usize], p.source[v as usize]))
+            .map(|v| (p.pos[v as usize], p.id[v as usize]))
             .collect();
-        let x_ahead = shared(p.source[w as usize], ahead[0].1);
-        let x_behind = shared(self.source(), p.source[wn as usize]);
+        // Behind: this vertex's side, then w's from x on. Ahead: w's side, then this vertex's from x on.
+        let x_behind = crossing_id(self.id(), p.id[w as usize]);
+        let x_ahead = crossing_id(p.id[w as usize], self.id());
         let here = self.at;
         let made = self.insert_after(x, x_behind);
         self.at = self.poly.next[made as usize];
@@ -196,18 +233,23 @@ impl Cursor<'_> {
         self.at = self.poly.next[self.at as usize];
     }
 
+    /// Move to the previous vertex.
+    pub fn prev(&mut self) {
+        self.at = self.poly.prev[self.at as usize];
+    }
+
     /// Insert a vertex after this one; the cursor stays here. Returns the new vertex's index.
-    pub fn insert_after(&mut self, pos: DVec2, source: u32) -> u32 {
+    pub fn insert_after(&mut self, pos: DVec2, id: u32) -> u32 {
         let p = &mut *self.poly;
         let v = match p.free.pop() {
             Some(v) => {
                 p.pos[v as usize] = pos;
-                p.source[v as usize] = source;
+                p.id[v as usize] = id;
                 v
             }
             None => {
                 p.pos.push(pos);
-                p.source.push(source);
+                p.id.push(id);
                 p.next.push(NONE);
                 p.prev.push(NONE);
                 (p.pos.len() - 1) as u32
@@ -247,9 +289,4 @@ impl Cursor<'_> {
             b: p.pos[p.next[v as usize] as usize],
         }
     }
-}
-
-/// The source of a vertex made between two others: theirs if they share one, else MADE.
-fn shared(a: u32, b: u32) -> u32 {
-    if a == b { a } else { MADE }
 }
