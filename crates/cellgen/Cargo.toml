@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 postgres = "0.19.14"
+robust = "1.2.0"
 tiny-skia = "0.12.0"

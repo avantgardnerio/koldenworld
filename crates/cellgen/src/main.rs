@@ -32,7 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ways.names.len() - 1
     );
 
-    let graph = graph::build_graph(&ways);
+    let mut graph = graph::build_graph(&ways);
+    let stats = graph::sort_ends_by_angle(&mut graph, &ways);
+    println!("sorted every node's edge ends counterclockwise: {stats:?}");
     let mut by_degree = [0usize; 8];
     for n in 0..graph.node_count() {
         by_degree[graph.degree(n).min(7)] += 1;
@@ -44,17 +46,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &by_degree[1..]
     );
 
-    // The busiest junctions: every node where five or more edges meet, with the streets meeting there.
+    // The busiest junctions: every node where five or more edges meet, with the streets meeting there in
+    // counterclockwise order, each with its direction in (s, t) degrees (atan2 for printing only).
     for n in (0..graph.node_count()).filter(|&n| graph.degree(n) >= 5) {
-        let streets: Vec<&str> = graph
-            .edges_at(n)
+        let o = ways.st[graph.node_point[n] as usize];
+        let streets: Vec<String> = graph
+            .ends_at(n)
             .iter()
-            .map(|&e| graph.street_name(&ways, e as usize))
+            .map(|&end| {
+                let name = graph.street_name(&ways, (end / 2) as usize);
+                let name = if name.is_empty() { "(unnamed)" } else { name };
+                match graph.end_toward(&ways, end) {
+                    Some(k) => {
+                        let p = ways.st[k];
+                        let deg = (p[1] - o[1])
+                            .atan2(p[0] - o[0])
+                            .to_degrees()
+                            .rem_euclid(360.0);
+                        format!("{deg:.0}° {name}")
+                    }
+                    None => format!("(no direction) {name}"),
+                }
+            })
             .collect();
         println!(
-            "  degree {} at {:?}: {streets:?}",
+            "  degree {} at {:?}: {}",
             graph.degree(n),
-            ways.lonlat[graph.node_point[n] as usize]
+            ways.lonlat[graph.node_point[n] as usize],
+            streets.join(", ")
         );
     }
 

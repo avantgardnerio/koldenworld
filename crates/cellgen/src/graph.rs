@@ -1,20 +1,31 @@
 //! The road graph, as indices into RoadWays (no coordinates of its own).
 
 use crate::ways::RoadWays;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// Each way cut at every OSM node it shares with another way, so nodes are intersections and dead ends, and an
 /// edge is the run of one way's points between two of them.
+///
+/// A node lists the edge *ends* meeting it (half-edges): end id 2·e is edge e's from end, 2·e + 1 its to end, so
+/// a self-loop's two appearances at its node stay apart.
 #[derive(Default)]
 pub struct RoadGraph {
     pub node_point: Vec<u32>, // a point (index into the ways' node columns) at the node; any copy will do
-    pub edge_start: Vec<u32>, // nodes + 1 offsets into edge_list (CSR)
-    pub edge_list: Vec<u32>,  // each node's edges; a self-loop is listed twice
+    pub end_start: Vec<u32>,  // nodes + 1 offsets into end_list (CSR)
+    pub end_list: Vec<u32>,   // each node's edge ends; counterclockwise after sort_ends_by_angle
     pub edge_way: Vec<u32>,   // the way an edge is a piece of: its attributes
     pub edge_first: Vec<u32>, // the edge's points are edge_first..=edge_last of the ways' node columns
     pub edge_last: Vec<u32>,
     pub edge_from: Vec<u32>, // node at edge_first
     pub edge_to: Vec<u32>,   // node at edge_last
+}
+
+/// What sorting by angle ran into: exact ties are reported, never broken by a tolerance.
+#[derive(Debug, Default)]
+pub struct AngleStats {
+    pub ties: usize, // neighboring ends leaving a node in exactly the same direction
+    pub zero_length: usize, // ends whose whole edge sits on its node (no direction at all)
 }
 
 impl RoadGraph {
@@ -26,18 +37,31 @@ impl RoadGraph {
         self.edge_way.len()
     }
 
-    /// The edges meeting at a node.
-    pub fn edges_at(&self, n: usize) -> &[u32] {
-        &self.edge_list[self.edge_start[n] as usize..self.edge_start[n + 1] as usize]
+    /// The edge ends meeting at a node.
+    pub fn ends_at(&self, n: usize) -> &[u32] {
+        &self.end_list[self.end_start[n] as usize..self.end_start[n + 1] as usize]
     }
 
     pub fn degree(&self, n: usize) -> usize {
-        self.edges_at(n).len()
+        self.ends_at(n).len()
     }
 
     /// An edge's street name ("" when unnamed).
     pub fn street_name<'a>(&self, ways: &'a RoadWays, e: usize) -> &'a str {
         &ways.names[ways.name[self.edge_way[e] as usize] as usize]
+    }
+
+    /// The point an end leaves its node toward: the nearest point along its edge at a different position (two OSM
+    /// nodes can share coordinates), or None if the whole edge sits on the node.
+    pub fn end_toward(&self, ways: &RoadWays, end: u32) -> Option<usize> {
+        let e = (end / 2) as usize;
+        let (first, last) = (self.edge_first[e] as usize, self.edge_last[e] as usize);
+        let at = |k: usize| ways.st[k] != ways.st[if end.is_multiple_of(2) { first } else { last }];
+        if end.is_multiple_of(2) {
+            (first + 1..=last).find(|&k| at(k))
+        } else {
+            (first..last).rev().find(|&k| at(k))
+        }
     }
 }
 
@@ -74,23 +98,79 @@ pub fn build_graph(ways: &RoadWays) -> RoadGraph {
         }
     }
 
-    // Each node's edges, CSR: count per node, prefix sum, fill.
+    // Each node's edge ends, CSR: count per node, prefix sum, fill.
     let nodes = g.node_count();
-    g.edge_start = vec![0; nodes + 1];
+    g.end_start = vec![0; nodes + 1];
     for e in 0..g.edge_count() {
-        g.edge_start[g.edge_from[e] as usize + 1] += 1;
-        g.edge_start[g.edge_to[e] as usize + 1] += 1;
+        g.end_start[g.edge_from[e] as usize + 1] += 1;
+        g.end_start[g.edge_to[e] as usize + 1] += 1;
     }
     for n in 0..nodes {
-        g.edge_start[n + 1] += g.edge_start[n];
+        g.end_start[n + 1] += g.end_start[n];
     }
-    g.edge_list = vec![0; g.edge_start[nodes] as usize];
-    let mut fill = g.edge_start[..nodes].to_vec();
+    g.end_list = vec![0; g.end_start[nodes] as usize];
+    let mut fill = g.end_start[..nodes].to_vec();
     for e in 0..g.edge_count() {
-        for n in [g.edge_from[e], g.edge_to[e]] {
-            g.edge_list[fill[n as usize] as usize] = e as u32;
+        for (end, n) in [(2 * e, g.edge_from[e]), (2 * e + 1, g.edge_to[e])] {
+            g.end_list[fill[n as usize] as usize] = end as u32;
             fill[n as usize] += 1;
         }
     }
     g
+}
+
+/// Orders each node's edge ends counterclockwise in (s, t), starting from the +s direction. Exact: directions are
+/// split by half-plane (plain comparisons), then ordered by the sign of an exact orientation test (Shewchuk's
+/// adaptive predicate). No angles are computed. (s, t) isn't metric, but a linear map that doesn't mirror keeps the
+/// cyclic order of directions, so this is the order on the ground too.
+pub fn sort_ends_by_angle(g: &mut RoadGraph, ways: &RoadWays) -> AngleStats {
+    let mut stats = AngleStats::default();
+    for n in 0..g.node_count() {
+        let o = ways.st[g.node_point[n] as usize];
+        let (a, b) = (g.end_start[n] as usize, g.end_start[n + 1] as usize);
+        let toward: Vec<Option<[f64; 2]>> = g.end_list[a..b]
+            .iter()
+            .map(|&end| g.end_toward(ways, end).map(|k| ways.st[k]))
+            .collect();
+        stats.zero_length += toward.iter().filter(|p| p.is_none()).count();
+
+        // Sort positions within the node's slice, then apply them.
+        let mut order: Vec<usize> = (0..b - a).collect();
+        order.sort_by(|&i, &j| ccw(o, toward[i], toward[j]));
+        stats.ties += order
+            .windows(2)
+            .filter(|w| ccw(o, toward[w[0]], toward[w[1]]) == Ordering::Equal)
+            .count();
+        let sorted: Vec<u32> = order.iter().map(|&i| g.end_list[a + i]).collect();
+        g.end_list[a..b].copy_from_slice(&sorted);
+    }
+    stats
+}
+
+/// Counterclockwise order of two directions leaving `o` toward p and q, from the +s direction. A missing direction
+/// (a zero-length edge) sorts first.
+fn ccw(o: [f64; 2], p: Option<[f64; 2]>, q: Option<[f64; 2]>) -> Ordering {
+    let (p, q) = match (p, q) {
+        (None, None) => return Ordering::Equal,
+        (None, _) => return Ordering::Less,
+        (_, None) => return Ordering::Greater,
+        (Some(p), Some(q)) => (p, q),
+    };
+    // Half-plane: angles in [0°, 180°) first, then [180°, 360°).
+    let half = |p: [f64; 2]| !(p[1] > o[1] || (p[1] == o[1] && p[0] > o[0]));
+    half(p).cmp(&half(q)).then_with(|| {
+        let turn = robust::orient2d(
+            robust::Coord { x: o[0], y: o[1] },
+            robust::Coord { x: p[0], y: p[1] },
+            robust::Coord { x: q[0], y: q[1] },
+        );
+        // q counterclockwise from p: p comes first. (A sign test, not total_cmp: a tie may come back as -0.0.)
+        if turn > 0.0 {
+            Ordering::Less
+        } else if turn < 0.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    })
 }
