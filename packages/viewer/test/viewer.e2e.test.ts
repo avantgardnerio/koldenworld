@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  buildCell, CELL_LEVEL, CELL_TABLES, cellCenter, cellFromLatLon, cellToArrow, cellToken, enuFrame, enuUnprojection,
+  buildCell, CELL_LEVEL, CELL_TABLES, cellCenter, cellFromLatLon, cellToArrow, cellToken, enuFrame, enuUnprojection, placeVehicles,
   type BuildingInput, type RoadWayInput,
 } from "@game/world";
 import { openViewer, type Session } from "../harness/browser.ts";
@@ -69,7 +69,7 @@ beforeAll(async () => {
   const cellDir = path.join(dir, "cells", cellToken(cell));
   await mkdir(cellDir, { recursive: true });
   for (const t of CELL_TABLES) await writeFile(path.join(cellDir, `${t}.arrow`), files[t]);
-  viewer = await openViewer({ dataDir: dir, query: "radius=1000", hash: top(0, 1), width: W, height: H });
+  viewer = await openViewer({ dataDir: dir, query: "radius=1000&cars=0", hash: top(0, 1), width: W, height: H });
 }, 60_000);
 
 async function setHash(hash: string) {
@@ -151,6 +151,11 @@ describe("viewer", () => {
     expect(await viewer.pixel(200, 100)).toEqual(ASPHALT);
   });
 
+  it("loads the vehicle models (hidden here: cars=0 keeps the road pixels exact)", async () => {
+    await viewer.page.waitForFunction(() => window.viewer.carModels > 0, null, { timeout: 30_000 });
+    expect((await viewer.status()).carModels).toBe(10);
+  });
+
   it("draws ground in a neighboring cell that has no files", async () => {
     await setHash(top(800, 1));
     expect(await viewer.pixel(200, 150)).toEqual(GROUND);
@@ -171,5 +176,33 @@ describe("viewer", () => {
     expect(lon).toBeCloseTo(lon0, 6);
     expect([h, yaw, pitch]).toEqual([100, 0, 0]);
     expect((await viewer.status()).frames).toBeGreaterThan(frames + 3);
+  });
+});
+
+describe("vehicles", () => {
+  let cars: Session;
+  beforeAll(async () => {
+    cars = await openViewer({ dataDir: dir, query: "radius=300", hash: top(0, 1), width: W, height: H });
+    await cars.page.waitForFunction(() => window.viewer.carModels > 0, null, { timeout: 30_000 });
+  }, 60_000);
+  afterAll(async () => { await cars?.close(); });
+
+  it("stands cars in their lanes, at real size, facing along the road", async () => {
+    // The same placement the viewer computes for the fixture cell; the cell's frame is ENU at O.
+    const c = buildCell(cell, ways, buildings);
+    const v = placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n))));
+    expect(v.count).toBeGreaterThan(0);
+    const [x, y] = [v.position[0]!, v.position[1]!], [fx, fy] = [v.forward[0]!, v.forward[1]!];
+    // Top-down over the first car at 0.1 m per pixel; screen up is north.
+    const px = (dx: number, dy: number) => cars.pixel(Math.round(200 + dx * 10), Math.round(150 - dy * 10));
+    const cam = at(x, y, Z * 0.1 + 0, 0, -90);
+    await cars.page.evaluate((h) => { location.hash = h; }, cam);
+    await cars.page.waitForFunction((h) => location.hash === h, cam);
+    expect((await cars.status()).cars).toBeGreaterThan(0);
+    const along = (d: number) => px(fx * d, fy * d), side = (d: number) => px(fy * d, -fx * d);
+    expect(await along(0)).not.toEqual(ASPHALT);
+    expect(await along(2)).not.toEqual(ASPHALT);    // still the car, 2 m ahead of its center
+    expect(await along(3.2)).toEqual(ASPHALT);      // past its ~4.7 m length
+    expect(await side(2.2)).not.toEqual(await along(2));  // past its ~2.8 m width: not car body
   });
 });

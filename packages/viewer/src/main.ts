@@ -17,11 +17,12 @@
 // what was drawn without decoding screenshots.
 
 import {
-  buildingMesh, CELL_LEVEL, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  buildingMesh, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, type VehiclePlacements, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, speed, viewProjection } from "./camera.ts";
+import { createCarLayer, createCarModels, type CarLayer, type CarModels } from "./car-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
@@ -43,6 +44,9 @@ export interface ViewerStatus {
   surfaceTriangles: number;
   buildings: number;
   buildingTriangles: number;
+  carModels: number;      // vehicle models loaded (0 until they are)
+  cars: number;           // cars drawn last frame
+  carTriangles: number;
   graphOverlay: boolean;
   frames: number;
   /** Render now and read the RGB at a CSS pixel (origin top left). */
@@ -68,12 +72,15 @@ const TERRAIN_LOD_DISTANCES = [4000, 8000, 16_000];
 const ROAD_BIAS = 0.3;
 /** Water a little less than roads, so a road over a stream wins. */
 const WATER_BIAS = 0.2;
+/** Cars are drawn in visible cells whose center is within this distance (m): ~2,100 triangles each. */
+const CAR_DISTANCE = 1500;
 
 const params = new URLSearchParams(location.search);
 const fixedRadius = params.has("radius") ? Number(params.get("radius")) : undefined;
+const showCars = params.get("cars") !== "0";
 const status: ViewerStatus = (window.viewer = {
   state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0, drawn: 0 }, radius: 0,
-  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0,
+  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0,
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
 
@@ -109,9 +116,21 @@ interface CellGpu {
   roads?: FlatLayer;
   water?: FlatLayer;
   lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
+  vehicles?: VehiclePlacements;  // cars standing in this cell's lanes, uploaded on first draw
+  cars?: CarLayer;
   graph?: FlatLayer;
   buildings?: SolidLayer;
   counts: { nodes: number; edges: number; surfaceTriangles: number; buildings: number; buildingTriangles: number };
+}
+
+/** The vehicle models and their shared palette texture, from the viewer's assets (Kenney Car Kit, CC0). */
+async function loadCarModels(gl: WebGL2RenderingContext): Promise<CarModels> {
+  const glb = (name: string) => fetch(new URL(`../assets/vehicles/${name}.glb`, import.meta.url)).then((r) => r.arrayBuffer());
+  const [meshes, image] = await Promise.all([
+    Promise.all(VEHICLE_MODELS.map(async (name) => readGlb(new Uint8Array(await glb(name)), VEHICLE_SCALE))),
+    fetch(new URL("../assets/vehicles/colormap.png", import.meta.url)).then((r) => r.blob()).then((b) => createImageBitmap(b)),
+  ]);
+  return createCarModels(gl, meshes, image);
 }
 
 async function start(): Promise<void> {
@@ -158,6 +177,7 @@ async function start(): Promise<void> {
         indices: Uint32Array.from({ length: c.water.material.length }, (_, i) => i),
       }, { mode: gl!.TRIANGLES, colors: WATER, fadeToBase: false, bias: WATER_BIAS }),
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
+      vehicles: placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))),
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB),
       counts: {
         nodes: c.graph.nodes.count, edges: c.graph.edges.count, surfaceTriangles: surface.indices.length / 3,
@@ -169,7 +189,7 @@ async function start(): Promise<void> {
   const streamer = new CellStreamer<CellGpu>({
     load: loadCell,
     concurrency: 8,
-    dispose: (g) => [g.ground, g.water, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose()),
+    dispose: (g) => [g.ground, g.water, g.roads, g.graph, g.buildings, g.cars].forEach((l) => l?.dispose()),
     onChange: () => {
       updateStatus();
       if (!running) render();
@@ -215,6 +235,14 @@ async function start(): Promise<void> {
     Object.assign(status, totals, { cells: { ready, loading, queued, failed, missing, drawn: status.cells.drawn } });
     if (status.state === "loading" && streamer.settled) status.state = "ready";
   };
+
+  // Vehicle models load alongside the first cells; cells draw their cars once they're in.
+  let carModels: CarModels | undefined;
+  loadCarModels(gl).then((m) => {
+    carModels = m;
+    status.carModels = VEHICLE_MODELS.length;
+    if (!running) render();
+  }, (err: unknown) => console.error("vehicle models failed to load:", err));
 
   const visible: CellGpu[] = [];  // reused every frame
   const render = () => {
@@ -263,6 +291,17 @@ async function start(): Promise<void> {
     for (const g of visible) g.water?.draw(f, g.model);
     for (const g of visible) g.roads?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
+    let cars = 0, carTriangles = 0;
+    if (carModels && showCars) {
+      for (const g of visible) {
+        if (!g.vehicles || Math.hypot(g.model[12]!, g.model[13]!, g.model[14]! + g.centerZ - camera.h) > CAR_DISTANCE) continue;
+        g.cars ??= createCarLayer(gl, carModels, g.vehicles);
+        carTriangles += g.cars.draw(f, g.model, SUN, ROAD_BIAS);
+        cars += g.cars.count;
+      }
+    }
+    status.cars = cars;
+    status.carTriangles = carTriangles;
     if (status.graphOverlay) {
       for (const g of visible) {
         if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false, bias: 1 });
@@ -276,7 +315,7 @@ async function start(): Promise<void> {
     hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
       `(${ground.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing}` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
-      `within ${(status.radius / 1000).toFixed(1)} km · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
+      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars (${(carTriangles / 1e6).toFixed(1)}M tris) · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
   };
 
   // --- frame loop, running only while there is input ---

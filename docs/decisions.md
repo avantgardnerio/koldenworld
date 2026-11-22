@@ -179,3 +179,12 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Why land cover next:** elevation can't tell a wheat field from prairie, or forest from shrub at the same height. ESA WorldCover (10 m, global) or NLCD (30 m, US, with crops, pasture and forest types) will decide below treeline, and the same classes will drive tree placement.
 - **Limits:** the thresholds are tuned for Colorado (treeline falls with latitude and varies by climate); snow is a fixed line, not seasonal.
 
+## 27. Vehicles: Kenney Car Kit models (CC0), standing in their lanes, instanced
+
+- **Chosen:** 10 everyday models from the Kenney Car Kit 3.1 (sedan, sports sedan, hatchback, SUV, luxury SUV, van, pickup, delivery truck, taxi, police; CC0, ~2,100 triangles each, one shared 512² palette texture), committed in `packages/viewer/assets/vehicles/` with the kit's license file. Credit to Kenney is voluntary; we give it here and in the license file.
+- **Loading:** our own minimal GLB reader (`readGlb` in `@game/world`, pure and tested): every mesh node merged into one indexed mesh with node transforms applied, converted from glTF's Y-up, facing +Z to our Z-up, facing +Y, and scaled 1.85× (the kit is toy-sized; a sedan becomes ~4.7 m). No 3D engine or loader library.
+- **Placement before traffic:** `placeVehicles(graph, seed)` stands cars in their lanes per cell (right-hand traffic, lane widths as the road surface, clear of intersections, spacing by road class, tilted with the road), seeded by the cell id so the same cars appear every visit.
+- **Rendering:** one instanced draw per model per cell, instances in the cell frame placed by the cell's matrix: no per-car CPU work per frame. Drawn in visible cells within 1.5 km (`?cars=0` hides them).
+- **Rejected:** procedural box cars (the user wanted real models first); Sketchfab-style replicas of real cars (trademarks, and recreating existing products).
+- **Next:** traffic (the `sim` package: lanes, car following, intersections), a cheaper stand-in for distant cars, paint color variety (the palette texture fixes each model's color).
+

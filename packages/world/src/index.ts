@@ -35,3 +35,5 @@ export {
   cellWater, clipPolygon, clipPolyline, emptyWater, WaterMaterial, waterFromArrow, waterToArrow,
   type WaterAreaInput, type WaterMesh, type WaterwayInput,
 } from "./water.ts";
+export { readGlb, type ModelMesh } from "./glb.ts";
+export { placeVehicles, VEHICLE_MODELS, VEHICLE_SCALE, type VehicleModel, type VehiclePlacements } from "./vehicles.ts";

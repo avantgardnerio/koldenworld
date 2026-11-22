@@ -34,6 +34,7 @@ each frame: model = frameToFrame(cell frame → ENU at the camera), f64 → f32 
 - **Style** (colors per class) lives in the viewer, not in the map data.
 - **Limits:** lane data is sparse: in 80205 only 8 edges are tagged with 2+ lanes each way, so most arterials render as 1+1. Roads that cross without sharing a node (bridges) overlap flat. Roofs are all flat (`roof:shape` is on only 29 buildings in 80205). Lane-count changes show as small bulges at the node disc.
 - **No per-frame garbage:** each cell keeps its own model matrix, written in place each frame (`frameToFrame(…, out)`), and the visible list is reused; the graph overlay's mesh is kept on the CPU and uploaded only the first time the overlay is drawn.
+- **Vehicles** (`car-layer.ts`, decision 27): Kenney Car Kit models read by `readGlb`, standing in their lanes (`placeVehicles`, seeded per cell), one instanced draw per model per cell within 1.5 km, palette texture with nearest sampling. The HUD shows cars and their triangles.
 - **Frustum culling:** each cell has a bounding sphere around its frame origin (its ground, the roads and buildings it owns, which reach past its edge, up to its tallest building). Each frame the sphere is tested against the six planes of the view-projection matrix (`frustum.ts`); cells entirely outside aren't drawn. The HUD shows drawn / loaded.
 - **Not yet:** LOD for anything past 5 km (towers and mountains beyond the horizon of the ground), meshes built in workers (they are built on the main thread as cells arrive).
 
@@ -41,6 +42,7 @@ each frame: model = frameToFrame(cell frame → ENU at the camera), f64 → f32 
 
 - Each partition's meshes come from operators, already merged into a few vertex buffers per partition and LOD. That keeps draw calls to a few hundred instead of one per building.
 - **No per-frame garbage:** each cell keeps its own model matrix, written in place each frame (`frameToFrame(…, out)`), and the visible list is reused; the graph overlay's mesh is kept on the CPU and uploaded only the first time the overlay is drawn.
+- **Vehicles** (`car-layer.ts`, decision 27): Kenney Car Kit models read by `readGlb`, standing in their lanes (`placeVehicles`, seeded per cell), one instanced draw per model per cell within 1.5 km, palette texture with nearest sampling. The HUD shows cars and their triangles.
 - **Frustum culling:** test partition bounds against the camera frustum. Nearly free, and removes most of the city.
 - **LOD by distance:** full detail near the camera; simplified footprints, merged blocks or impostors far away.
 - **Draw distance and fog:** caps the cost and hides streaming.
