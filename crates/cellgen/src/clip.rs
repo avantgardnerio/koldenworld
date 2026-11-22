@@ -58,33 +58,28 @@ pub fn square(cell: [f64; 4], metric: &Metric) -> Paths64 {
     ]
 }
 
-/// The region split into its four kinds of ground, inside the cell's square: a kerb `widths[0]` metres from the
-/// roads, then grass `widths[1]` and sidewalk `widths[2]` bands.
-pub fn ground(region: &Region, square: &Paths64, metric: &Metric, widths: [f64; 3]) -> Ground {
+/// The region split into its four kinds of ground, inside the cell's square. `widths[dart]` is that side's kerb,
+/// grass and sidewalk widths (widths::dart_widths): every layer is the region less a strip along each dart's side of
+/// the road, that dart's own distance out, so each side keeps its own widths and corners meet as their strips do.
+pub fn ground(region: &Region, square: &Paths64, metric: &Metric, widths: &[[f64; 3]]) -> Ground {
     let path = |p: &Polygon| path_of(p, metric);
     let outer_raw = match region.outer {
         Outer::Road(p) => Some(path(p)),
         Outer::Cell => None,
     };
-    // Each hole's footprint: its ring turned counterclockwise (a road piece's outline), or, for a piece with no loop
-    // at all (flat: its ring walks out and back), the line itself.
-    let holes: Vec<(Path64, bool)> = region
-        .holes
-        .iter()
-        .map(|h| {
-            let mut ring = path(h);
-            ring.reverse();
-            (ring, h.signed_area() == 0.0)
-        })
-        .collect();
+    let hole_rings: Vec<Path64> = region.holes.iter().map(|h| path(h)).collect();
 
     // The region: a road outer ring as Clipper sees it, nonzero (a ring crossing itself, a road over another with no
-    // shared node, counts the overlap once; dead-end spikes have no area), less the holes' footprints, in the cell.
+    // shared node, counts the overlap once; dead-end spikes have no area), less the holes' footprints (each ring
+    // turned counterclockwise: the road piece's outline; a flat one, out and back, has none), in the cell.
     let outer_region = match &outer_raw {
         Some(raw) => union_subjects_64(&vec![raw.clone()], NONZERO),
         None => square.clone(),
     };
-    let footprints: Paths64 = holes.iter().filter(|h| !h.1).map(|h| h.0.clone()).collect();
+    let footprints: Paths64 = hole_rings
+        .iter()
+        .map(|ring| ring.iter().rev().cloned().collect())
+        .collect();
     let b = intersect_64(
         &difference_64(
             &outer_region,
@@ -95,44 +90,35 @@ pub fn ground(region: &Region, square: &Paths64, metric: &Metric, widths: [f64; 
         NONZERO,
     );
 
-    // Ground at least `d` from every road: the outer ring offset in (from the raw ring, so dead-end spikes carve their
-    // slots), less every hole grown by d.
-    let clear = |d: f64| {
-        let inside = match &outer_raw {
-            Some(raw) => inflate_paths_64(
-                &vec![raw.clone()],
-                -d * MM,
-                JoinType::Miter,
-                EndType::Polygon,
-                MITER,
-                0.0,
-            ),
-            None => square.clone(),
-        };
-        let grown: Paths64 = holes
+    // Each road side in the region's rings: a run of one dart's vertices, through the next run's first (its end).
+    let runs: Vec<(u32, Path64)> = outer_raw
+        .iter()
+        .chain(&hole_rings)
+        .flat_map(dart_runs)
+        .collect();
+    // Ground clear of every road side by its own distance out to layer `level` (0 kerb, 1 grass, 2 sidewalk): the
+    // region less each run buffered that far (square ends), runs of one distance in one offset.
+    let clear = |level: usize| {
+        let mut by_distance: Vec<(f64, Paths64)> = Vec::new();
+        for (dart, run) in &runs {
+            let d: f64 = widths[*dart as usize][..=level].iter().sum();
+            match by_distance.iter_mut().find(|(e, _)| *e == d) {
+                Some((_, paths)) => paths.push(run.clone()),
+                None => by_distance.push((d, vec![run.clone()])),
+            }
+        }
+        let strips: Paths64 = by_distance
             .iter()
-            .flat_map(|(ring, flat)| {
-                let end = if *flat {
-                    EndType::Joined
-                } else {
-                    EndType::Polygon
-                };
-                inflate_paths_64(
-                    &vec![ring.clone()],
-                    d * MM,
-                    JoinType::Miter,
-                    end,
-                    MITER,
-                    0.0,
-                )
+            .filter(|(d, _)| *d > 0.0)
+            .flat_map(|(d, paths)| {
+                inflate_paths_64(paths, d * MM, JoinType::Miter, EndType::Square, MITER, 0.0)
             })
             .collect();
-        difference_64(&inside, &union_subjects_64(&grown, NONZERO), NONZERO)
+        difference_64(&b, &union_subjects_64(&strips, NONZERO), NONZERO)
     };
-    let [kerb, grass, sidewalk] = widths;
-    let k = intersect_64(&clear(kerb), &b, NONZERO);
-    let g = intersect_64(&clear(kerb + grass), &k, NONZERO);
-    let s = intersect_64(&clear(kerb + grass + sidewalk), &g, NONZERO);
+    let k = clear(0);
+    let g = intersect_64(&clear(1), &k, NONZERO);
+    let s = intersect_64(&clear(2), &g, NONZERO);
     let parts = [
         difference_64(&b, &k, NONZERO),
         difference_64(&k, &g, NONZERO),
@@ -192,6 +178,33 @@ pub fn uncovered(square: &Paths64, grounds: &[Ground]) -> Vec<(f64, DVec2)> {
             )
         })
         .collect()
+}
+
+/// A ring cut into road sides: each maximal run of vertices on one dart's side, with the next run's first vertex as its
+/// end. Vertices with no id (none in a face's ring) take the dart of the run they're in.
+fn dart_runs(ring: &Path64) -> Vec<(u32, Path64)> {
+    let n = ring.len();
+    let dart = |i: usize| (ring[i % n].z - 1).max(0) as u32 / 2;
+    // Start where a run starts, so none wraps round the ring's first vertex; one dart all round is one closed run.
+    let Some(start) = (0..n).find(|&i| dart(i) != dart(i + n - 1)) else {
+        let mut all = ring.clone();
+        all.extend(ring.first().cloned());
+        return vec![(dart(0), all)];
+    };
+    let mut runs = Vec::new();
+    let mut i = start;
+    while i < start + n {
+        let d = dart(i);
+        let mut run: Path64 = vec![ring[i % n]];
+        i += 1;
+        while i < start + n && dart(i) == d {
+            run.push(ring[i % n]);
+            i += 1;
+        }
+        run.push(ring[i % n]);
+        runs.push((d, run));
+    }
+    runs
 }
 
 fn path_of(poly: &Polygon, metric: &Metric) -> Path64 {

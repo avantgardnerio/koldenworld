@@ -10,6 +10,7 @@ mod polygon;
 mod s2;
 mod shrink;
 mod ways;
+mod widths;
 
 use postgres::{Client, NoTls};
 
@@ -258,9 +259,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         holes: around,
     });
     let square = clip::square(cell, &metric);
+    let dart_widths = widths::dart_widths(&graph, &ways);
     let grounds: Vec<clip::Ground> = regions
         .iter()
-        .map(|r| clip::ground(r, &square, &metric, [4.0, 1.5, 1.8]))
+        .map(|r| clip::ground(r, &square, &metric, &dart_widths))
         .collect();
     let took = started.elapsed();
 

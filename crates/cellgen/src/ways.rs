@@ -32,8 +32,26 @@ pub struct RoadWays {
     pub node_id: Vec<i64>,     // OSM node ids, in way order
     pub lonlat: Vec<[f64; 2]>, // degrees, one per node id
     pub st: Vec<[f64; 2]>,     // (s, t) on the cell's face, one per node id (filled after loading)
+    pub lanes_fwd: Vec<u8>,    // lanes in the way's direction
+    pub lanes_back: Vec<u8>,   // lanes against it; 0 = one-way
+    pub sidewalks: Vec<u8>,    // bits: SIDEWALK_LEFT, SIDEWALK_RIGHT of the way's direction
     pub names: Vec<String>,    // names[0] = ""
 }
+
+/// Sidewalk bits (decision 33): which sides of a way have one, looking along its stored node order.
+pub const SIDEWALK_LEFT: u8 = 1;
+pub const SIDEWALK_RIGHT: u8 = 2;
+
+/// Town streets: where untagged roads get sidewalks on both sides (at most 40 mph).
+const SIDEWALK_CLASSES: [&str; 6] = [
+    "primary",
+    "secondary",
+    "tertiary",
+    "unclassified",
+    "residential",
+    "living_street",
+];
+const SIDEWALK_MAX_SPEED: f32 = 40.0 * 0.44704;
 
 /// Every road way intersecting a lon/lat box, ordered by OSM id.
 pub fn load_road_ways(
@@ -44,7 +62,10 @@ pub fn load_road_ways(
     north: f64,
 ) -> Result<RoadWays, Box<dyn std::error::Error>> {
     let rows = db.query(
-        "SELECT osm_way_id, class, name, node_ids, ST_AsBinary(geom) FROM road_ways
+        "SELECT osm_way_id, class, name, node_ids, ST_AsBinary(geom), lanes_fwd, lanes_back, speed_limit_mps,
+                tags ->> 'sidewalk', tags ->> 'sidewalk:both', tags ->> 'sidewalk:left', tags ->> 'sidewalk:right',
+                tags ->> 'oneway', tags ->> 'tunnel'
+         FROM road_ways
          WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
          ORDER BY osm_way_id",
         &[&west, &south, &east, &north],
@@ -83,8 +104,50 @@ pub fn load_road_ways(
         });
         ways.node_id.extend_from_slice(&node_ids);
         ways.node_start.push(ways.node_id.len() as u32);
+        let (lanes_fwd, lanes_back, speed): (i16, i16, f32) = (row.get(5), row.get(6), row.get(7));
+        ways.lanes_fwd.push(lanes_fwd as u8);
+        ways.lanes_back.push(lanes_back as u8);
+        let tag = |i: usize| -> Option<&str> { row.get(i) };
+        ways.sidewalks.push(sidewalks(
+            class,
+            speed,
+            [tag(8), tag(9), tag(10), tag(11)],
+            tag(12),
+            tag(13),
+        ));
     }
     Ok(ways)
+}
+
+/// Which sides of a way have a sidewalk (as osm-import's roadSidewalks): from sidewalk=*, sidewalk:both, :left and
+/// :right (a separately mapped sidewalk counts), or, untagged, a town street (by class, speed, and not in a tunnel).
+/// Left and right are of the stored node order, which runs against the way for oneway=-1.
+fn sidewalks(
+    class: &str,
+    speed: f32,
+    [sidewalk, both, left, right]: [Option<&str>; 4],
+    oneway: Option<&str>,
+    tunnel: Option<&str>,
+) -> u8 {
+    let yes = |v: Option<&str>| v.map(|v| v != "no" && v != "none");
+    let (mut l, mut r) = match both.or(sidewalk) {
+        Some("left") => (Some(true), Some(false)),
+        Some("right") => (Some(false), Some(true)),
+        b => (yes(b), yes(b)),
+    };
+    l = yes(left).or(l);
+    r = yes(right).or(r);
+    if l.is_none() && r.is_none() {
+        let town = SIDEWALK_CLASSES.contains(&class)
+            && speed <= SIDEWALK_MAX_SPEED + 0.01
+            && matches!(tunnel, None | Some("no") | Some("building_passage"));
+        (l, r) = (Some(town), Some(town));
+    }
+    if matches!(oneway, Some("-1") | Some("reverse")) {
+        (l, r) = (r, l);
+    }
+    (if l == Some(true) { SIDEWALK_LEFT } else { 0 })
+        | (if r == Some(true) { SIDEWALK_RIGHT } else { 0 })
 }
 
 /// A WKB LineString's points (as PostGIS's ST_AsBinary writes it: byte order, type 2, count, then x, y doubles).
