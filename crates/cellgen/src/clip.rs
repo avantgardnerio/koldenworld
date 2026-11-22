@@ -162,17 +162,15 @@ pub fn area(paths: &Paths64) -> f64 {
     area_paths(paths) / (UNITS * UNITS)
 }
 
-/// Sum, union and what's left uncovered of the square, m², over sets of Clipper paths that should partition it: the
-/// sum equals the union only if no two pieces overlap, and the union equals the square only if nothing is missing.
-pub fn tally(square: &Paths64, sets: &[&Paths64]) -> [f64; 3] {
+/// Sum, and what's left uncovered of the square, m², over sets of Clipper paths that should partition it. If the sum
+/// equals the square and nothing is uncovered, nothing overlaps either (an overlap makes the union smaller than the sum,
+/// leaving some square uncovered): overlap ≤ uncovered + |sum − square|. (Clipper's union output can hold an island
+/// over a filled area; the difference that measures what's uncovered fills nonzero, so it isn't fooled.)
+pub fn tally(square: &Paths64, sets: &[&Paths64]) -> [f64; 2] {
     let all: Paths64 = sets.iter().flat_map(|s| s.iter().cloned()).collect();
     let sum: f64 = sets.iter().map(|s| area(s)).sum();
     let union = union_subjects_64(&all, NONZERO);
-    [
-        sum,
-        area(&union),
-        area(&difference_64(square, &union, NONZERO)),
-    ]
+    [sum, area(&difference_64(square, &union, NONZERO))]
 }
 
 /// A ring cut into road sides: each maximal run of vertices on one dart's side, with the next run's first vertex as its

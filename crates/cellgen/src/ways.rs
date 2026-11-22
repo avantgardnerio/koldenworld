@@ -151,7 +151,7 @@ fn sidewalks(
 }
 
 /// A WKB LineString's points (as PostGIS's ST_AsBinary writes it: byte order, type 2, count, then x, y doubles).
-fn wkb_line_string(wkb: &[u8], out: &mut Vec<[f64; 2]>) -> Result<usize, String> {
+pub fn wkb_line_string(wkb: &[u8], out: &mut Vec<[f64; 2]>) -> Result<usize, String> {
     if wkb.len() < 9 || wkb[0] != 1 {
         return Err("expected little-endian WKB".into());
     }

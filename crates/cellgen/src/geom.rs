@@ -1,52 +1,6 @@
-//! Plane geometry words: segments, how two of them cross, and the metric between (s, t) and metres.
+//! Plane geometry: signed area, and the metric between (s, t) and metres.
 
 use glam::{DMat2, DVec2};
-
-/// A straight piece of a ring, from a to b.
-#[derive(Clone, Copy, Debug)]
-pub struct Segment {
-    pub a: DVec2,
-    pub b: DVec2,
-}
-
-/// How two segments meet. Decided by exact orientation signs, never a tolerance.
-pub enum Crossing {
-    /// Each passes strictly through the other, here.
-    Proper(DVec2),
-    /// They touch or overlap: an endpoint on the other, or collinear.
-    Touch,
-    Apart,
-}
-
-impl Segment {
-    /// Unit direction a → b (zero for a zero-length segment).
-    pub fn dir(&self) -> DVec2 {
-        (self.b - self.a).normalize_or_zero()
-    }
-
-    /// Unit normal toward the inside of a counterclockwise ring: the left of travel.
-    pub fn inward(&self) -> DVec2 {
-        self.dir().perp()
-    }
-
-    pub fn crossing(&self, other: &Segment) -> Crossing {
-        let (p, q, r, s) = (self.a, self.b, other.a, other.b);
-        let (o1, o2) = (orient(p, q, r), orient(p, q, s));
-        let (o3, o4) = (orient(r, s, p), orient(r, s, q));
-        if o1 * o2 < 0.0 && o3 * o4 < 0.0 {
-            // Where (a construction: the decision above was exact).
-            let t = (r - p).perp_dot(s - r) / (q - p).perp_dot(s - r);
-            return Crossing::Proper(p + t * (q - p));
-        }
-        let zero = o1 == 0.0 || o2 == 0.0 || o3 == 0.0 || o4 == 0.0;
-        let boxes_meet = p.min(q).cmple(r.max(s)).all() && r.min(s).cmple(p.max(q)).all();
-        if zero && boxes_meet {
-            Crossing::Touch
-        } else {
-            Crossing::Apart
-        }
-    }
-}
 
 /// Signed area of a closed ring of points, positive counterclockwise (shoelace, relative to the first point to keep
 /// precision).
@@ -61,13 +15,6 @@ pub fn signed_area(mut points: impl Iterator<Item = DVec2>) -> f64 {
         a = b;
     }
     twice / 2.0
-}
-
-/// Exact orientation (Shewchuk's adaptive predicate): positive if a, b, c turn counterclockwise, negative
-/// clockwise, zero if collinear.
-pub fn orient(a: DVec2, b: DVec2, c: DVec2) -> f64 {
-    let coord = |v: DVec2| robust::Coord { x: v.x, y: v.y };
-    robust::orient2d(coord(a), coord(b), coord(c))
 }
 
 /// Metres on the ground around a cell, from its face's (s, t): a linear map about the cell's centre (one matrix

@@ -1,15 +1,10 @@
-//! A polygon as a rubber band: a ring of vertices you can ride around forever (next after the last is the first),
-//! inserting and removing as you go, each vertex remembering where it came from. Rings are counterclockwise: the
-//! inside is on the left of travel.
+//! A polygon: a ring of vertices as columns (closed implicitly: the last links back to the first), each vertex
+//! remembering where it came from. Rings are counterclockwise for an area, clockwise around a hole.
 //!
 //! Where it came from is its id: the graph dart (an edge end, traversed) whose side it lies on, and whether it's the
-//! corner where that dart's side starts (side_id, corner_id). A vertex duplicated keeps its id; one made at a
-//! crossing becomes the corner of the side it starts (crossing_id).
-//!
-//! Stored as columns with links (a doubly linked ring by index), so insert and remove are O(1) and never move other
-//! vertices: a vertex's index stays valid until it's removed. Removed slots go on a free list for reuse.
+//! corner where that dart's side starts (side_id, corner_id), or MADE.
 
-use crate::geom::{self, Metric, Segment};
+use crate::geom;
 use glam::DVec2;
 
 /// No id: a vertex made on no side we know.
@@ -25,80 +20,27 @@ pub fn corner_id(h: u32) -> u32 {
     2 * h + 1
 }
 
-pub fn is_corner(id: u32) -> bool {
-    id != MADE && id % 2 == 1
-}
-
-/// The dart whose side an id is on.
-fn dart_of(id: u32) -> u32 {
-    id / 2
-}
-
-/// The id of a vertex made where the side `before` it (the id of the vertex starting that side) meets the side
-/// `after` it: the corner of the side after, or still on the same side if both are one dart's.
-fn crossing_id(before: u32, after: u32) -> u32 {
-    match (before, after) {
-        (_, MADE) => MADE,
-        (b, a) if b != MADE && dart_of(b) == dart_of(a) => side_id(dart_of(a)),
-        (_, a) => corner_id(dart_of(a)),
-    }
-}
-/// No vertex.
-const NONE: u32 = u32::MAX;
-
 #[derive(Default)]
 pub struct Polygon {
-    pos: Vec<DVec2>, // in (s, t) on the cell's face, or metres (in_metres)
+    pos: Vec<DVec2>, // in (s, t) on the cell's face
     id: Vec<u32>,    // where it came from (side_id, corner_id) or MADE
-    next: Vec<u32>,
-    prev: Vec<u32>,
-    free: Vec<u32>, // removed slots, for reuse
-    head: u32,      // a vertex in the ring (NONE when empty)
-    len: usize,
-}
-
-/// A place on a polygon's ring, riding the band. Holds the polygon mutably: one cursor at a time.
-pub struct Cursor<'a> {
-    poly: &'a mut Polygon,
-    at: u32,
 }
 
 impl Polygon {
-    /// A ring through these points in order (closed implicitly: the last links back to the first).
+    /// A ring through these points in order.
     pub fn from_points(points: impl IntoIterator<Item = (DVec2, u32)>) -> Polygon {
-        let mut p = Polygon {
-            head: NONE,
-            ..Default::default()
-        };
-        for (pos, id) in points {
-            p.pos.push(pos);
-            p.id.push(id);
-        }
-        let n = p.pos.len() as u32;
-        if n > 0 {
-            p.next = (0..n).map(|i| (i + 1) % n).collect();
-            p.prev = (0..n).map(|i| (i + n - 1) % n).collect();
-            p.head = 0;
-        }
-        p.len = n as usize;
-        p
+        let (pos, id) = points.into_iter().unzip();
+        Polygon { pos, id }
     }
 
-    /// A cursor on the ring's first vertex, or None if it's empty.
-    pub fn first(&mut self) -> Option<Cursor<'_>> {
-        let at = self.head;
-        (at != NONE).then_some(Cursor { poly: self, at })
-    }
-
-    /// Every vertex's position and id, once around from the first.
+    /// Every vertex's position and id, in ring order.
     pub fn vertices(&self) -> impl Iterator<Item = (DVec2, u32)> + '_ {
-        self.run(self.head, self.len)
-            .map(|v| (self.pos[v as usize], self.id[v as usize]))
+        self.pos.iter().copied().zip(self.id.iter().copied())
     }
 
-    /// Every vertex's position, once around from the first.
+    /// Every vertex's position, in ring order.
     pub fn positions(&self) -> impl Iterator<Item = DVec2> + '_ {
-        self.run(self.head, self.len).map(|v| self.pos[v as usize])
+        self.pos.iter().copied()
     }
 
     /// Signed area, positive counterclockwise.
@@ -106,14 +48,9 @@ impl Polygon {
         geom::signed_area(self.positions())
     }
 
-    /// Whether anything is left: at least a triangle, wound counterclockwise.
-    pub fn is_solid(&self) -> bool {
-        self.len >= 3 && self.signed_area() > 0.0
-    }
-
     /// Whether a point is inside the ring (even-odd). For picking which polygon something lies in, not for geometry.
     pub fn contains(&self, q: DVec2) -> bool {
-        let ring: Vec<DVec2> = self.positions().collect();
+        let ring = &self.pos;
         let mut inside = false;
         for i in 0..ring.len() {
             let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
@@ -122,180 +59,5 @@ impl Polygon {
             }
         }
         inside
-    }
-
-    /// The same ring in metres around the cell (from (s, t)), and back.
-    pub fn in_metres(&self, metric: &Metric) -> Polygon {
-        Polygon::from_points(self.vertices().map(|(p, s)| (metric.metres(p), s)))
-    }
-
-    pub fn in_st(&self, metric: &Metric) -> Polygon {
-        Polygon::from_points(self.vertices().map(|(p, s)| (metric.st(p), s)))
-    }
-
-    /// Of every two vertices in a row at the same position, drops the second, so no side has zero length (and a
-    /// corner, the first of its side, is kept).
-    pub fn drop_repeats(&mut self) {
-        let Some(mut v) = self.first() else { return };
-        let mut clean = 0;
-        while clean < v.ring_len() && v.ring_len() > 1 {
-            if v.pos() == v.side_out().b {
-                v.next();
-                v.remove();
-                v.prev();
-                clean = 0;
-            } else {
-                v.next();
-                clean += 1;
-            }
-        }
-    }
-
-    /// `count` vertex indices, following the ring from `from`.
-    fn run(&self, from: u32, count: usize) -> impl Iterator<Item = u32> + '_ {
-        let mut at = from;
-        (0..count).map(move |_| {
-            let v = at;
-            at = self.next[at as usize];
-            v
-        })
-    }
-}
-
-impl Cursor<'_> {
-    /// The ring's vertex count.
-    pub fn ring_len(&self) -> usize {
-        self.poly.len
-    }
-
-    pub fn pos(&self) -> DVec2 {
-        self.poly.pos[self.at as usize]
-    }
-
-    pub fn set_pos(&mut self, pos: DVec2) {
-        self.poly.pos[self.at as usize] = pos;
-    }
-
-    /// Where it came from (side_id, corner_id), or MADE.
-    pub fn id(&self) -> u32 {
-        self.poly.id[self.at as usize]
-    }
-
-    /// Whether the ring turns straight back on itself here (a dead end's tip): the sides in and out lie on one line,
-    /// pointing opposite ways. Exact.
-    pub fn doubles_back(&self) -> bool {
-        let (side_in, side_out) = (self.side_in(), self.side_out());
-        geom::orient(side_in.a, side_in.b, side_out.b) == 0.0
-            && (side_in.b - side_in.a).dot(side_out.b - side_out.a) < 0.0
-    }
-
-    /// The side arriving here: previous vertex → this one.
-    pub fn side_in(&self) -> Segment {
-        let prev = self.poly.prev[self.at as usize];
-        Segment {
-            a: self.poly.pos[prev as usize],
-            b: self.pos(),
-        }
-    }
-
-    /// The side leaving here: this vertex → the next.
-    pub fn side_out(&self) -> Segment {
-        self.side_from(self.at)
-    }
-
-    /// The sides that don't touch side_out (it and its two neighbors excluded), in ring order: each with the index
-    /// of its first vertex.
-    pub fn sides_ahead(&self) -> impl Iterator<Item = (u32, Segment)> + '_ {
-        let p = &*self.poly;
-        let start = p.next[p.next[self.at as usize] as usize];
-        let count = self.poly.len.saturating_sub(3);
-        p.run(start, count).map(|w| (w, self.side_from(w)))
-    }
-
-    /// Splits the ring where this vertex's side out crosses w's side out, at x, into its two loops. The loop ahead
-    /// (x, then this vertex's next … w) comes back as a new polygon; the loop behind (x, then w's next … this vertex)
-    /// stays, with x made after this vertex. In each loop x is the corner of the side it starts (crossing_id). The
-    /// cursor stays here.
-    pub fn split_off(&mut self, w: u32, x: DVec2) -> Polygon {
-        let p = &*self.poly;
-        let wn = p.next[w as usize];
-        let ahead: Vec<(DVec2, u32)> = p
-            .run(p.next[self.at as usize], usize::MAX)
-            .take_while(|&v| v != wn)
-            .map(|v| (p.pos[v as usize], p.id[v as usize]))
-            .collect();
-        // Behind: this vertex's side, then w's from x on. Ahead: w's side, then this vertex's from x on.
-        let x_behind = crossing_id(self.id(), p.id[w as usize]);
-        let x_ahead = crossing_id(p.id[w as usize], self.id());
-        let here = self.at;
-        let made = self.insert_after(x, x_behind);
-        self.at = self.poly.next[made as usize];
-        while self.at != wn {
-            self.remove();
-        }
-        self.at = here;
-        Polygon::from_points(std::iter::once((x, x_ahead)).chain(ahead))
-    }
-
-    /// Move to the next vertex (after the last comes the first).
-    pub fn next(&mut self) {
-        self.at = self.poly.next[self.at as usize];
-    }
-
-    /// Move to the previous vertex.
-    pub fn prev(&mut self) {
-        self.at = self.poly.prev[self.at as usize];
-    }
-
-    /// Insert a vertex after this one; the cursor stays here. Returns the new vertex's index.
-    pub fn insert_after(&mut self, pos: DVec2, id: u32) -> u32 {
-        let p = &mut *self.poly;
-        let v = match p.free.pop() {
-            Some(v) => {
-                p.pos[v as usize] = pos;
-                p.id[v as usize] = id;
-                v
-            }
-            None => {
-                p.pos.push(pos);
-                p.id.push(id);
-                p.next.push(NONE);
-                p.prev.push(NONE);
-                (p.pos.len() - 1) as u32
-            }
-        };
-        let after = p.next[self.at as usize];
-        p.next[v as usize] = after;
-        p.prev[v as usize] = self.at;
-        p.next[self.at as usize] = v;
-        p.prev[after as usize] = v;
-        p.len += 1;
-        v
-    }
-
-    /// Remove this vertex and move to the next one (removing the last empties the ring; the cursor is then done).
-    pub fn remove(&mut self) {
-        let p = &mut *self.poly;
-        let (before, after) = (p.prev[self.at as usize], p.next[self.at as usize]);
-        p.free.push(self.at);
-        p.len -= 1;
-        if p.len == 0 {
-            p.head = NONE;
-            return;
-        }
-        p.next[before as usize] = after;
-        p.prev[after as usize] = before;
-        if p.head == self.at {
-            p.head = after;
-        }
-        self.at = after;
-    }
-
-    fn side_from(&self, v: u32) -> Segment {
-        let p = &*self.poly;
-        Segment {
-            a: p.pos[v as usize],
-            b: p.pos[p.next[v as usize] as usize],
-        }
     }
 }

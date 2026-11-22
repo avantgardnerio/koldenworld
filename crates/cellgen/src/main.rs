@@ -1,15 +1,12 @@
-mod bands;
 mod clip;
 mod draw;
 mod faces;
 mod geom;
 mod graph;
-mod layer;
 mod markings;
-mod pavement;
 mod polygon;
 mod s2;
-mod shrink;
+mod water;
 mod ways;
 mod widths;
 
@@ -19,9 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Same database as the TS cell server: the local socket, as the runtime role (trust auth).
     let mut db = Client::connect("host=/var/run/postgresql user=game dbname=game", NoTls)?;
 
-    // The level-13 cell at Five Points, Denver: a square in its cube face's (s, t), drawn with a quarter of
+    // The level-13 cell on Speer Boulevard between Broadway and Washington Street, Denver, where Cherry Creek runs
+    // between its carriageways under seven bridges: a square in its cube face's (s, t), drawn with a quarter of
     // its size around it.
-    let (face, st) = s2::lat_lon_to_face_st(39.7557, -104.9779);
+    let (face, st) = s2::lat_lon_to_face_st(39.7238, -104.9834);
     let cell = s2::cell_square(st, s2::CELL_LEVEL);
     let m = 0.25 * (cell[2] - cell[0]);
     let view = [cell[0] - m, cell[1] - m, cell[2] + m, cell[3] + m];
@@ -30,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // whose own face is a neighbor.
     let [west, south, east, north] = s2::lat_lon_bounds(face, view, 0.001);
     let mut ways = ways::load_road_ways(&mut db, west, south, east, north)?;
+    let water = water::load_water(&mut db, west, south, east, north)?;
     ways.st = ways
         .lonlat
         .iter()
@@ -128,93 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         2 * pieces
     );
 
-    // Layers, each the one before shrunk further, every vertex still knowing its dart: the kerb (blocks shrunk by
-    // half a road, 4 m until widths come from lanes), the back of the grass (1.5 m in), the back of the sidewalk
-    // (1.8 m further). What's left inside is the lot.
-    let area = |ps: &mut dyn Iterator<Item = &polygon::Polygon>| -> f64 {
-        ps.map(|p| p.signed_area().max(0.0)).sum::<f64>() * m2_per_st2 / 1e6
-    };
-    let mut stats = shrink::ShrinkStats::default();
-    let kerb: Vec<Vec<polygon::Polygon>> = polygons
-        .iter()
-        .map(|p| {
-            if p.signed_area() > 0.0 {
-                p.shrink(4.0, &metric, &mut stats)
-            } else {
-                Vec::new()
-            }
-        })
-        .collect();
-    println!("kerb, 4 m in: {stats:?}");
-    let shrink_layer = |layer: &[Vec<polygon::Polygon>], d: f64, name: &str| {
-        let mut stats = shrink::ShrinkStats::default();
-        let next: Vec<Vec<polygon::Polygon>> = layer
-            .iter()
-            .map(|islands| {
-                islands
-                    .iter()
-                    .flat_map(|p| p.shrink(d, &metric, &mut stats))
-                    .collect()
-            })
-            .collect();
-        println!("{name}, {d} m further: {stats:?}");
-        next
-    };
-    let grass_back = shrink_layer(&kerb, 1.5, "back of the grass");
-    let lot_islands = shrink_layer(&grass_back, 1.8, "back of the sidewalk");
-    let lot_polygons: Vec<&polygon::Polygon> = lot_islands.iter().flatten().collect();
-    let [kerb, grass_back, lots] =
-        [&kerb, &grass_back, &lot_islands].map(|l| layer::Layer::new(&graph, &faces, l));
-
-    // The roads in the void, then the bands between the layers.
-    let pavement = pavement::pave(&graph, &kerb);
-    let grass = bands::band(&graph, &kerb, &grass_back);
-    let sidewalk = bands::band(&graph, &grass_back, &lots);
-    println!(
-        "pavement: {} strips ({} missing), {} junctions ({} missing); {:.3} km²; failed strip sides: {:?}",
-        pavement.strips.len(),
-        pavement.missing_strips,
-        pavement.junctions.len(),
-        pavement.missing_junctions,
-        area(&mut pavement.strips.iter().chain(&pavement.junctions)),
-        pavement.why
-    );
-    for (name, b) in [("grass", &grass), ("sidewalk", &sidewalk)] {
-        println!(
-            "{name}: {} pieces ({} missing: {:?}); {:.3} km²",
-            b.pieces.len(),
-            b.missing,
-            b.why,
-            area(&mut b.pieces.iter())
-        );
-    }
-    println!(
-        "lots: {} islands; {:.3} km² (blocks were {:.3} km²)",
-        lot_polygons.len(),
-        area(&mut lot_polygons.iter().copied()),
-        area(&mut polygons.iter())
-    );
-
-    let path = "target/five-points.png";
-    let frame = draw::View {
-        view,
-        cell,
-        size: 4096,
-    };
-    fn all(ps: &[polygon::Polygon]) -> Vec<&polygon::Polygon> {
-        ps.iter().collect()
-    }
-    let pavement_polygons = all(&pavement.strips)
-        .into_iter()
-        .chain(&pavement.junctions)
-        .collect();
-    let fills = [
-        (lot_polygons, [126, 170, 92]), // lots: lawn, a shade lighter than the grass strip
-        (pavement_polygons, [72, 72, 76]), // asphalt
-        (all(&grass.pieces), [104, 150, 72]), // grass
-        (all(&sidewalk.pieces), [196, 194, 186]), // concrete
-    ];
-    draw::draw_png(&fills, &frame, "target/five-points-ours.png")?;
+    let path = "target/cell.png";
     // The cell's ground by Clipper2. Regions: every block, with the road pieces inside it (their outside faces) as
     // holes, and the cell itself around the network (its outer edge no road), with the network's outside as a hole.
     let started = std::time::Instant::now();
@@ -330,16 +243,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &clipper2_rust::union_subjects_64(&[yellow.clone(), white.clone()].concat(), nonzero),
         nonzero,
     );
-    let (grass, sidewalk, lots) = (merge(1), merge(2), merge(3));
-    let kinds = [&asphalt, &yellow, &white, &grass, &sidewalk, &lots];
-    let [sum, union, uncovered] = clip::tally(&square, &kinds);
+    // Water: lines expanded like roads and areas, in the cell. Road (asphalt, markings, sidewalk: bridges keep their
+    // walks) wins where they meet; water takes what it covers of the grass strips and lots.
+    let water_all = clipper2_rust::intersect_64(&water.paths(face, &metric), &square, nonzero);
+    let sidewalk = merge(2);
+    let road = clipper2_rust::union_subjects_64(
+        &[
+            asphalt.clone(),
+            yellow.clone(),
+            white.clone(),
+            sidewalk.clone(),
+        ]
+        .concat(),
+        nonzero,
+    );
+    let water_left = clipper2_rust::difference_64(&water_all, &road, nonzero);
+    let grass = clipper2_rust::difference_64(&merge(1), &water_left, nonzero);
+    let lots = clipper2_rust::difference_64(&merge(3), &water_left, nonzero);
+    let kinds = [
+        &asphalt,
+        &yellow,
+        &white,
+        &grass,
+        &sidewalk,
+        &lots,
+        &water_left,
+    ];
+    let [sum, uncovered] = clip::tally(&square, &kinds);
     let m2: Vec<String> = kinds
         .iter()
         .map(|k| format!("{:.0}", clip::area(k)))
         .collect();
     println!(
-        "cell ground with markings, in {:.0?}: asphalt {} + yellow {} + white {} + grass {} + sidewalk {} + lot {} = \
-         {sum:.2} m²; square {:.2} m²; union {union:.2} m²; uncovered {uncovered:.3} m²",
+        "cell ground, in {:.0?}: asphalt {} + yellow {} + white {} + grass {} + sidewalk {} + lot {} + water {} = \
+         {sum:.2} m²; square {:.2} m²; uncovered {uncovered:.3} m², so overlapping at most {:.3} m²",
         started.elapsed(),
         m2[0],
         m2[1],
@@ -347,7 +284,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         m2[3],
         m2[4],
         m2[5],
-        clip::area(&square)
+        m2[6],
+        clip::area(&square),
+        uncovered + (sum - clip::area(&square)).abs()
     );
 
     let polys: Vec<Vec<polygon::Polygon>> =
@@ -359,6 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [104, 150, 72],
         [196, 194, 186],
         [126, 170, 92],
+        [64, 120, 190],
     ];
     let fills: Vec<(Vec<&polygon::Polygon>, [u8; 3])> = polys
         .iter()
