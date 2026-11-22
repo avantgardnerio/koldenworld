@@ -1,12 +1,25 @@
 // Colors and atmosphere are a view concern: they live here, not in the map data.
 
 import { BUILDING_GROUPS, ROAD_CLASSES, SurfaceMaterial, type BuildingGroup, type RoadClass } from "@game/world";
+import type { TerrainStyle } from "./terrain-layer.ts";
 
 const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
 const palette = (hexes: string[]) => new Float32Array(hexes.flatMap(rgb));
 
 export const SKY = palette(["#a9c8e6"]);
-export const GROUND = palette(["#5b7f3a"]);
+/**
+ * Ground color by elevation and slope (decision 26), tuned for Colorado: plains grass, montane
+ * forest from ~2,300 m, alpine tundra above treeline (~3,450 m), rock from ~3,700 m and on
+ * slopes steeper than ~35–45°, snow from ~3,950 m. Heights are above the ellipsoid (about
+ * 17 m below sea-level heights here). Land cover data will replace the guesswork below treeline.
+ */
+export const TERRAIN_STYLE: TerrainStyle = {
+  colors: palette(["#5b7f3a", "#3d5a2c", "#7d7b56", "#8a857e", "#eef1f5"]),
+  bands: [2300, 3450, 3700, 3950],
+  jitter: [200, 120, 150, 150],
+  steep: [0.70, 0.82],
+};
+
 /** vec3 per WaterMaterial: lake, river, stream. */
 export const WATER = palette(["#3b6a8c", "#4a7690", "#55809a"]);
 

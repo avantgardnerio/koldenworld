@@ -155,8 +155,8 @@ function drapeBuildings(b: Buildings, place: Place, groundAt: (x: number, y: num
 export interface TerrainMesh {
   positions: Float32Array;  // x, y, z in the cell frame: the lattice, then the skirt
   normals: Int8Array;       // x, y, z, 0 per vertex; ×127
-  material: Uint8Array;     // 0
-  shade: Uint8Array;        // 128 (no variation)
+  height: Float32Array;     // m above the ellipsoid, per vertex (for elevation-based color)
+  noise: Uint8Array;        // smooth value noise 0..255 from lat/lon: breaks up color bands, same on both sides of an edge
   indices: Uint32Array;     // every level of detail, back to back
   lods: { start: number; count: number }[];  // per TERRAIN_LOD_STEPS entry, into indices
 }
@@ -170,14 +170,21 @@ export function terrainMesh(cell: CellId, frame: Frame, t: CellTerrain): Terrain
   for (let j = n; j > 0; j--) edge.push(j * w);
   const count = w * w + edge.length;
   const positions = new Float32Array(3 * count);
+  const height = new Float32Array(count);
+  const noise = new Uint8Array(count);
   for (let k = 0; k < w * w; k++) {
-    positions.set(ecefToLocal(frame, geodeticToEcef({ lat: ll[2 * k]!, lon: ll[2 * k + 1]!, h: t.heights[k]! })), 3 * k);
+    const lat = ll[2 * k]!, lon = ll[2 * k + 1]!;
+    positions.set(ecefToLocal(frame, geodeticToEcef({ lat, lon, h: t.heights[k]! })), 3 * k);
+    height[k] = t.heights[k]!;
+    noise[k] = Math.round(255 * groundNoise(lat, lon));
   }
   edge.forEach((k, s) => {
     const v = w * w + s;
     positions[3 * v] = positions[3 * k]!;
     positions[3 * v + 1] = positions[3 * k + 1]!;
     positions[3 * v + 2] = positions[3 * k + 2]! - SKIRT_DEPTH;
+    height[v] = height[k]!;
+    noise[v] = noise[k]!;
   });
 
   // Normals from central differences on the lattice (one-sided at the border).
@@ -221,8 +228,28 @@ export function terrainMesh(cell: CellId, frame: Frame, t: CellTerrain): Terrain
     lods.push({ start, count: all.length - start });
   }
 
-  return {
-    positions, normals, material: new Uint8Array(count), shade: new Uint8Array(count).fill(128),
-    indices: Uint32Array.from(all), lods,
-  };
+  return { positions, normals, height, noise, indices: Uint32Array.from(all), lods };
+}
+
+// --- noise -----------------------------------------------------------------------
+
+/** A hash of two integers to [0, 1). */
+function hash2(i: number, j: number): number {
+  let h = Math.imul(i | 0, 0x27d4eb2d) ^ Math.imul(j | 0, 0x165667b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 2 ** 32;
+}
+
+/** Value noise on a lat/lon grid of `cell` degrees, smoothstepped between grid points. */
+function valueNoise(lat: number, lon: number, cell: number): number {
+  const x = lon / cell, y = lat / cell, i = Math.floor(x), j = Math.floor(y);
+  const s = (t: number) => t * t * (3 - 2 * t);
+  const u = s(x - i), v = s(y - j);
+  return (hash2(i, j) * (1 - u) + hash2(i + 1, j) * u) * (1 - v) + (hash2(i, j + 1) * (1 - u) + hash2(i + 1, j + 1) * u) * v;
+}
+
+/** Smooth noise in [0, 1] over the ground: ~1 km and ~250 m features. Pure function of the point. */
+export function groundNoise(lat: number, lon: number): number {
+  return 0.65 * valueNoise(lat, lon, 0.01) + 0.35 * valueNoise(lat, lon, 0.0025);
 }

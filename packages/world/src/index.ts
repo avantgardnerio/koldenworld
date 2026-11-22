@@ -12,7 +12,7 @@ export {
   ownerPoint, type CellContents, type CellFiles, type GroundMesh,
 } from "./cell.ts";
 export {
-  drapeCell, flatTerrain, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,
+  drapeCell, flatTerrain, groundNoise, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,
   terrainToArrow, type CellTerrain, type HeightFn, type TerrainMesh,
 } from "./terrain.ts";
 export {

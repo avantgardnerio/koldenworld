@@ -39,6 +39,17 @@ describe("terrain lattice", () => {
       TERRAIN_LOD_STEPS.map((s) => 2 * (TERRAIN_N / s) ** 2 + 2 * (4 * TERRAIN_N) / s));
   });
 
+  it("carries height and the same noise on both sides of a shared edge", () => {
+    const fa = buildCell(a, [], []).frame, fb = buildCell(b, [], []).frame;
+    const ma = terrainMesh(a, fa, sampleTerrain(a, slope)), mb = terrainMesh(b, fb, sampleTerrain(b, slope));
+    const w = TERRAIN_N + 1;
+    for (let j = 0; j <= TERRAIN_N; j++) {
+      expect(ma.noise[j * w + TERRAIN_N]).toBe(mb.noise[j * w]);
+      expect(ma.height[j * w + TERRAIN_N]).toBe(mb.height[j * w]);
+    }
+    expect(new Set(ma.noise).size).toBeGreaterThan(20);  // it varies
+  });
+
   it("points normals up, tilted with the slope", () => {
     const m = terrainMesh(a, buildCell(a, [], []).frame, sampleTerrain(a, slope));
     const c = 4 * ((TERRAIN_N / 2) * (TERRAIN_N + 1) + TERRAIN_N / 2);

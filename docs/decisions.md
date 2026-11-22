@@ -172,3 +172,10 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Format:** `water.arrow`, a plain triangle list (one row per vertex: position, material lake / river / stream). Drawn after terrain, nudged toward the camera slightly less than roads, so a road over a stream wins.
 - **Not yet:** reflections, waves or transparency (flat color by kind), shorelines carved into terrain where the DEM isn't flattened (small ponds can sit under the ground or float slightly), intermittent streams (left out: often dry beds).
 
+## 26. Ground color: elevation and slope rules first, land cover next
+
+- **Chosen:** the terrain shader colors the ground by height and slope: plains grass → montane forest (from ~2,300 m) → alpine tundra at treeline (~3,450 m) → rock (from ~3,700 m, and on slopes steeper than ~35–45° at any height) → snow (from ~3,950 m, not on very steep faces). Each band's edge moves by up to 120–200 m with a smooth noise field computed from lat/lon at the terrain lattice points, so bands don't read as contour lines and neighbors agree at shared edges. Flat ground below the forest band keeps exactly the base color.
+- **Why rules first:** above treeline, land cover data mostly says "bare or sparse", so rock, tundra and snow need these rules regardless; and they need no new data.
+- **Why land cover next:** elevation can't tell a wheat field from prairie, or forest from shrub at the same height. ESA WorldCover (10 m, global) or NLCD (30 m, US, with crops, pasture and forest types) will decide below treeline, and the same classes will drive tree placement.
+- **Limits:** the thresholds are tuned for Colorado (treeline falls with latitude and varies by climate); snow is a fixed line, not seasonal.
+

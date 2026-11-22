@@ -26,10 +26,11 @@ import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts"
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
 import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
+import { createTerrainLayer, type TerrainLayer } from "./terrain-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import {
-  BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, GROUND, MARKING_FADE, SKY, SUN, SURFACE_COLORS, WATER,
+  BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, MARKING_FADE, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -103,7 +104,7 @@ interface CellGpu {
   centerZ: number;
   model: Float32Array;  // this frame's cell → view transform, reused every frame
   terrain: CellTerrain;
-  ground: SolidLayer;
+  ground: TerrainLayer;
   lods: { start: number; count: number }[];
   roads?: FlatLayer;
   water?: FlatLayer;
@@ -129,7 +130,7 @@ async function start(): Promise<void> {
     if (c && c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);
     const terrain = c?.terrain ?? flatTerrain();
     const tm = terrainMesh(cell, frame, terrain);
-    const ground = createSolidLayer(gl!, tm, GROUND, { terrain: true });
+    const ground = createTerrainLayer(gl!, tm, TERRAIN_STYLE);
     const groundReach = reach(tm.positions, 3);
     const model = new Float32Array(16);
     // Vertical extent: terrain (with its skirts) and building tops.
