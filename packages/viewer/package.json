@@ -6,7 +6,8 @@
     "typecheck": "tsc -p . && tsc -p tsconfig.node.json"
   },
   "dependencies": {
-    "@game/world": "*"
+    "@game/world": "*",
+    "@game/sim": "*"
   },
   "devDependencies": {
     "playwright": "^1.65.1",

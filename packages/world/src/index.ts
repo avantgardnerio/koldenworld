@@ -36,4 +36,7 @@ export {
   type WaterAreaInput, type WaterMesh, type WaterwayInput,
 } from "./water.ts";
 export { readGlb, type ModelMesh } from "./glb.ts";
-export { placeVehicles, VEHICLE_MODELS, VEHICLE_SCALE, type VehicleModel, type VehiclePlacements } from "./vehicles.ts";
+export {
+  edgeArcLengths, edgeLanes, laneOffset, lanePose, placeVehicles, VEHICLE_MODELS, VEHICLE_SCALE,
+  type VehicleModel, type VehiclePlacements,
+} from "./vehicles.ts";

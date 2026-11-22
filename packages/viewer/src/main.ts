@@ -17,12 +17,12 @@
 // what was drawn without decoding screenshots.
 
 import {
-  buildingMesh, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, type VehiclePlacements, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  buildingMesh, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, speed, viewProjection } from "./camera.ts";
-import { createCarLayer, createCarModels, type CarLayer, type CarModels } from "./car-layer.ts";
+import { createCarModels, createCarRenderer, type CarModels, type CarRenderer } from "./car-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
@@ -30,6 +30,7 @@ import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
 import { createTerrainLayer, type TerrainLayer } from "./terrain-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
+import { emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
   BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, MARKING_FADE, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
 } from "./style.ts";
@@ -45,8 +46,9 @@ export interface ViewerStatus {
   buildings: number;
   buildingTriangles: number;
   carModels: number;      // vehicle models loaded (0 until they are)
-  cars: number;           // cars drawn last frame
-  carTriangles: number;
+  cars: number;           // cars in the simulation
+  carTriangles: number;   // drawn last frame
+  simTime: number;        // s of traffic simulated
   graphOverlay: boolean;
   frames: number;
   /** Render now and read the RGB at a CSS pixel (origin top left). */
@@ -72,15 +74,17 @@ const TERRAIN_LOD_DISTANCES = [4000, 8000, 16_000];
 const ROAD_BIAS = 0.3;
 /** Water a little less than roads, so a road over a stream wins. */
 const WATER_BIAS = 0.2;
-/** Cars are drawn in visible cells whose center is within this distance (m): ~2,100 triangles each. */
+/** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
 const CAR_DISTANCE = 1500;
 
 const params = new URLSearchParams(location.search);
 const fixedRadius = params.has("radius") ? Number(params.get("radius")) : undefined;
 const showCars = params.get("cars") !== "0";
+/** traffic=0: cars stand where they start (tests that look at exact pixels). */
+const moving = showCars && params.get("traffic") !== "0";
 const status: ViewerStatus = (window.viewer = {
   state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0, drawn: 0 }, radius: 0,
-  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0,
+  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0, simTime: 0,
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
 
@@ -116,8 +120,7 @@ interface CellGpu {
   roads?: FlatLayer;
   water?: FlatLayer;
   lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
-  vehicles?: VehiclePlacements;  // cars standing in this cell's lanes, uploaded on first draw
-  cars?: CarLayer;
+  traffic?: TrafficCell;  // this cell's roads in the traffic sim
   graph?: FlatLayer;
   buildings?: SolidLayer;
   counts: { nodes: number; edges: number; surfaceTriangles: number; buildings: number; buildingTriangles: number };
@@ -138,6 +141,9 @@ async function start(): Promise<void> {
   const hud = document.querySelector<HTMLElement>("#hud")!;
   const gl = canvas.getContext("webgl2", { antialias: true });
   if (!gl) throw new Error("WebGL2 is not available");
+
+  const traffic = new TrafficView(1);
+  const carInstances = emptyInstances();
 
   async function loadCell(cell: CellId): Promise<CellGpu> {
     const token = cellToken(cell);
@@ -177,7 +183,8 @@ async function start(): Promise<void> {
         indices: Uint32Array.from({ length: c.water.material.length }, (_, i) => i),
       }, { mode: gl!.TRIANGLES, colors: WATER, fadeToBase: false, bias: WATER_BIAS }),
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
-      vehicles: placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))),
+      traffic: c.graph.edges.count === 0 ? undefined
+        : traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model),
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB),
       counts: {
         nodes: c.graph.nodes.count, edges: c.graph.edges.count, surfaceTriangles: surface.indices.length / 3,
@@ -189,7 +196,10 @@ async function start(): Promise<void> {
   const streamer = new CellStreamer<CellGpu>({
     load: loadCell,
     concurrency: 8,
-    dispose: (g) => [g.ground, g.water, g.roads, g.graph, g.buildings, g.cars].forEach((l) => l?.dispose()),
+    dispose: (g) => {
+      [g.ground, g.water, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose());
+      if (g.traffic) traffic.remove(g.traffic);
+    },
     onChange: () => {
       updateStatus();
       if (!running) render();
@@ -236,16 +246,18 @@ async function start(): Promise<void> {
     if (status.state === "loading" && streamer.settled) status.state = "ready";
   };
 
-  // Vehicle models load alongside the first cells; cells draw their cars once they're in.
-  let carModels: CarModels | undefined;
-  loadCarModels(gl).then((m) => {
-    carModels = m;
+  // Vehicle models load alongside the first cells; traffic starts once they're in.
+  let carRenderer: CarRenderer | undefined;
+  loadCarModels(gl).then((m: CarModels) => {
+    carRenderer = createCarRenderer(gl, m);
     status.carModels = VEHICLE_MODELS.length;
-    if (!running) render();
+    if (moving) wake();
+    else if (!running) render();
   }, (err: unknown) => console.error("vehicle models failed to load:", err));
 
   const visible: CellGpu[] = [];  // reused every frame
-  const render = () => {
+  /** Renders a frame; dt (s) advances the traffic. */
+  const render = (dt = 0) => {
     const t0 = performance.now();
     // Terrain may have arrived under the camera since it last moved.
     const ground = groundAt(camera.lat, camera.lon);
@@ -277,7 +289,9 @@ async function start(): Promise<void> {
     streamer.forEachReady((g) => {
       frameToFrame(g.frame, vf, g.model);
       const m = g.model, cz = g.centerZ;
-      if (sphereVisible(planes, m[12]! + m[8]! * cz, m[13]! + m[9]! * cz, m[14]! + m[10]! * cz, g.radius)) visible.push(g);
+      const seen = sphereVisible(planes, m[12]! + m[8]! * cz, m[13]! + m[9]! * cz, m[14]! + m[10]! * cz, g.radius);
+      if (seen) visible.push(g);
+      if (g.traffic) g.traffic.visible = seen;
     });
     status.cells.drawn = visible.length;
     // Terrain first, at a level of detail by distance (skirts hide the cracks between levels), then
@@ -291,17 +305,15 @@ async function start(): Promise<void> {
     for (const g of visible) g.water?.draw(f, g.model);
     for (const g of visible) g.roads?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
-    let cars = 0, carTriangles = 0;
-    if (carModels && showCars) {
-      for (const g of visible) {
-        if (!g.vehicles || Math.hypot(g.model[12]!, g.model[13]!, g.model[14]! + g.centerZ - camera.h) > CAR_DISTANCE) continue;
-        g.cars ??= createCarLayer(gl, carModels, g.vehicles);
-        carTriangles += g.cars.draw(f, g.model, SUN, ROAD_BIAS);
-        cars += g.cars.count;
-      }
+    let carTriangles = 0;
+    if (carRenderer && showCars) {
+      const near = (tc: TrafficCell) => Math.hypot(tc.model[12]!, tc.model[13]!, tc.model[14]! - camera.h);
+      traffic.update(dt, near, CAR_DISTANCE, 1.3 * CAR_DISTANCE, moving);
+      traffic.instances(carInstances);
+      carTriangles = carRenderer.draw(f, SUN, ROAD_BIAS, carInstances);
     }
-    status.cars = cars;
-    status.carTriangles = carTriangles;
+    const cars = traffic.cars.count;
+    Object.assign(status, { cars, carTriangles, simTime: traffic.simTime });
     if (status.graphOverlay) {
       for (const g of visible) {
         if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false, bias: 1 });
@@ -318,8 +330,9 @@ async function start(): Promise<void> {
       `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars (${(carTriangles / 1e6).toFixed(1)}M tris) · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
   };
 
-  // --- frame loop, running only while there is input ---
+  // --- frame loop: running while there is input, or while traffic moves ---
   let running = false;
+  let steering = false;  // input this frame
   let last = 0;
   let fps = 0;    // smoothed while running; kept when idle
   let cpuMs = 0;  // last frame's CPU time: culling, matrices and draw submission (not GPU time)
@@ -330,12 +343,18 @@ async function start(): Promise<void> {
     if (raw > 0) fps = fps === 0 ? 1 / raw : 0.9 * fps + 0.1 / raw;
     const input = keys.take();
     if (isIdle(input)) {
-      running = false;
-      history.replaceState(null, "", formatGlobeHash(camera));
-      return;
+      // Input just stopped: the pose goes to the URL.
+      if (steering) history.replaceState(null, "", formatGlobeHash(camera));
+      steering = false;
+      if (!(moving && carRenderer)) {
+        running = false;
+        return;
+      }
+    } else {
+      steering = true;
+      camera = stepGlobe(camera, input, dt, groundAt);
     }
-    camera = stepGlobe(camera, input, dt, groundAt);
-    render();
+    render(dt);
     requestAnimationFrame(frame);
   };
   const wake = () => {

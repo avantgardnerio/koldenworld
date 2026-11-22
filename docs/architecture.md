@@ -35,7 +35,7 @@ packages/
   db/          Postgres access, migrations runner       ← Node only
 ```
 
-Existing today: `world` (road graph, buildings, Arrow I/O, projection, WGS84 geodesy and ENU frames, S2 cells, road line, road surface and building meshes), `osm-import`, `db`, `cli`, `viewer` (WebGL2 road map, headless harness). `sim` is created when it gets code.
+Existing today: `sim` (columnar tables with cursors, traffic), `world` (road graph, buildings, Arrow I/O, projection, WGS84 geodesy and ENU frames, S2 cells, road line, road surface and building meshes), `osm-import`, `db`, `cli`, `viewer` (WebGL2 road map, headless harness).
 
 The shared packages are compiled without DOM type definitions, and a lint rule blocks Node-specific imports, so platform leaks fail the build.
 

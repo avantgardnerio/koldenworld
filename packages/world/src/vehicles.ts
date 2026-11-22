@@ -1,11 +1,12 @@
-// Vehicles standing in their lanes (decision 27): a pure, deterministic
-// placement per cell, before there is any traffic simulation. The same graph
-// and seed always give the same cars.
+// Vehicles on the road graph (decision 27): where cars start in a cell, and
+// where a car at a lane coordinate is in space. Pure and deterministic: the
+// same graph and seed always give the same cars.
 //
-// Right-hand traffic, lanes as in road-surface.ts: looking from → to, forward
-// lanes are right of the boundary c = (back − fwd) · laneWidth / 2, backward
-// lanes left of it. Cars keep clear of intersections, are spaced by road
-// class with some randomness, point along their lane, and tilt with the road.
+// A lane coordinate is (edge, dir, lane, s): dir +1 travels from → to, −1
+// to → from; lane counts from the left of the travel direction (0 is next to
+// the center line); s is meters travelled from the entry node. Right-hand
+// traffic, lanes as in road-surface.ts: looking from → to, forward lanes lie
+// right of the boundary c = (back − fwd) · laneWidth / 2, backward lanes left.
 
 import { nodeRadii, ROAD_PROFILES } from "./road-surface.ts";
 import { ROAD_CLASSES, type RoadClass, type RoadGraph } from "./road-graph.ts";
@@ -30,9 +31,11 @@ const CLEAR = 4;  // m kept free beyond an intersection disc
 
 export interface VehiclePlacements {
   count: number;
-  model: Uint8Array;     // index into VEHICLE_MODELS
-  position: Float32Array;  // x, y, z per car (center of the car on the road surface), in the graph's frame
-  forward: Float32Array;   // x, y, z unit vector per car
+  model: Uint8Array;  // index into VEHICLE_MODELS
+  edge: Uint32Array;
+  dir: Int8Array;
+  lane: Uint8Array;
+  s: Float32Array;
 }
 
 /** mulberry32 */
@@ -46,6 +49,10 @@ function rng(seed: number) {
   };
 }
 
+/** Lanes in a direction: lanesFwd for +1, lanesBack for −1. */
+export const edgeLanes = (g: RoadGraph, e: number, dir: number) => (dir > 0 ? g.edges.lanesFwd[e]! : g.edges.lanesBack[e]!);
+
+/** Where cars start in a cell: spaced by road class along every lane, clear of intersections. */
 export function placeVehicles(g: RoadGraph, seed: number): VehiclePlacements {
   const rand = rng(seed);
   const total = WEIGHTS.reduce((a, b) => a + b, 0);
@@ -55,45 +62,82 @@ export function placeVehicles(g: RoadGraph, seed: number): VehiclePlacements {
     return i;
   };
   const radius = nodeRadii(g);
-  const model: number[] = [], position: number[] = [], forward: number[] = [];
-
+  const out = { model: [] as number[], edge: [] as number[], dir: [] as number[], lane: [] as number[], s: [] as number[] };
   for (let e = 0; e < g.edges.count; e++) {
-    const cls = ROAD_CLASSES[g.edges.class[e]!]!;
-    const { laneWidth: lw } = ROAD_PROFILES[cls];
-    const fwd = g.edges.lanesFwd[e]!, back = g.edges.lanesBack[e]!;
-    const p0 = g.edges.pointStart[e]!, p1 = g.edges.pointStart[e + 1]!;
-    // Cumulative horizontal length at each point.
-    const cum = [0];
-    for (let p = p0 + 1; p < p1; p++) {
-      cum.push(cum.at(-1)! + Math.hypot(g.points[2 * p]! - g.points[2 * p - 2]!, g.points[2 * p + 1]! - g.points[2 * p - 1]!));
-    }
-    const length = cum.at(-1)!;
-    const a = radius[g.edges.from[e]!]! + CLEAR, b = length - radius[g.edges.to[e]!]! - CLEAR;
-    if (b - a < 6) continue;
-    const c = ((back - fwd) * lw) / 2;
-    const lanes: [dir: 1 | -1, offset: number][] = [];
-    for (let i = 0; i < fwd; i++) lanes.push([1, c + (i + 0.5) * lw]);
-    for (let i = 0; i < back; i++) lanes.push([-1, c - (i + 0.5) * lw]);
-
-    for (const [dir, offset] of lanes) {
-      const gap = SPACING[cls];
-      for (let s = a + rand() * gap; s < b; s += gap * (0.4 + 1.2 * rand())) {
-        // The segment containing s.
-        let k = 1;
-        while (k < cum.length - 1 && cum[k]! < s) k++;
-        const i0 = p0 + k - 1, i1 = p0 + k;
-        const seg = cum[k]! - cum[k - 1]!, t = seg > 0 ? (s - cum[k - 1]!) / seg : 0;
-        const x0 = g.points[2 * i0]!, y0 = g.points[2 * i0 + 1]!, z0 = g.pointZ[i0]!;
-        const dx = g.points[2 * i1]! - x0, dy = g.points[2 * i1 + 1]! - y0, dz = g.pointZ[i1]! - z0;
-        const len3 = Math.hypot(dx, dy, dz) || 1, len2 = Math.hypot(dx, dy) || 1;
-        // Right of from → to is (dy, −dx); the lane offset is measured that way for both directions.
-        model.push(pick());
-        position.push(x0 + dx * t + (dy / len2) * offset, y0 + dy * t - (dx / len2) * offset, z0 + dz * t);
-        forward.push((dir * dx) / len3, (dir * dy) / len3, (dir * dz) / len3);
+    const gap = SPACING[ROAD_CLASSES[g.edges.class[e]!]!];
+    const length = g.edges.length[e]!;
+    for (const dir of [1, -1]) {
+      // From the entry node in this direction: clear of the disc there, and of the one at the far end.
+      const a = radius[dir > 0 ? g.edges.from[e]! : g.edges.to[e]!]! + CLEAR;
+      const b = length - radius[dir > 0 ? g.edges.to[e]! : g.edges.from[e]!]! - CLEAR;
+      for (let lane = 0; lane < edgeLanes(g, e, dir) && b - a >= 6; lane++) {
+        for (let s = a + rand() * gap; s < b; s += gap * (0.4 + 1.2 * rand())) {
+          out.model.push(pick());
+          out.edge.push(e);
+          out.dir.push(dir);
+          out.lane.push(lane);
+          out.s.push(s);
+        }
       }
     }
   }
   return {
-    count: model.length, model: Uint8Array.from(model), position: Float32Array.from(position), forward: Float32Array.from(forward),
+    count: out.model.length, model: Uint8Array.from(out.model), edge: Uint32Array.from(out.edge),
+    dir: Int8Array.from(out.dir), lane: Uint8Array.from(out.lane), s: Float32Array.from(out.s),
   };
+}
+
+/**
+ * Horizontal distance along each edge at each of its points (restarting at 0
+ * on every edge), indexed like graph points. Edge e's length is the value at
+ * its last point.
+ */
+export function edgeArcLengths(g: RoadGraph): Float32Array {
+  const cum = new Float32Array(g.pointZ.length);
+  for (let e = 0; e < g.edges.count; e++) {
+    for (let p = g.edges.pointStart[e]! + 1; p < g.edges.pointStart[e + 1]!; p++) {
+      cum[p] = cum[p - 1]! + Math.hypot(g.points[2 * p]! - g.points[2 * p - 2]!, g.points[2 * p + 1]! - g.points[2 * p - 1]!);
+    }
+  }
+  return cum;
+}
+
+/** Lateral offset of a lane's center, right of from → to positive. */
+export function laneOffset(g: RoadGraph, e: number, dir: number, lane: number): number {
+  const lw = ROAD_PROFILES[ROAD_CLASSES[g.edges.class[e]!]!].laneWidth;
+  const c = ((g.edges.lanesBack[e]! - g.edges.lanesFwd[e]!) * lw) / 2;
+  return dir > 0 ? c + (lane + 0.5) * lw : c - (lane + 0.5) * lw;
+}
+
+/**
+ * The pose of a car at a lane coordinate, written to out[o..o+6]: position
+ * (x, y, z, on the road surface) and unit forward vector (tilted with the
+ * road), in the graph's frame.
+ */
+export function lanePose(
+  g: RoadGraph, cum: Float32Array, e: number, dir: number, lane: number, s: number, out: Float32Array, o: number,
+): void {
+  const p0 = g.edges.pointStart[e]!, p1 = g.edges.pointStart[e + 1]! - 1;
+  const length = cum[p1]!;
+  const along = Math.min(length, Math.max(0, dir > 0 ? s : length - s));
+  // Binary search for the segment [k − 1, k] containing `along`.
+  let lo = p0 + 1, hi = p1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (cum[mid]! < along) lo = mid + 1;
+    else hi = mid;
+  }
+  const i0 = lo - 1, i1 = lo;
+  const seg = cum[i1]! - cum[i0]!, t = seg > 0 ? (along - cum[i0]!) / seg : 0;
+  const x0 = g.points[2 * i0]!, y0 = g.points[2 * i0 + 1]!, z0 = g.pointZ[i0]!;
+  const dx = g.points[2 * i1]! - x0, dy = g.points[2 * i1 + 1]! - y0, dz = g.pointZ[i1]! - z0;
+  const len2 = Math.hypot(dx, dy) || 1, len3 = Math.hypot(dx, dy, dz) || 1;
+  const off = laneOffset(g, e, dir, lane);
+  // Right of from → to is (dy, −dx).
+  out[o] = x0 + dx * t + (dy / len2) * off;
+  out[o + 1] = y0 + dy * t - (dx / len2) * off;
+  out[o + 2] = z0 + dz * t;
+  out[o + 3] = (dir * dx) / len3;
+  out[o + 4] = (dir * dy) / len3;
+  out[o + 5] = (dir * dz) / len3;
 }

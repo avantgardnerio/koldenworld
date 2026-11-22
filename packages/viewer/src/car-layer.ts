@@ -1,12 +1,11 @@
-// Vehicles (decision 27): one instanced draw per model per cell. Each model's
-// mesh is uploaded once and shared; each cell uploads its instances once
-// (position and forward vector in the cell frame) and is placed by the cell's
-// model matrix, so a frame costs no CPU work per car. Colors come from the
-// kit's shared palette texture. Models are double-sided (as the kit marks
+// Vehicles (decisions 27, 28): one instanced draw per model. Each model's mesh
+// is uploaded once; every frame the cars' poses (position and forward vector,
+// already in the view frame) are written into one instance buffer per model.
+// Colors come from the kit's shared palette texture. Models are double-sided (as the kit marks
 // them), nudged toward the camera like the roads they stand on.
 // Holds GPU handles only.
 
-import type { ModelMesh, VehiclePlacements } from "@game/world";
+import type { ModelMesh } from "@game/world";
 import type { Frame } from "./flat-layer.ts";
 
 const VERTEX = `#version 300 es
@@ -106,36 +105,27 @@ export function createCarModels(gl: WebGL2RenderingContext, models: ModelMesh[],
   return { meshes, texture, program: p };
 }
 
-export interface CarLayer {
-  readonly count: number;
-  draw(f: Frame, model: Float32Array, sun: readonly [number, number, number], bias: number): number;  // triangles drawn
-  dispose(): void;
+export interface CarInstances {
+  /** Per model: position (x, y, z) and forward (x, y, z) per car, in the view frame. */
+  data: Float32Array[];
+  count: number[];
 }
 
-/** One cell's cars: an instance buffer and a VAO per model present. */
-export function createCarLayer(gl: WebGL2RenderingContext, models: CarModels, cars: VehiclePlacements): CarLayer {
+export interface CarRenderer {
+  draw(f: Frame, sun: readonly [number, number, number], bias: number, cars: CarInstances): number;  // triangles drawn
+}
+
+const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+/** Moving cars: one instance buffer per model, refilled every frame. */
+export function createCarRenderer(gl: WebGL2RenderingContext, models: CarModels): CarRenderer {
   const p = models.program;
   const u = (name: string) => gl.getUniformLocation(p, name);
   const uView = u("u_view"), uModel = u("u_model"), uEye = u("u_eye"), uBias = u("u_bias"), uTex = u("u_tex");
   const uSky = u("u_sky"), uFog = u("u_fog"), uSun = u("u_sun");
 
-  // Instances grouped by model, so each model is one contiguous range.
-  const order = Array.from({ length: cars.count }, (_, i) => i).sort((a, b) => cars.model[a]! - cars.model[b]!);
-  const inst = new Float32Array(6 * cars.count);
-  order.forEach((i, k) => {
-    inst.set(cars.position.subarray(3 * i, 3 * i + 3), 6 * k);
-    inst.set(cars.forward.subarray(3 * i, 3 * i + 3), 6 * k + 3);
-  });
-  const ibuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, ibuf);
-  gl.bufferData(gl.ARRAY_BUFFER, inst, gl.STATIC_DRAW);
-
-  const draws: { vao: WebGLVertexArrayObject; mesh: CarModels["meshes"][number]; instances: number }[] = [];
-  for (let k = 0; k < order.length;) {
-    const m = cars.model[order[k]!]!;
-    let n = 0;
-    while (k + n < order.length && cars.model[order[k + n]!] === m) n++;
-    const mesh = models.meshes[m]!;
+  const perModel = models.meshes.map((mesh) => {
+    const ibuf = gl.createBuffer();
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
     [3, 3, 2].forEach((size, a) => {
@@ -146,22 +136,19 @@ export function createCarLayer(gl: WebGL2RenderingContext, models: CarModels, ca
     gl.bindBuffer(gl.ARRAY_BUFFER, ibuf);
     for (const [a, off] of [[3, 0], [4, 12]] as const) {
       gl.enableVertexAttribArray(a);
-      gl.vertexAttribPointer(a, 3, gl.FLOAT, false, 24, 24 * k + off);
+      gl.vertexAttribPointer(a, 3, gl.FLOAT, false, 24, off);
       gl.vertexAttribDivisor(a, 1);
     }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.ibo);
     gl.bindVertexArray(null);
-    draws.push({ vao, mesh, instances: n });
-    k += n;
-  }
+    return { vao, ibuf, mesh };
+  });
 
   return {
-    count: cars.count,
-    draw(f, model, sun, bias) {
-      if (draws.length === 0) return 0;
+    draw(f, sun, bias, cars) {
       gl.useProgram(p);
       gl.uniformMatrix4fv(uView, false, f.view);
-      gl.uniformMatrix4fv(uModel, false, model);
+      gl.uniformMatrix4fv(uModel, false, IDENTITY);
       gl.uniform3f(uEye, f.eye[0], f.eye[1], f.eye[2]);
       gl.uniform1f(uBias, bias);
       gl.uniform3fv(uSky, f.sky);
@@ -172,17 +159,17 @@ export function createCarLayer(gl: WebGL2RenderingContext, models: CarModels, ca
       gl.uniform1i(uTex, 0);
       gl.depthFunc(gl.LEQUAL);
       let tris = 0;
-      for (const d of draws) {
-        gl.bindVertexArray(d.vao);
-        gl.drawElementsInstanced(gl.TRIANGLES, d.mesh.count, gl.UNSIGNED_INT, 0, d.instances);
-        tris += d.mesh.triangles * d.instances;
-      }
+      perModel.forEach(({ vao, ibuf, mesh }, m) => {
+        const n = cars.count[m]!;
+        if (n === 0) return;
+        gl.bindBuffer(gl.ARRAY_BUFFER, ibuf);
+        gl.bufferData(gl.ARRAY_BUFFER, cars.data[m]!.subarray(0, 6 * n), gl.DYNAMIC_DRAW);
+        gl.bindVertexArray(vao);
+        gl.drawElementsInstanced(gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0, n);
+        tris += mesh.triangles * n;
+      });
       gl.bindVertexArray(null);
       return tris;
-    },
-    dispose() {
-      for (const d of draws) gl.deleteVertexArray(d.vao);
-      gl.deleteBuffer(ibuf);
     },
   };
 }

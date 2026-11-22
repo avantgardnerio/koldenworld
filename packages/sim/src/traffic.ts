@@ -1,0 +1,125 @@
+// Traffic (decision 28): cars on the road graph, one row each in a Table.
+//
+// A car is on (cell, edge) travelling in direction dir (+1 from → to, −1
+// to → from), in a lane counted from the left of its direction (0 is next to
+// the center line), `s` meters past the node it entered at. Cars drive
+// through each other for now: no following, no right of way.
+//
+// Speed comes from the road, not the driver: the speed limit in the rightmost
+// lane, 10 mph faster for each lane to its left, as people actually drive.
+// Cars accelerate and brake toward that at fixed rates.
+//
+// The step is a batch pass over the columns (speed and distance for every
+// car) followed by a row pass with a cursor for the few cars that reached the
+// end of their road: pick a way onward (no U-turns unless it's a dead end),
+// pick a lane on the new road, or leave the simulation where nothing goes on.
+
+import type { Rng } from "./rng.ts";
+import { Table } from "./table.ts";
+
+export const MPH = 0.44704;               // m/s
+export const LANE_BONUS = 10 * MPH;       // per lane left of the rightmost
+export const ACCELERATION = 2.5;          // m/s²
+export const BRAKING = 4;                 // m/s²
+
+export const CAR = {
+  model: Uint8Array,
+  cell: Uint16Array,    // the viewer's slot for the cell the car's edge belongs to
+  edge: Uint32Array,
+  dir: Int8Array,
+  lane: Uint8Array,     // from the left of its direction
+  s: Float32Array,      // m past the entry node
+  speed: Float32Array,  // m/s
+  length: Float32Array, // m, the current edge's (copied on entry, so the batch pass needs no lookups)
+  target: Float32Array, // m/s, the current lane's
+} as const;
+export type Cars = Table<typeof CAR>;
+export const createCars = (capacity = 1024): Cars => new Table(CAR, capacity);
+
+/** The road network the sim drives on: edges of the loaded cells, joined at shared OSM nodes. */
+export interface RoadNet {
+  length(cell: number, edge: number): number;
+  speedLimit(cell: number, edge: number): number;   // m/s
+  lanes(cell: number, edge: number, dir: number): number;
+  /** Ways onward from the end of (cell, edge) travelled in dir: appends (cell, edge, dir) triples to out. */
+  exits(cell: number, edge: number, dir: number, out: number[]): void;
+}
+
+/** Target speed in a lane: the limit on the right, +10 mph per lane further left. */
+export const laneSpeed = (limit: number, lanes: number, lane: number) => limit + LANE_BONUS * (lanes - 1 - lane);
+
+export interface CarStart {
+  model: number;
+  cell: number;
+  edge: number;
+  dir: number;
+  lane: number;
+  s: number;
+}
+
+/** Adds a car at rest. Returns its row. */
+export function spawnCar(cars: Cars, net: RoadNet, a: CarStart): number {
+  const i = cars.add();
+  const c = cars.c, lanes = net.lanes(a.cell, a.edge, a.dir);
+  c.model[i] = a.model;
+  c.cell[i] = a.cell;
+  c.edge[i] = a.edge;
+  c.dir[i] = a.dir;
+  c.lane[i] = Math.min(a.lane, lanes - 1);
+  c.s[i] = a.s;
+  c.length[i] = net.length(a.cell, a.edge);
+  c.target[i] = laneSpeed(net.speedLimit(a.cell, a.edge), lanes, c.lane[i]!);
+  return i;
+}
+
+/** Removes every car whose cell fails the test (cells left behind). */
+export function removeCars(cars: Cars, keepCell: (cell: number) => boolean): void {
+  const cell = cars.c.cell;
+  for (let i = cars.count - 1; i >= 0; i--) if (!keepCell(cell[i]!)) cars.remove(i);
+}
+
+const exits: number[] = [];
+
+export function stepTraffic(cars: Cars, net: RoadNet, dt: number, rng: Rng): void {
+  // Batch: speed toward the lane's target, then distance. Every car, no branching on state.
+  const { speed, target, s, length } = cars.c;
+  const n = cars.count, up = ACCELERATION * dt, down = -BRAKING * dt;
+  for (let i = 0; i < n; i++) {
+    const v = speed[i]!;
+    const nv = v + Math.min(up, Math.max(down, target[i]! - v));
+    speed[i] = nv;
+    s[i]! += nv * dt;
+  }
+
+  // Rows: cars past the end of their edge move on (possibly across several short edges in one step).
+  // Downward, so a removal moves an already-handled row into the current slot.
+  const car = cars.cursor();
+  for (let i = n - 1; i >= 0; i--) {
+    if (s[i]! < length[i]!) continue;
+    car.i = i;
+    while (car.s >= car.length) {
+      exits.length = 0;
+      net.exits(car.cell, car.edge, car.dir, exits);
+      // Onward, not back the way it came, unless that is the only way.
+      let options = 0;
+      for (let k = 0; k < exits.length; k += 3) {
+        const uTurn = exits[k] === car.cell && exits[k + 1] === car.edge && exits[k + 2] === -car.dir;
+        if (!uTurn) exits[3 * options] = exits[k]!, exits[3 * options + 1] = exits[k + 1]!, exits[3 * options++ + 2] = exits[k + 2]!;
+      }
+      if (options === 0 && exits.length === 0) {
+        cars.remove(i);
+        break;
+      }
+      const k = 3 * (options > 0 ? rng.int(options) : 0);
+      const [cell, edge, dir] = [exits[k]!, exits[k + 1]!, exits[k + 2]!];
+      const lanes = net.lanes(cell, edge, dir);
+      car.s -= car.length;
+      car.cell = cell;
+      car.edge = edge;
+      car.dir = dir;
+      car.lane = rng.int(lanes);
+      car.length = net.length(cell, edge);
+      car.target = laneSpeed(net.speedLimit(cell, edge), lanes, car.lane);
+    }
+  }
+}
