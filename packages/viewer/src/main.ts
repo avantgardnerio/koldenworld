@@ -307,7 +307,8 @@ async function start(): Promise<void> {
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     let carTriangles = 0;
     if (carRenderer && showCars) {
-      const near = (tc: TrafficCell) => Math.hypot(tc.model[12]!, tc.model[13]!, tc.model[14]! - camera.h);
+      // Horizontal distance to the cell's anchor (which sits at the ellipsoid, not at the ground or the camera).
+      const near = (tc: TrafficCell) => Math.hypot(tc.model[12]!, tc.model[13]!);
       traffic.update(dt, near, CAR_DISTANCE, 1.3 * CAR_DISTANCE, moving);
       traffic.instances(carInstances);
       carTriangles = carRenderer.draw(f, SUN, ROAD_BIAS, carInstances);

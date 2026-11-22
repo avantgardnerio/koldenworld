@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  buildCell, CELL_LEVEL, CELL_TABLES, cellCenter, cellFromLatLon, cellToArrow, cellToken, edgeArcLengths, enuFrame,
+  buildCell, CELL_LEVEL, CELL_TABLES, cellCenter, cellFromLatLon, cellToArrow, cellToken, drapeCell, edgeArcLengths, enuFrame,
   enuUnprojection, lanePose, placeVehicles,
   type BuildingInput, type RoadWayInput,
 } from "@game/world";
@@ -217,12 +217,23 @@ describe("vehicles", () => {
 });
 
 describe("traffic", () => {
+  // The fixture raised to 1,600 m, like Denver: distances to cells must not count the elevation.
+  const GROUND_H = 1600;
   let moving: Session;
+  let highDir: string;
   beforeAll(async () => {
+    highDir = await mkdtemp(path.join(tmpdir(), "viewer-e2e-high-"));
+    const files = cellToArrow(drapeCell(buildCell(cell, ways, buildings), () => GROUND_H));
+    const cellDir = path.join(highDir, "cells", cellToken(cell));
+    await mkdir(cellDir, { recursive: true });
+    for (const t of CELL_TABLES) await writeFile(path.join(cellDir, `${t}.arrow`), files[t]);
     const [x, y] = firstCar();
-    moving = await openViewer({ dataDir: dir, query: "radius=300", hash: at(x, y, Z * 0.1, 0, -90), width: W, height: H });
+    moving = await openViewer({ dataDir: highDir, query: "radius=300", hash: at(x, y, GROUND_H + Z * 0.1, 0, -90), width: W, height: H });
   }, 60_000);
-  afterAll(async () => { await moving?.close(); });
+  afterAll(async () => {
+    await moving?.close();
+    await rm(highDir, { recursive: true, force: true });
+  });
 
   it("drives the cars off from rest along their lanes", async () => {
     const [, , fx, fy] = firstCar();
