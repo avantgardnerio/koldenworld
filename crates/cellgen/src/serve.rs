@@ -52,7 +52,7 @@ async fn table(
     let Some(c) = Cell::from_token(&token) else {
         return (
             StatusCode::BAD_REQUEST,
-            format!("{token} isn't a level-13 cell\n"),
+            format!("{token} isn't a cell token\n"),
         )
             .into_response();
     };
@@ -106,7 +106,7 @@ fn build(app: &App, c: &Cell) -> Result<(), Box<dyn std::error::Error + Send + S
             data: &app.data,
         },
         c,
-        &cell::Options::default(),
+        &cell::Options::for_level(c.level),
         None,
     )
     .map_err(|e| e.to_string())?;

@@ -24,7 +24,8 @@ use std::path::PathBuf;
 const USAGE: &str = "usage:
   cellgen cell <token | lat,lon>... [--pictures] [--ways <file.json> [--height <m>]] [--out <dir>]
                [--min-class <class>] [--simplify <m>] [--terrain <n>] [--no-markings] [--no-sidewalks]
-      build cells: <out>/<token>/ (default out: data/rust-cells), pictures in target/. With --ways, from those ways
+      build cells (at any level; level 10 and coarser draw less, as cell::Options::for_level; the flags override it):
+      <out>/<token>/ (default out: data/rust-cells), pictures in target/. With --ways, from those ways
       (JSON, as the TS RoadWayInput) instead of the database: no water, terrain flat at --height (default 0)
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
@@ -47,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(cell::Cell::at(lat.trim().parse()?, lon.trim().parse()?))
                     }
                     None => cell::Cell::from_token(what)
-                        .ok_or_else(|| format!("{what} isn't a level-13 cell").into()),
+                        .ok_or_else(|| format!("{what} isn't a cell token").into()),
                 })
                 .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
             if cells.is_empty() {
@@ -58,20 +59,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|f| ways::from_json(&std::fs::read_to_string(f)?))
                 .transpose()?;
             let height: f64 = value("--height")?.map_or(Ok(0.0), |h| h.parse())?;
-            let options = cell::Options {
-                min_class: value("--min-class")?
-                    .map(|c| {
-                        ways::ROAD_CLASSES
-                            .iter()
-                            .position(|k| k == c)
-                            .map(|i| i as u8)
-                            .ok_or_else(|| format!("unknown road class {c}"))
-                    })
-                    .transpose()?,
-                simplify: value("--simplify")?.map_or(Ok(0.0), |m| m.parse())?,
-                terrain: value("--terrain")?.map_or(Ok(cell::TERRAIN_N), |n| n.parse())?,
-                markings: flag("--no-markings").is_none(),
-                sidewalks: flag("--no-sidewalks").is_none(),
+            // Each cell's level decides what it draws (Options::for_level); these flags override it.
+            let min_class = value("--min-class")?
+                .map(|c| {
+                    ways::ROAD_CLASSES
+                        .iter()
+                        .position(|k| k == c)
+                        .map(|i| i as u8)
+                        .ok_or_else(|| format!("unknown road class {c}"))
+                })
+                .transpose()?;
+            let simplify: Option<f64> = value("--simplify")?.map(|m| m.parse()).transpose()?;
+            let terrain: Option<usize> = value("--terrain")?.map(|n| n.parse()).transpose()?;
+            let options = |c: &cell::Cell| {
+                let mut o = cell::Options::for_level(c.level);
+                o.min_class = min_class.or(o.min_class);
+                o.simplify = simplify.unwrap_or(o.simplify);
+                o.terrain = terrain.unwrap_or(o.terrain);
+                o.markings &= flag("--no-markings").is_none();
+                o.sidewalks &= flag("--no-sidewalks").is_none();
+                o
             };
             let (mut client, data) = match fixture {
                 Some(_) => (None, None),
@@ -91,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (None, Some(db), Some(data)) => cell::Source::Postgres { db, data },
                     _ => unreachable!(),
                 };
-                let built = cell::build(source, c, &options, pictures.as_deref())?;
+                let built = cell::build(source, c, &options(c), pictures.as_deref())?;
                 let dir = out.join(&c.token);
                 std::fs::create_dir_all(&dir)?;
                 std::fs::write(dir.join("ground.arrow"), &built.ground)?;

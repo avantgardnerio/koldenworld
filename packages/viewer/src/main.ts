@@ -5,9 +5,14 @@
 //   graph overlay (toggle with G); radius: fixed load radius instead of the
 //   horizon; planes=0: no live air traffic. The URL describes the whole view.
 //
-// Cells come from /cells/<token>/<table>.arrow (the cell server, through the
-// dev server's proxy). Every cell within the horizon is loaded, nearest first,
-// up to MAX_RADIUS; a cell with no files (404) is drawn as bare ground.
+// Two tiers of ground from the Rust generator (/ground/<token>/…): coarse
+// tiles (S2 level 10, ~9 km: major roads, water, coarse terrain) out to the
+// horizon (up to MAX_RADIUS), and fine cells (level 13, ~1.1 km: everything)
+// within FINE_DISTANCE of the camera, with their roads, buildings and terrain
+// from the cell server (/cells/<token>…; a cell with none, 404, is bare
+// ground). Only what's in view loads: coarse tiles first, then fine cells,
+// each nearest first. Fine cells cover the coarse ground under them (stencil),
+// so a coarse tile shows wherever its fine cells haven't loaded.
 //
 // Frames are rendered only while something changes: a held key or mouse
 // movement starts the loop, and it stops (and writes the pose to the URL) once
@@ -17,7 +22,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, enuUnprojection, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
@@ -40,7 +45,7 @@ import {
 export interface ViewerStatus {
   state: "loading" | "ready" | "error";
   error?: string;
-  cells: { ready: number; loading: number; queued: number; failed: number; missing: number; drawn: number };
+  cells: { ready: number; loading: number; queued: number; failed: number; missing: number; coarse: number; drawn: number };
   radius: number;
   nodes: number;
   edges: number;
@@ -62,8 +67,14 @@ declare global {
   interface Window { viewer: ViewerStatus }
 }
 
-/** Beyond this, the horizon needs coarser data (level of detail), which doesn't exist yet. */
+/** Beyond this, the horizon needs a coarser tier, which doesn't exist yet. */
 const MAX_RADIUS = 25_000;
+/** The coarse tier's S2 level (as cellgen's COARSE_LEVEL): ground only, drawn where fine cells aren't. */
+const COARSE_LEVEL = 10;
+/** Fine cells load within this straight-line distance (m) of the camera, so none load from high up. */
+const FINE_DISTANCE = 3000;
+/** Room for the terrain's relief around a cell's bounding sphere when deciding if it's in view, m. */
+const RELIEF = 1000;
 /** Cells stay loaded out to this multiple of the load radius, so the edge doesn't thrash. */
 const KEEP_FACTOR = 1.3;
 /** The load radius moves in steps of this (m), so climbing doesn't recompute the wanted cells every frame. */
@@ -85,7 +96,7 @@ const showCars = params.get("cars") !== "0";
 const moving = showCars && params.get("traffic") !== "0";
 const showPlanes = params.get("planes") !== "0";
 const status: ViewerStatus = (window.viewer = {
-  state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0, drawn: 0 }, radius: 0,
+  state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0, coarse: 0, drawn: 0 }, radius: 0,
   nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0, simTime: 0, aircraft: 0,
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
@@ -103,6 +114,13 @@ async function getBlob(path: string): Promise<Uint8Array | null> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
+/** A bounding sphere around (0, 0, centerZ) for positions (x, y, z interleaved) reaching `flat` m sideways. */
+function bounds(positions: Float32Array, flat: number): { centerZ: number; radius: number } {
+  let z0 = Infinity, z1 = -Infinity;
+  for (let i = 2; i < positions.length; i += 3) { z0 = Math.min(z0, positions[i]!); z1 = Math.max(z1, positions[i]!); }
+  return { centerZ: (z0 + z1) / 2, radius: Math.hypot(flat, (z1 - z0) / 2) };
+}
+
 /** Farthest horizontal distance of interleaved points from the origin. */
 function reach(points: ArrayLike<number>, stride: number): number {
   let r2 = 0;
@@ -112,6 +130,7 @@ function reach(points: ArrayLike<number>, stride: number): number {
 
 interface CellGpu {
   frame: CellFrame;
+  coarse: boolean;  // a coarse tile: ground only
   missing: boolean;
   radius: number;  // bounding sphere around (0, 0, centerZ) in the frame, m: the ground, roads, building tops
   centerZ: number;
@@ -140,7 +159,7 @@ async function loadCarModels(gl: WebGL2RenderingContext): Promise<CarModels> {
 async function start(): Promise<void> {
   const canvas = document.querySelector("canvas")!;
   const hud = document.querySelector<HTMLElement>("#hud")!;
-  const gl = canvas.getContext("webgl2", { antialias: true });
+  const gl = canvas.getContext("webgl2", { antialias: true, stencil: true });
   if (!gl) throw new Error("WebGL2 is not available");
 
   const traffic = new TrafficView(1);
@@ -155,12 +174,20 @@ async function start(): Promise<void> {
         if (!v || !t) throw new Error(`/ground/${token}: no ground`);
         return groundFromArrow(v, t);
       });
+    const frame = cellFrame(cell);
+    const zero = { nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0 };
+    if (cellLevel(cell) !== CELL_LEVEL) {
+      const mesh = await ground;
+      return {
+        frame, coarse: true, missing: false, model: new Float32Array(16), terrain: flatTerrain(),
+        ground: createSolidLayer(gl!, mesh, GROUND), ...bounds(mesh.positions, reach(mesh.positions, 3)),
+        counts: { ...zero, surfaceTriangles: mesh.indices.length / 3 },
+      };
+    }
     // Every other table in one response from the cell server; a file per table when served as static files.
     const packed = await getBlob(`/cells/${token}.cell`);
     const files = packed && unpackCellFiles(packed);
     const blobs = files ? CELL_TABLES.map((t) => files[t]) : await Promise.all(CELL_TABLES.map((t) => getBlob(`/cells/${token}/${t}.arrow`)));
-    const frame = cellFrame(cell);
-    const zero = { nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0 };
     const missing = blobs.some((b) => b === null);
     const c = missing ? null : cellFromArrow(Object.fromEntries(CELL_TABLES.map((t, i) => [t, blobs[i]!])) as unknown as CellFiles);
     if (c && c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);
@@ -174,7 +201,7 @@ async function start(): Promise<void> {
     const sphere = (flat: number) => ({ centerZ: (z0 + z1) / 2, radius: Math.hypot(flat, (z1 - z0) / 2) });
     const groundReach = reach(mesh.positions, 3);
     const counts = { ...zero, surfaceTriangles: mesh.indices.length / 3 };
-    if (!c) return { frame, missing: true, ...sphere(groundReach), model, terrain, ground: layer, counts };
+    if (!c) return { frame, coarse: false, missing: true, ...sphere(groundReach), model, terrain, ground: layer, counts };
     const lines = roadLineMesh(c.graph);
     const tris = buildingMesh(c.buildings);
     // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
@@ -182,6 +209,7 @@ async function start(): Promise<void> {
     for (let i = 0; i < c.buildings.count; i++) z1 = Math.max(z1, c.buildings.base[i]! + c.buildings.height[i]!);
     return {
       frame,
+      coarse: false,
       missing: false,
       ...sphere(flat),
       model,
@@ -232,6 +260,12 @@ async function start(): Promise<void> {
     if (g) lastGround = terrainHeightAt(cell, g.terrain, lat, lon);
     return lastGround;
   };
+  /** Roughly the ground's height under a point: from its fine cell, else the middle of its coarse tile's heights. */
+  const roughGroundAt = (lat: number, lon: number): number => {
+    const fine = streamer.get(cellFromLatLon(lat, lon, CELL_LEVEL));
+    if (fine) return groundAt(lat, lon);
+    return streamer.get(cellFromLatLon(lat, lon, COARSE_LEVEL))?.centerZ ?? lastGround;
+  };
 
   // Live aircraft: drawn on the loaded terrain when taxiing; elsewhere on the ground under the camera.
   const air = new AirTraffic((lat, lon) => {
@@ -246,30 +280,58 @@ async function start(): Promise<void> {
   const contrailLayer = showPlanes ? createContrailLayer(gl) : undefined;
   air.onUpdate = () => wake();
 
-  // --- which cells: refreshed when the camera enters another cell or the radius steps ---
-  let refreshedCell: CellId | null = null;
-  let refreshedRadius = 0;
-  const refreshCells = () => {
-    const radius = loadRadius(camera.h - groundAt(camera.lat, camera.lon));
-    const here = cellFromLatLon(camera.lat, camera.lon, CELL_LEVEL);
-    if (here === refreshedCell && radius === refreshedRadius) return;
-    refreshedCell = here;
-    refreshedRadius = radius;
+  // --- which cells: every frame, from what's in view ---
+  /** A cell's center and how far its corners reach from it, at the ellipsoid: for its bounding sphere. Cached. */
+  const outlines = new Map<CellId, { lat: number; lon: number; reach: number }>();
+  const outlineOf = (cell: CellId) => {
+    let o = outlines.get(cell);
+    if (!o) {
+      if (outlines.size > 20_000) outlines.clear();
+      const { center, corners } = cellOutline(cell);
+      const c = geodeticToEcef({ ...center, h: 0 });
+      const reach = Math.max(...corners.map((k) => {
+        const p = geodeticToEcef({ ...k, h: 0 });
+        return Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]);
+      }));
+      outlines.set(cell, o = { ...center, reach });
+    }
+    return o;
+  };
+  const refreshCells = (planes: Float64Array, vf: CellFrame) => {
+    // Before the fine cell under the camera loads, its coarse tile says roughly how high the camera is.
+    const ground = roughGroundAt(camera.lat, camera.lon), above = camera.h - ground;
+    const radius = loadRadius(above);
+    const fine = Math.min(FINE_DISTANCE, radius);
     status.radius = radius;
-    const around = cellsWithin(camera.lat, camera.lon, radius * KEEP_FACTOR);
-    streamer.update(around.filter((c) => c.distance <= radius).map((c) => c.cell), new Set(around.map((c) => c.cell)));
+    // In view: the cell's bounding sphere, at the height of the ground under the camera, with room for relief.
+    const inView = (cell: CellId) => {
+      const o = outlineOf(cell);
+      const [x, y, z] = ecefToLocal(vf, geodeticToEcef({ lat: o.lat, lon: o.lon, h: ground }));
+      return sphereVisible(planes, x, y, z, o.reach + RELIEF);
+    };
+    const coarse = cellsWithin(camera.lat, camera.lon, radius * KEEP_FACTOR, COARSE_LEVEL);
+    // Fine cells by straight-line distance: from high up, none.
+    const near = above < fine * KEEP_FACTOR
+      ? cellsWithin(camera.lat, camera.lon, Math.sqrt((fine * KEEP_FACTOR) ** 2 - above ** 2), CELL_LEVEL)
+          .map((c) => ({ cell: c.cell, distance: Math.hypot(c.distance, above) }))
+      : [];
+    const wanted = [...coarse.filter((c) => c.distance <= radius), ...near.filter((c) => c.distance <= fine)]
+      .map((c) => c.cell)
+      .filter(inView);
+    streamer.update(wanted, new Set([...coarse, ...near].map((c) => c.cell)));
     updateStatus();
   };
 
   const updateStatus = () => {
     const totals = { nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0 };
-    let missing = 0;
+    let missing = 0, coarse = 0;
     for (const [, g] of streamer.ready()) {
       for (const k of Object.keys(totals) as (keyof typeof totals)[]) totals[k] += g.counts[k];
       if (g.missing) missing++;
+      if (g.coarse) coarse++;
     }
     const { ready, loading, queued, failed } = streamer.counts();
-    Object.assign(status, totals, { cells: { ready, loading, queued, failed, missing, drawn: status.cells.drawn } });
+    Object.assign(status, totals, { cells: { ready, loading, queued, failed, missing, coarse, drawn: status.cells.drawn } });
     if (status.state === "loading" && streamer.settled) status.state = "ready";
   };
 
@@ -289,7 +351,6 @@ async function start(): Promise<void> {
     // Terrain may have arrived under the camera since it last moved.
     const ground = groundAt(camera.lat, camera.lon);
     if (camera.h < ground + MIN_ALTITUDE) camera = { ...camera, h: ground + MIN_ALTITUDE };
-    refreshCells();
     const dpr = devicePixelRatio;
     const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
     if (canvas.width !== w || canvas.height !== h) {
@@ -299,7 +360,8 @@ async function start(): Promise<void> {
     gl.viewport(0, 0, w, h);
     gl.clearColor(SKY[0]!, SKY[1]!, SKY[2]!, 1);
     gl.enable(gl.DEPTH_TEST);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.clearStencil(0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
     const local = localCamera(camera);
     const f = {
       view: viewProjection(local, aspect()),
@@ -311,6 +373,7 @@ async function start(): Promise<void> {
     // Frustum culling: a cell's frame origin lands at the model matrix's translation.
     const vf = viewFrame(camera);
     const planes = frustumPlanes(f.view);
+    refreshCells(planes, vf);
     visible.length = 0;
     streamer.forEachReady((g) => {
       frameToFrame(g.frame, vf, g.model);
@@ -321,7 +384,16 @@ async function start(): Promise<void> {
     });
     status.cells.drawn = visible.length;
     // The ground first, then airport surfaces nudged toward the camera, then buildings; everything depth-tested.
-    for (const g of visible) g.ground.draw(f, g.model, SUN);
+    // Fine ground marks the stencil; coarse ground draws only where it isn't marked, so a coarse tile shows only
+    // where its fine cells haven't loaded.
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    for (const g of visible) if (!g.coarse) g.ground.draw(f, g.model, SUN);
+    gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    for (const g of visible) if (g.coarse) g.ground.draw(f, g.model, SUN);
+    gl.disable(gl.STENCIL_TEST);
     for (const g of visible) g.aeroways?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
@@ -355,9 +427,11 @@ async function start(): Promise<void> {
     status.frames++;
     cpuMs = performance.now() - t0;
     const c = status.cells;
-    const agl = camera.h - ground;
+    // Before the fine cell under the camera loads (or from high up, where none do), its coarse tile's height.
+    const below = roughGroundAt(camera.lat, camera.lon);
+    const agl = camera.h - below;
     hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
-      `(${ground.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing}` +
+      `(${below.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
       `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars (${(carTriangles / 1e6).toFixed(1)}M tris) · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
   };

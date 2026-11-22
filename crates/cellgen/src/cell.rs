@@ -8,7 +8,7 @@
 //! 5. The terrain lattice's heights, the ground cut by its triangles and draped (terrain.rs), and triangulated into
 //!    buffers in the cell's ENU frame (mesh.rs), checked against the cell's own area at the ground's height.
 
-use crate::ways::RoadWays;
+use crate::ways::{ROAD_CLASSES, RoadWays};
 use crate::{
     clip, crossings, draw, elevation, faces, geodesy, geom, graph, ground_arrow, markings, mesh,
     polygon, s2, simplify, terrain, water, ways, widths,
@@ -40,6 +40,7 @@ pub const TERRAIN_N: usize = 64;
 /// A cell: its cube face, its (s, t) square, its token.
 pub struct Cell {
     pub face: u32,
+    pub level: u32,
     pub square: [f64; 4],
     pub token: String,
 }
@@ -54,6 +55,29 @@ pub struct Options {
     pub terrain: usize,
     pub markings: bool,
     pub sidewalks: bool,
+}
+
+/// The coarse tier: tiles at this level (about 9 km across), drawn where fine cells aren't loaded.
+pub const COARSE_LEVEL: u32 = 10;
+
+impl Options {
+    /// What a cell at `level` draws: everything at the cells' level (13), and at the coarse tier (and above) the
+    /// secondary roads and up, simplified to 2 m, on a 32-square lattice, without markings or sidewalks.
+    pub fn for_level(level: u32) -> Options {
+        if level > COARSE_LEVEL {
+            return Options::default();
+        }
+        Options {
+            min_class: ROAD_CLASSES
+                .iter()
+                .position(|c| *c == "secondary")
+                .map(|i| i as u8),
+            simplify: 2.0,
+            terrain: 32,
+            markings: false,
+            sidewalks: false,
+        }
+    }
 }
 
 impl Default for Options {
@@ -82,6 +106,7 @@ impl Cell {
         let square = s2::cell_square(st, s2::CELL_LEVEL);
         Cell {
             face,
+            level: s2::CELL_LEVEL,
             square,
             token: s2::token(s2::cell_id(face, st, s2::CELL_LEVEL)),
         }
@@ -98,6 +123,7 @@ impl Cell {
         );
         (s2::token(id) == token).then(|| Cell {
             face,
+            level,
             square,
             token: token.to_string(),
         })

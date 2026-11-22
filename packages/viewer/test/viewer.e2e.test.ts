@@ -77,7 +77,8 @@ const cellgen = path.join(repo, "crates/cellgen");
 async function writeGround(dataDir: string, height = 0) {
   const waysFile = path.join(dataDir, "ways.json");
   await writeFile(waysFile, JSON.stringify(ways));
-  const cells = cellsWithin(O.lat, O.lon, 2000).map((c) => cellToken(c.cell));
+  // Fine cells around the fixture, and coarse tiles (level 10) out past the load radius.
+  const cells = [...cellsWithin(O.lat, O.lon, 2000), ...cellsWithin(O.lat, O.lon, 3000, 10)].map((c) => cellToken(c.cell));
   execFileSync(path.join(cellgen, "target/release/cellgen"),
     ["cell", ...cells, "--ways", waysFile, "--height", String(height), "--out", path.join(dataDir, "ground")], { stdio: "ignore" });
 }
@@ -111,7 +112,8 @@ describe("viewer", () => {
     const s = await viewer.status();
     expect(s).toMatchObject({ state: "ready", nodes: 5, edges: 4, buildings: 2, buildingTriangles: 2 * (8 + 2), graphOverlay: false });
     expect(s.cells.ready).toBeGreaterThan(1);
-    expect(s.cells).toMatchObject({ missing: s.cells.ready - 1, failed: 0, loading: 0, queued: 0 });
+    expect(s.cells.coarse).toBeGreaterThan(0);
+    expect(s.cells).toMatchObject({ missing: s.cells.ready - s.cells.coarse - 1, failed: 0, loading: 0, queued: 0 });
     // Looking straight down from ~260 m: only cells under the view are drawn.
     expect(s.cells.drawn).toBeGreaterThan(0);
     expect(s.cells.drawn).toBeLessThan(s.cells.ready);
