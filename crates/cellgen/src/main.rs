@@ -1,5 +1,6 @@
 mod clip;
 mod draw;
+mod elevation;
 mod faces;
 mod geom;
 mod graph;
@@ -317,6 +318,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         size: 4096,
     };
     draw::draw_png(&fills, &cell_frame, path)?;
+    // Terrain: heights above the WGS84 ellipsoid at the cell's (n + 1)² lattice, evenly spaced in (s, t), row by row
+    // (t outer, s inner), as the TS terrain (TERRAIN_N = 64).
+    let started = std::time::Instant::now();
+    let n = 64;
+    let elevation = elevation::Elevation::region(
+        std::path::Path::new("../../data/dem"),
+        [west, south, east, north],
+    )?;
+    let heights: Vec<f64> = (0..=n)
+        .flat_map(|b| (0..=n).map(move |a| (a, b)))
+        .map(|(a, b)| {
+            let st = [
+                cell[0] + (cell[2] - cell[0]) * a as f64 / n as f64,
+                cell[1] + (cell[3] - cell[1]) * b as f64 / n as f64,
+            ];
+            let (lat, lon) = s2::st_to_lat_lon(face, st);
+            elevation.height(lat, lon)
+        })
+        .collect();
+    let (lo, hi) = heights
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
+    println!(
+        "terrain: {}² heights in {:.0?}, {lo:.2}..{hi:.2} m above the ellipsoid; {} without data",
+        n + 1,
+        started.elapsed(),
+        elevation.missing.get()
+    );
+    std::fs::write(
+        "target/heights.txt",
+        heights
+            .iter()
+            .map(|h| format!("{h:.4}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )?;
+    let spacing = metric.to_m.col(0).length() * (cell[2] - cell[0]) / n as f64;
+    draw::draw_heights(&heights, n, spacing, "target/heights.png")?;
+
     // Close up: the busiest marked junction in the cell (most marked roads meeting), 70 m across.
     let marked = |e: usize| widths::profile(ways.class[graph.edge_way[e] as usize]).2;
     let in_cell =

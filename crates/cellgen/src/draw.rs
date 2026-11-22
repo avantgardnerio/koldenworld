@@ -77,3 +77,46 @@ pub fn draw_png(
     pixmap.save_png(path)?;
     Ok(())
 }
+
+/// A height grid ((n + 1)², rows from t = 0 up) as a shaded relief: grey by height, lit from the northwest. `spacing`
+/// is the grid's spacing in metres (for the slopes).
+pub fn draw_heights(
+    heights: &[f64],
+    n: usize,
+    spacing: f64,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let side = n + 1;
+    let (lo, hi) = heights
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
+    let scale = 8; // pixels per sample
+    let mut pixmap = tiny_skia::Pixmap::new((side * scale) as u32, (side * scale) as u32)
+        .ok_or("bad image size")?;
+    let at = |a: usize, b: usize| heights[b.min(n) * side + a.min(n)];
+    for b in 0..side {
+        for a in 0..side {
+            let (dzs, dzt) = (
+                (at(a + 1, b) - at(a.saturating_sub(1), b)) / (2.0 * spacing),
+                (at(a, b + 1) - at(a, b.saturating_sub(1))) / (2.0 * spacing),
+            );
+            let shade = (0.5 + 2.0 * (-dzs + dzt)).clamp(0.0, 1.0);
+            let grey = (at(a, b) - lo) / (hi - lo).max(1e-9);
+            let v = (40.0 + 150.0 * grey + 65.0 * shade) as u8;
+            let paint = tiny_skia::Paint {
+                shader: tiny_skia::Shader::SolidColor(tiny_skia::Color::from_rgba8(v, v, v, 255)),
+                ..Default::default()
+            };
+            let rect = tiny_skia::Rect::from_xywh(
+                (a * scale) as f32,
+                ((n - b) * scale) as f32,
+                scale as f32,
+                scale as f32,
+            )
+            .ok_or("rect")?;
+            pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
+        }
+    }
+    pixmap.save_png(path)?;
+    Ok(())
+}
