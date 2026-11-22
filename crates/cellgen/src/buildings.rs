@@ -33,6 +33,11 @@ pub const SIMPLIFY: f64 = 1.0;
 pub const OUTLINE: f64 = 3.0;
 /// At least this tall, m: a tower, kept on its own.
 pub const TOWER: f64 = 40.0;
+/// Walls meeting at less than this share a normal at their corner (curves shade smoothly); at more, a crease (as the
+/// TS building mesh's CREASE).
+const CREASE_COS: f64 = 0.866; // cos 30°
+/// The bottom of a wall this high, m, darkens toward the ground (the normal's fourth byte; as the TS AO_BAND).
+const AO_BAND: f64 = 5.0;
 
 /// Buildings as columns: per building an id and a height, and its polygons' rings (outer counterclockwise, holes
 /// clockwise) as runs of points (CSR).
@@ -189,9 +194,14 @@ pub fn extrude(
         let mid = st_of(Point64::new((b[0] + b[2]) / 2, (b[1] + b[3]) / 2));
         ((s2::cell_id(face, mid.to_array(), level + 3) >> shift) & 63) as u8
     };
-    let normal = |v: glam::DVec3| {
+    let normal = |v: glam::DVec3, occluded: bool| {
         let n = v.normalize_or_zero() * 127.0;
-        [n.x.round() as i8, n.y.round() as i8, n.z.round() as i8, 0]
+        [
+            n.x.round() as i8,
+            n.y.round() as i8,
+            n.z.round() as i8,
+            if occluded { 127 } else { 0 },
+        ]
     };
 
     let (mut walls, mut roofs) = (Mesh::default(), Mesh::default());
@@ -205,28 +215,49 @@ pub fn extrude(
             .chain(holes.iter().map(|&h| &m.paths[h]))
             .collect();
 
-        // Walls: a quad per edge, facing out (outer rings counterclockwise, holes clockwise).
+        // Walls: a quad per edge, facing out (outer rings counterclockwise, holes clockwise), split at the top of its
+        // dark band; each corner smooth or creased.
+        let band = roof.min(base + AO_BAND);
         for ring in &rings {
-            for k in 0..ring.len() {
-                let (p, q) = (st_of(ring[k]), st_of(ring[(k + 1) % ring.len()]));
-                let corners = [
-                    local(p, base),
-                    local(q, base),
-                    local(q, roof),
-                    local(p, roof),
-                ];
-                let up = local(p, base + 1.0) - corners[0];
-                let nm = normal((corners[1] - corners[0]).cross(up));
-                let first = walls.positions.len() as u32;
-                for c in corners {
-                    walls.positions.push(c.as_vec3().to_array());
-                    walls.normals.push(nm);
-                    walls.material.push(0);
-                    walls.child.push(child);
+            let n = ring.len();
+            let faces: Vec<glam::DVec3> = (0..n)
+                .map(|k| {
+                    let (p, q) = (st_of(ring[k]), st_of(ring[(k + 1) % n]));
+                    let up = local(p, base + 1.0) - local(p, base);
+                    (local(q, base) - local(p, base))
+                        .cross(up)
+                        .normalize_or_zero()
+                })
+                .collect();
+            let corner = |k: usize, other: usize| {
+                let (a, b) = (faces[k], faces[other % n]);
+                if a.dot(b) >= CREASE_COS {
+                    (a + b).normalize_or_zero()
+                } else {
+                    a
                 }
-                walls
-                    .indices
-                    .extend([first, first + 1, first + 2, first, first + 2, first + 3]);
+            };
+            for k in 0..n {
+                let (p, q) = (st_of(ring[k]), st_of(ring[(k + 1) % n]));
+                let (np, nq) = (corner(k, k + n - 1), corner(k, k + 1));
+                let mut heights = vec![base, band];
+                if band < roof {
+                    heights.push(roof);
+                }
+                let first = walls.positions.len() as u32;
+                for (row, &h) in heights.iter().enumerate() {
+                    for (at, nm) in [(p, np), (q, nq)] {
+                        walls.positions.push(local(at, h).as_vec3().to_array());
+                        walls.normals.push(normal(nm, row == 0));
+                        walls.material.push(0);
+                        walls.child.push(child);
+                    }
+                }
+                // Rows of two (p, q): each pair of rows a quad, counterclockwise from outside.
+                for row in 0..heights.len() as u32 - 1 {
+                    let (lo, hi) = (first + 2 * row, first + 2 * row + 2);
+                    walls.indices.extend([lo, lo + 1, hi + 1, lo, hi + 1, hi]);
+                }
             }
         }
 
@@ -252,7 +283,10 @@ pub fn extrude(
             continue;
         };
         let first = roofs.positions.len() as u32;
-        let up = normal(local(st_of(base_point), roof + 1.0) - local(st_of(base_point), roof));
+        let up = normal(
+            local(st_of(base_point), roof + 1.0) - local(st_of(base_point), roof),
+            false,
+        );
         for &p in &points {
             roofs
                 .positions

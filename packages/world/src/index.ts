@@ -29,7 +29,7 @@ export {
   type BuildingGroup, type BuildingInput, type Buildings, type HeightSource, type OsmType,
 } from "./buildings.ts";
 export { buildingsFromArrow, buildingsToArrow } from "./buildings-arrow.ts";
-export { BUILDING_MATERIALS, buildingMesh, idShade, type BuildingMesh } from "./building-mesh.ts";
+export { AO_BAND, BUILDING_MATERIALS, buildingMesh, CREASE, idShade, type BuildingMesh } from "./building-mesh.ts";
 export type { FileMetadata } from "./arrow-util.ts";
 export {
   carveWater, WATER_CARVE,

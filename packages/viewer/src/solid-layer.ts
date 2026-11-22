@@ -12,7 +12,7 @@ uniform mat4 u_view;
 uniform mat4 u_model;
 uniform vec3 u_colors[${MAX_MATERIALS}];
 in vec3 a_pos;
-in vec3 a_normal;
+in vec4 a_normal;     // x, y, z, and how occluded (0..1: walls darken toward the ground)
 in uint a_mat;
 in float a_shade;
 in uint a_child;      // 64 and up: never hidden
@@ -20,6 +20,7 @@ uniform uvec2 u_hidden;  // bits: fine cells 0–31, 32–63
 out vec3 v_world;
 out vec3 v_normal;
 out vec3 v_color;
+out float v_occluded;
 void main() {
   uint bits = a_child < 32u ? u_hidden.x >> a_child : a_child < 64u ? u_hidden.y >> (a_child - 32u) : 0u;
   if ((bits & 1u) == 1u) {
@@ -29,7 +30,8 @@ void main() {
   vec4 world = u_model * vec4(a_pos, 1.0);
   gl_Position = u_view * world;
   v_world = world.xyz;
-  v_normal = mat3(u_model) * a_normal;
+  v_normal = mat3(u_model) * a_normal.xyz;
+  v_occluded = a_normal.w;
   v_color = u_colors[a_mat] * (0.9 + 0.2 * a_shade);
 }`;
 
@@ -42,10 +44,11 @@ uniform vec3 u_sun;   // unit vector toward the sun
 in vec3 v_world;
 in vec3 v_normal;
 in vec3 v_color;
+in float v_occluded;
 out vec4 color;
 void main() {
   vec3 n = normalize(v_normal);
-  float light = 0.55 + 0.45 * max(dot(n, u_sun), 0.0) + 0.08 * n.z;
+  float light = (0.55 + 0.45 * max(dot(n, u_sun), 0.0) + 0.08 * n.z) * (1.0 - 0.45 * v_occluded);
   float d = distance(v_world, u_eye);
   color = vec4(mix(v_color * light, u_sky, smoothstep(u_fog.x, u_fog.y, d)), 1.0);
 }`;
@@ -94,7 +97,7 @@ export function createSolidLayer(
   gl.bindVertexArray(vao);
   const buffers = [
     { data: mesh.positions, size: 3, type: gl.FLOAT, normalized: false, stride: 0 },
-    { data: mesh.normals, size: 3, type: gl.BYTE, normalized: true, stride: 4 },
+    { data: mesh.normals, size: 4, type: gl.BYTE, normalized: true, stride: 4 },
     { data: mesh.material, size: 1, type: gl.UNSIGNED_BYTE, normalized: false, stride: 0, integer: true },
     { data: mesh.shade, size: 1, type: gl.UNSIGNED_BYTE, normalized: true, stride: 0 },
     ...(mesh.child ? [{ data: mesh.child, size: 1, type: gl.UNSIGNED_BYTE, normalized: false, stride: 0, integer: true }] : []),

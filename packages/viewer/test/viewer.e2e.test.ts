@@ -111,7 +111,7 @@ afterAll(async () => {
 describe("viewer", () => {
   it("loads the fixture cell, and the cells around it as bare ground", async () => {
     const s = await viewer.status();
-    expect(s).toMatchObject({ state: "ready", nodes: 5, edges: 4, buildings: 2, buildingTriangles: 2 * (8 + 2), graphOverlay: false });
+    expect(s).toMatchObject({ state: "ready", nodes: 5, edges: 4, buildings: 2, buildingTriangles: 2 * (4 * 4 + 2), graphOverlay: false });  // walls: dark band and above
     expect(s.cells.ready).toBeGreaterThan(1);
     expect(s.cells.coarse).toBeGreaterThan(0);
     expect(s.cells).toMatchObject({ missing: s.cells.ready - s.cells.coarse - 1, failed: 0, loading: 0, queued: 0 });

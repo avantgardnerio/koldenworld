@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildBuildings, buildingMesh, buildingsFromArrow, buildingsToArrow, idShade, signedArea2,
+  AO_BAND, buildBuildings, buildingMesh, buildingsFromArrow, buildingsToArrow, idShade, signedArea2,
   type BuildingInput, type BuildingMesh,
   enuFrame, enuProjection, enuUnprojection,
 } from "../src/index.ts";
@@ -102,7 +102,8 @@ describe("buildingMesh", () => {
     expect(roof).toBeCloseTo(s * s - h * h, 0);
     expect(wall).toBeCloseTo((4 * s + 4 * h) * 10, 0);
     const zs = new Set(Array.from({ length: m.positions.length / 3 }, (_, k) => m.positions[3 * k + 2]));
-    expect([...zs].sort((a, b) => a! - b!)).toEqual([2, 12]);
+    // The base, the top of the walls' dark band (AO_BAND above the base), the top.
+    expect([...zs].sort((a, b) => a! - b!)).toEqual([2, 2 + AO_BAND, 12]);
   });
 
   it("points wall normals away from the building, including into holes", () => {
@@ -116,8 +117,37 @@ describe("buildingMesh", () => {
       const dot = dx * m.normals[4 * v]! + dy * m.normals[4 * v + 1]!;
       if (Math.hypot(dx, dy) > M) { if (dot > 0) outward++; } else if (dot < 0) inward++;
     }
-    expect(outward).toBe(16);  // outer walls: 4 faces × 4 vertices, facing out
-    expect(inward).toBe(16);   // courtyard walls face the courtyard center
+    expect(outward).toBe(24);  // outer walls: 4 faces × 6 vertices (base, band, top), facing out
+    expect(inward).toBe(24);   // courtyard walls face the courtyard center
+  });
+
+  it("shades round walls smoothly and keeps a box's corners", () => {
+    // A 24-sided round tower (15° between walls) and a box (90°).
+    const round = Array.from({ length: 25 }, (_, k) => {
+      const a = (2 * Math.PI * (k % 24)) / 24;
+      return toLonLat(20 * Math.cos(a), 20 * Math.sin(a));
+    });
+    const normalsAt = (m: BuildingMesh, x: number, y: number) => {
+      const out = new Set<string>();
+      for (let v = 0; v < m.material.length; v++) {
+        if (m.normals[4 * v + 2] !== 0 || Math.hypot(m.positions[3 * v]! - x, m.positions[3 * v + 1]! - y) > 0.01) continue;
+        out.add(`${m.normals[4 * v]},${m.normals[4 * v + 1]}`);
+      }
+      return out;
+    };
+    const tower = buildingMesh(buildBuildings([building(1, [[round]])], origin));
+    expect(normalsAt(tower, 20, 0).size).toBe(1);  // both walls at a corner share one normal
+    const box = buildingMesh(buildBuildings([building(2, [[square(0, 0, 3)]])], origin));
+    expect(normalsAt(box, 0, 0).size).toBe(2);     // each wall keeps its own
+  });
+
+  it("darkens the bottom of the walls toward the ground, and nothing else", () => {
+    const m = buildingMesh(buildBuildings([building(1, [[square(0, 0, 3)]], { height: 20 })], origin));
+    for (let v = 0; v < m.material.length; v++) {
+      const z = m.positions[3 * v + 2]!, occluded = m.normals[4 * v + 3]!;
+      const roof = m.normals[4 * v + 2] !== 0;
+      expect(occluded).toBe(!roof && z === 0 ? 127 : 0);
+    }
   });
 
   it("skips buildings with no height and tags materials by group", () => {
