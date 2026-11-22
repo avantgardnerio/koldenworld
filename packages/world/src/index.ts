@@ -22,7 +22,7 @@ export {
 export { roadGraphFromArrow, roadGraphToArrow, type GraphMetadata, type RoadGraphFiles } from "./road-graph-arrow.ts";
 export { roadLineMesh, type Bounds, type RoadLineMesh } from "./road-lines.ts";
 export {
-  edgeHalfWidth, MARKING, nodeRadii, ROAD_PROFILES, roadSurfaceMesh, SurfaceMaterial, type SurfaceMesh,
+  edgeExtents, edgeHalfWidth, MARKING, nodeRadii, ROAD_PROFILES, roadSurfaceMesh, SIDEWALK, SurfaceMaterial, type SurfaceMesh,
 } from "./road-surface.ts";
 export {
   BUILDING_GROUPS, BUILDINGS_VERSION, buildBuildings, buildingGroup, HEIGHT_SOURCES, OSM_TYPES, signedArea2,

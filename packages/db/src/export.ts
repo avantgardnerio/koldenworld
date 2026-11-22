@@ -1,5 +1,5 @@
 import type { BuildingInput, HeightSource, OsmType, RoadClass, RoadWayInput } from "@game/world";
-import { roadStructure } from "@game/osm-import";
+import { roadSidewalks, roadStructure } from "@game/osm-import";
 import pg from "pg";
 import { clientConfig, DATABASE_URL } from "./config.ts";
 
@@ -70,7 +70,7 @@ export function loadRoadWays(bbox: Bbox, url = DATABASE_URL): Promise<RoadWayInp
     const { rows } = await c.query<{
       osm_way_id: string; node_ids: string[]; class: RoadClass; name: string | null;
       lanes_fwd: number; lanes_back: number; speed_limit_mps: number; coords: [number, number][];
-      bridge: string | null; tunnel: string | null;
+      bridge: string | null; tunnel: string | null; sidewalk_tags: Record<string, string>;
     }>(
       `WITH hit AS (
          SELECT osm_way_id, node_ids FROM road_ways WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
@@ -80,7 +80,9 @@ export function loadRoadWays(bbox: Bbox, url = DATABASE_URL): Promise<RoadWayInp
        )
        SELECT osm_way_id::text, node_ids::text[] AS node_ids, class, name, lanes_fwd, lanes_back,
               speed_limit_mps, ST_AsGeoJSON(geom)::json -> 'coordinates' AS coords,
-              tags ->> 'bridge' AS bridge, tags ->> 'tunnel' AS tunnel
+              tags ->> 'bridge' AS bridge, tags ->> 'tunnel' AS tunnel,
+              (SELECT coalesce(jsonb_object_agg(key, value), '{}') FROM jsonb_each_text(tags)
+               WHERE key IN ('highway', 'oneway', 'tunnel') OR key LIKE 'sidewalk%') AS sidewalk_tags
        FROM road_ways
        WHERE osm_way_id IN (SELECT osm_way_id FROM hit UNION SELECT osm_way_id FROM touching)
        ORDER BY osm_way_id`,
@@ -95,6 +97,7 @@ export function loadRoadWays(bbox: Bbox, url = DATABASE_URL): Promise<RoadWayInp
       lanesBack: r.lanes_back,
       speedLimitMps: r.speed_limit_mps,
       structure: roadStructure({ ...(r.bridge ? { bridge: r.bridge } : {}), ...(r.tunnel ? { tunnel: r.tunnel } : {}) }),
+      sidewalks: roadSidewalks(r.sidewalk_tags, r.speed_limit_mps),
     }));
   });
 }

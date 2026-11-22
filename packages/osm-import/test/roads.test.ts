@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractRoadWays, parseMaxspeed, roadAttributes, type OsmElement, type Tags } from "../src/index.ts";
+import { extractRoadWays, parseMaxspeed, roadAttributes, roadSidewalks, type OsmElement, type Tags } from "../src/index.ts";
 
 const node = (id: number, lon: number, lat: number): OsmElement => ({ type: "node", id, lon, lat });
 const way = (id: number, nodes: number[], tags: Tags): OsmElement => ({ type: "way", id, nodes, tags });
@@ -99,5 +99,31 @@ describe("parseMaxspeed", () => {
     const got = parseMaxspeed(input);
     if (expected === undefined) expect(got).toBeUndefined();
     else expect(got).toBeCloseTo(expected);
+  });
+});
+
+describe("roadSidewalks", () => {
+  const MPH = 0.44704;
+  it("reads sidewalk tags, in their many forms", () => {
+    expect(roadSidewalks({ highway: "residential", sidewalk: "both" }, 25 * MPH)).toBe(3);
+    expect(roadSidewalks({ highway: "residential", sidewalk: "left" }, 25 * MPH)).toBe(1);
+    expect(roadSidewalks({ highway: "residential", sidewalk: "right" }, 25 * MPH)).toBe(2);
+    expect(roadSidewalks({ highway: "residential", sidewalk: "no" }, 25 * MPH)).toBe(0);
+    expect(roadSidewalks({ highway: "residential", sidewalk: "separate" }, 25 * MPH)).toBe(3);  // drawn at the curb
+    expect(roadSidewalks({ highway: "primary", "sidewalk:left": "yes", "sidewalk:right": "no" }, 60 * MPH)).toBe(1);
+    expect(roadSidewalks({ highway: "primary", "sidewalk:both": "separate" }, 60 * MPH)).toBe(3);
+  });
+
+  it("swaps sides for ways stored against their node order (oneway=-1)", () => {
+    expect(roadSidewalks({ highway: "residential", oneway: "-1", sidewalk: "left" }, 25 * MPH)).toBe(2);
+  });
+
+  it("gives untagged town streets sidewalks, not highways, fast roads, service roads or tunnels", () => {
+    expect(roadSidewalks({ highway: "residential" }, 25 * MPH)).toBe(3);
+    expect(roadSidewalks({ highway: "secondary" }, 40 * MPH)).toBe(3);
+    expect(roadSidewalks({ highway: "secondary" }, 55 * MPH)).toBe(0);
+    expect(roadSidewalks({ highway: "motorway" }, 25 * MPH)).toBe(0);
+    expect(roadSidewalks({ highway: "service" }, 15 * MPH)).toBe(0);
+    expect(roadSidewalks({ highway: "residential", tunnel: "yes" }, 25 * MPH)).toBe(0);
   });
 });

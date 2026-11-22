@@ -83,6 +83,39 @@ export function extractRoadWays(elements: OsmElement[]): { ways: RoadWay[]; stat
   return { ways, stats: { roadWays: osmWays.length, skippedWays } };
 }
 
+/** Sidewalk bits (decision 33): which sides of a stored road way have one, looking along its stored node order. */
+export const SIDEWALK_LEFT = 1, SIDEWALK_RIGHT = 2;
+
+/** Town streets: where untagged roads get sidewalks on both sides (at most 40 mph). */
+const SIDEWALK_CLASSES = new Set(["primary", "secondary", "tertiary", "unclassified", "residential", "living_street"]);
+const SIDEWALK_MAX_SPEED = 40 * 0.44704;
+
+/**
+ * Which sides of a road have a sidewalk, from sidewalk=*, sidewalk:left/right/both=*
+ * (a separately mapped sidewalk counts: it's drawn at the curb), or, untagged,
+ * by class and speed limit. Left and right are relative to the stored node
+ * order, which runs against the way for oneway=-1.
+ */
+export function roadSidewalks(tags: Tags, speedLimitMps: number): number {
+  const yes = (v: string | undefined) => v === undefined ? undefined : !["no", "none"].includes(v);
+  let left: boolean | undefined, right: boolean | undefined;
+  const both = tags["sidewalk:both"] ?? tags.sidewalk;
+  if (both !== undefined) {
+    if (both === "left") [left, right] = [true, false];
+    else if (both === "right") [left, right] = [false, true];
+    else left = right = yes(both);
+  }
+  left = yes(tags["sidewalk:left"]) ?? left;
+  right = yes(tags["sidewalk:right"]) ?? right;
+  if (left === undefined && right === undefined) {
+    const town = SIDEWALK_CLASSES.has(tags.highway ?? "") && speedLimitMps <= SIDEWALK_MAX_SPEED + 0.01
+      && (tags.tunnel === undefined || tags.tunnel === "no" || tags.tunnel === "building_passage");
+    left = right = town;
+  }
+  if (onewayDirection(tags) === -1) [left, right] = [right, left];
+  return (left ? SIDEWALK_LEFT : 0) | (right ? SIDEWALK_RIGHT : 0);
+}
+
 /** Bridges and tunnels run straight between their ends instead of following the ground (decision 29). */
 export function roadStructure(tags: Tags): "bridge" | "tunnel" | null {
   if (tags.bridge !== undefined && tags.bridge !== "no") return "bridge";

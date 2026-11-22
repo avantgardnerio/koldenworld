@@ -8,6 +8,12 @@
 //   shoulder | back lanes … ‖ forward lanes … | shoulder
 //                           c = (back − fwd) · laneWidth / 2
 //
+// Sidewalks (decision 33), on the sides the edge's `sidewalks` bits say: a
+// SIDEWALK.width strip beyond the shoulder, SIDEWALK.curb above the road, with
+// a curb face up from the road and an outer face down to the ground. They stop
+// at intersection discs (leaving the corners open, like curb ramps) and run
+// through plain joints.
+//
 // Markings (tertiary and above only; US residential streets mostly have none):
 // double yellow at c on two-way roads, dashed white between lanes running the
 // same way. They stop short of intersections and dead ends.
@@ -17,7 +23,7 @@
 
 import { ROAD_CLASSES, type RoadClass, type RoadGraph } from "./road-graph.ts";
 
-export const SurfaceMaterial = { Asphalt: 0, Yellow: 1, White: 2, Fill: 3 } as const;
+export const SurfaceMaterial = { Asphalt: 0, Yellow: 1, White: 2, Fill: 3, Sidewalk: 4, Curb: 5 } as const;
 export type SurfaceMaterial = (typeof SurfaceMaterial)[keyof typeof SurfaceMaterial];
 
 export interface SurfaceMesh {
@@ -49,12 +55,23 @@ export const MARKING = {
   intersectionClear: 1,  // extra distance markings stop short of a node disc, m
 } as const;
 
+export const SIDEWALK = {
+  width: 1.8,  // m: 5 ft plus the curb
+  curb: 0.15,  // m above the road
+} as const;
+
 const DISC_SEGMENTS = 16;
 const MITER_LIMIT = 3;   // max miter length, × the offset (sharper joints are clipped; the node disc covers them)
 
 export function edgeHalfWidth(g: RoadGraph, e: number): number {
   const p = PROFILES[g.edges.class[e]!]!;
   return ((g.edges.lanesFwd[e]! + g.edges.lanesBack[e]!) * p.laneWidth) / 2 + p.shoulder;
+}
+
+/** How far the road reaches left and right of its centerline (looking from → to), sidewalks included. */
+export function edgeExtents(g: RoadGraph, e: number): [left: number, right: number] {
+  const hw = edgeHalfWidth(g, e), s = g.edges.sidewalks[e]!;
+  return [hw + (s & 1 ? SIDEWALK.width : 0), hw + (s & 2 ? SIDEWALK.width : 0)];
 }
 
 // --- growable typed buffers -------------------------------------------------
@@ -172,13 +189,13 @@ function miters(pl: Polyline): number[] {
  * mitered joints, level across (both edges take the centerline's height). Two
  * vertices per point, two triangles per segment.
  */
-function ribbon(m: MeshBuilder, pl: Polyline, o0: number, o1: number, mat: SurfaceMaterial): void {
+function ribbon(m: MeshBuilder, pl: Polyline, o0: number, o1: number, mat: SurfaceMaterial, lift = 0): void {
   const n = pl.length / S;
   if (n < 2) return;
   const u = miters(pl);
   let prev = -1;
   for (let i = 0; i < n; i++) {
-    const x = pl[S * i]!, y = pl[S * i + 1]!, z = pl[S * i + 2]!, ux = u[2 * i]!, uy = u[2 * i + 1]!;
+    const x = pl[S * i]!, y = pl[S * i + 1]!, z = pl[S * i + 2]! + lift, ux = u[2 * i]!, uy = u[2 * i + 1]!;
     const a = m.vertex(x + ux * o0, y + uy * o0, z, mat);
     const b = m.vertex(x + ux * o1, y + uy * o1, z, mat);
     if (prev >= 0) {
@@ -197,12 +214,12 @@ const SKIRT_EXTRA = 0.3;
  * by each point's drop (to below the lowest ground across the road there),
  * where the road sits above the ground.
  */
-function skirts(m: MeshBuilder, pl: Polyline, o0: number, o1: number): void {
+function skirts(m: MeshBuilder, pl: Polyline, ...offsets: number[]): void {
   const n = pl.length / S, u = miters(pl);
   for (let i = 0; i + 1 < n; i++) {
     const d0 = pl[S * i + 3]!, d1 = pl[S * i + S + 3]!;
     if (d0 <= 0 && d1 <= 0) continue;
-    for (const o of [o0, o1]) {
+    for (const o of offsets) {
       const p = (k: number, down: boolean) => m.vertex(
         pl[S * k]! + u[2 * k]! * o, pl[S * k + 1]! + u[2 * k + 1]! * o,
         pl[S * k + 2]! - (down ? pl[S * k + 3]! + SKIRT_EXTRA : 0), SurfaceMaterial.Fill);
@@ -210,6 +227,20 @@ function skirts(m: MeshBuilder, pl: Polyline, o0: number, o1: number): void {
       m.triangle(a, b, c);
       m.triangle(a, c, d);
     }
+  }
+}
+
+/**
+ * A vertical face at offset o from `top` above the polyline down to `bottom`
+ * (both relative to each point's height; bottom may follow the point's drop).
+ */
+function face(m: MeshBuilder, pl: Polyline, o: number, top: number, bottom: (drop: number) => number, mat: SurfaceMaterial): void {
+  const n = pl.length / S, u = miters(pl);
+  for (let i = 0; i + 1 < n; i++) {
+    const p = (k: number, z: number) => m.vertex(pl[S * k]! + u[2 * k]! * o, pl[S * k + 1]! + u[2 * k + 1]! * o, pl[S * k + 2]! + z, mat);
+    const a = p(i, top), b = p(i + 1, top), c = p(i + 1, bottom(pl[S * i + S + 3]!)), d = p(i, bottom(pl[S * i + 3]!));
+    m.triangle(a, b, c);
+    m.triangle(a, c, d);
   }
 }
 
@@ -259,9 +290,23 @@ export function roadSurfaceMesh(g: RoadGraph): SurfaceMesh {
     const pl = edgePolyline(g, e);
     if (pl.length < 2 * S) continue;
     lines[e] = pl;
-    const hw = edgeHalfWidth(g, e);
+    const hw = edgeHalfWidth(g, e), walks = g.edges.sidewalks[e]!;
     ribbon(m, pl, -hw, hw, SurfaceMaterial.Asphalt);
-    skirts(m, pl, -hw, hw);
+    // Fill skirts hang from the road's edges, or from the sidewalks' outer edges where there are sidewalks.
+    skirts(m, pl, ...(walks & 1 ? [] : [-hw]), ...(walks & 2 ? [] : [hw]));
+    if (!walks) continue;
+    // Sidewalks: from the disc's edge to the disc's edge, through plain joints.
+    const clear = (n: number) => (degree(n) === 2 ? 0 : radius[n]!);
+    const a = clear(g.edges.from[e]!), b = length(pl) - clear(g.edges.to[e]!);
+    if (b - a < 0.5) continue;
+    const run = slice(pl, a, b), w = SIDEWALK.width, curb = SIDEWALK.curb;
+    for (const [bit, side] of [[1, -1], [2, 1]] as const) {
+      if (!(walks & bit)) continue;
+      const [inner, outer] = [side * hw, side * (hw + w)];
+      ribbon(m, run, Math.min(inner, outer), Math.max(inner, outer), SurfaceMaterial.Sidewalk, curb);
+      face(m, run, inner, curb, () => 0, SurfaceMaterial.Curb);
+      face(m, run, outer, curb, (drop) => -Math.max(0, drop) - SKIRT_EXTRA, SurfaceMaterial.Curb);
+    }
   }
 
   for (let e = 0; e < g.edges.count; e++) {

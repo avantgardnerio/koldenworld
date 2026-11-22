@@ -11,7 +11,7 @@
 import type { Projection } from "./projection.ts";
 
 /** Bump when buildRoadGraph's output changes for the same input. */
-export const ROAD_GRAPH_VERSION = 3;
+export const ROAD_GRAPH_VERSION = 4;
 
 export const ROAD_CLASSES = [
   "motorway", "motorway_link",
@@ -38,6 +38,7 @@ export interface RoadWayInput {
   lanesBack: number;
   speedLimitMps: number;
   structure?: "bridge" | "tunnel" | null;  // default: on the ground
+  sidewalks?: number;                      // bits: 1 left, 2 right of nodeIds' direction (decision 33); default none
 }
 
 export interface RoadNodes {
@@ -62,6 +63,7 @@ export interface RoadEdges {
   length: Float32Array;      // m, along the points
   name: Uint32Array;         // index into names; 0 = unnamed
   structure: Uint8Array;     // index into ROAD_STRUCTURES
+  sidewalks: Uint8Array;     // bits: 1 left, 2 right, looking from → to
   osmWayId: Float64Array;
   pointStart: Int32Array;    // count + 1 offsets, in points, into RoadGraph.points (CSR)
 }
@@ -124,7 +126,8 @@ export function buildRoadGraph(
   const e = {
     from: [] as number[], to: [] as number[], class: [] as number[],
     lanesFwd: [] as number[], lanesBack: [] as number[], speedLimit: [] as number[],
-    length: [] as number[], name: [] as number[], structure: [] as number[], osmWayId: [] as number[], pointStart: [0],
+    length: [] as number[], name: [] as number[], structure: [] as number[], sidewalks: [] as number[], osmWayId: [] as number[],
+    pointStart: [0],
   };
   const points: number[] = [];
 
@@ -159,6 +162,7 @@ export function buildRoadGraph(
       e.length.push(length);
       e.name.push(name);
       e.structure.push(ROAD_STRUCTURES.indexOf(w.structure ?? "ground"));
+      e.sidewalks.push(w.sidewalks ?? 0);
       e.osmWayId.push(w.osmWayId);
       e.pointStart.push(points.length / 2);
       start = i;
@@ -203,6 +207,7 @@ export function buildRoadGraph(
       length: Float32Array.from(e.length),
       name: Uint32Array.from(e.name),
       structure: Uint8Array.from(e.structure),
+      sidewalks: Uint8Array.from(e.sidewalks),
       osmWayId: Float64Array.from(e.osmWayId),
       pointStart: Int32Array.from(e.pointStart),
     },

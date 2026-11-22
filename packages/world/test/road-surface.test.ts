@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildRoadGraph, edgeHalfWidth, enuFrame, enuProjection, enuUnprojection, MARKING, nodeRadii, roadSurfaceMesh, SurfaceMaterial,
+  buildRoadGraph, edgeExtents, edgeHalfWidth, enuFrame, enuProjection, enuUnprojection, MARKING, nodeRadii, roadSurfaceMesh, SIDEWALK,
+  SurfaceMaterial,
   type RoadWayInput, type SurfaceMesh,
 } from "../src/index.ts";
 
@@ -136,5 +137,45 @@ describe("roadSurfaceMesh", () => {
       seenMarking ||= isMarking;
     }
     expect(seenMarking).toBe(true);
+  });
+});
+
+describe("sidewalks", () => {
+  // A 100 m east-west street with a north-south street crossing at x = 50 m.
+  const M1 = 1 / M;
+  const g = graphOf(
+    road(1, [1, 2, 3], [[0, 0], [50 * M1, 0], [100 * M1, 0]], { sidewalks: 3 }),
+    road(2, [4, 2, 5], [[50 * M1, -50 * M1], [50 * M1, 0], [50 * M1, 50 * M1]], { sidewalks: 2 }),
+  );
+  const m = roadSurfaceMesh(g);
+
+  it("run beside the road on the sides tagged, at curb height", () => {
+    const hw = edgeHalfWidth(g, 0), walk = verts(m, SurfaceMaterial.Sidewalk);
+    expect(walk.length).toBeGreaterThan(0);
+    // East-west street: both sides, from hw to hw + width off the centerline.
+    const ew = walk.filter(([x]) => x < 40);
+    expect(Math.min(...ew.map(([, y]) => Math.abs(y)))).toBeCloseTo(hw, 3);
+    expect(Math.max(...ew.map(([, y]) => Math.abs(y)))).toBeCloseTo(hw + SIDEWALK.width, 3);
+    expect(ew.some(([, y]) => y > 0) && ew.some(([, y]) => y < 0)).toBe(true);
+    // North-south street (bit 2: right of south → north = east): only x > 50.
+    const ns = walk.filter(([x, y]) => Math.abs(y) > 10 && Math.abs(x - 50) < 10);
+    expect(ns.every(([x]) => x > 50)).toBe(true);
+    for (let v = 0; v < m.material.length; v++) {
+      if (m.material[v] === SurfaceMaterial.Sidewalk) expect(m.positions[3 * v + 2]).toBeCloseTo(SIDEWALK.curb, 5);
+    }
+  });
+
+  it("stop at the intersection disc", () => {
+    const r = nodeRadii(g)[g.edges.to[0]!]!;
+    const walk = verts(m, SurfaceMaterial.Sidewalk);
+    expect(walk.every(([x, y]) => Math.hypot(x - 50, y) >= r - 1e-3)).toBe(true);
+    expect(area(m, SurfaceMaterial.Curb)).toBe(0);  // curb faces are vertical: no area seen from above
+  });
+
+  it("widen what draping covers on their side only", () => {
+    const hw = edgeHalfWidth(g, 0);
+    expect(edgeExtents(g, 0)).toEqual([hw + SIDEWALK.width, hw + SIDEWALK.width]);
+    const e = [...g.edges.osmWayId].indexOf(2);
+    expect(edgeExtents(g, e)).toEqual([edgeHalfWidth(g, e), edgeHalfWidth(g, e) + SIDEWALK.width]);
   });
 });

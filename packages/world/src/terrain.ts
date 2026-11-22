@@ -19,7 +19,7 @@ import { f32, readTable, toIPC, values, column } from "./arrow-util.ts";
 import type { CellContents } from "./cell.ts";
 import { ecefToLocal, geodeticToEcef, type Frame, type Vec3 } from "./geodesy.ts";
 import { enuUnprojection } from "./projection.ts";
-import { edgeHalfWidth, nodeRadii } from "./road-surface.ts";
+import { edgeExtents, nodeRadii } from "./road-surface.ts";
 import { ROAD_STRUCTURES, type RoadGraph } from "./road-graph.ts";
 import { cellFractions, cellFractionsFn, cellFromLatLon, cellLattice, type CellId } from "./s2.ts";
 import type { Buildings } from "./buildings.ts";
@@ -256,7 +256,7 @@ function drapeGraph(
   const pointStart = new Int32Array(g.edges.count + 1);
   for (let e = 0; e < g.edges.count; e++) {
     pointStart[e] = z.length;
-    const from = g.edges.from[e]!, to = g.edges.to[e]!, hw = edgeHalfWidth(g, e);
+    const from = g.edges.from[e]!, to = g.edges.to[e]!, [wl, wr] = edgeExtents(g, e);  // sidewalks included
     // The edge's centerline as arc length → point.
     const p0 = g.edges.pointStart[e]!, p1 = g.edges.pointStart[e + 1]!;
     const cum = [0];
@@ -286,11 +286,11 @@ function drapeGraph(
     }
     const pts = stations.map(at);
     const n = pts.length;
-    // Cross-sections: the road's edges at each station.
+    // Cross-sections: the road's edges (or its sidewalks' outer edges) at each station.
     const sides = pts.map(([x, y], k) => {
       const [ax, ay] = pts[Math.max(0, k - 1)]!, [bx, by] = pts[Math.min(n - 1, k + 1)]!;
-      const len = Math.hypot(bx - ax, by - ay) || 1, rx = ((by - ay) / len) * hw, ry = (-(bx - ax) / len) * hw;
-      return { l: [x - rx, y - ry] as [number, number], r: [x + rx, y + ry] as [number, number] };
+      const len = Math.hypot(bx - ax, by - ay) || 1, rx = (by - ay) / len, ry = -(bx - ax) / len;
+      return { l: [x - rx * wl, y - ry * wl] as [number, number], r: [x + rx * wr, y + ry * wr] as [number, number] };
     });
     const structure = ROAD_STRUCTURES[g.edges.structure[e]!];
     const H = new Float64Array(n), D = new Float32Array(n);

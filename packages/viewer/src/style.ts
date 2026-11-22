@@ -31,6 +31,8 @@ const SURFACE: Record<keyof typeof SurfaceMaterial, string> = {
   Yellow: "#e2b62a",
   White: "#e6e6e2",
   Fill: "#7c705a",   // earth: the embankment under a road above the ground
+  Sidewalk: "#b4b1aa",  // concrete
+  Curb: "#9c9993",
 };
 /** Surface materials that are markings (1..MARKINGS): they fade into the asphalt at a distance. */
 export const MARKINGS = 2;

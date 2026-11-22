@@ -1,6 +1,6 @@
 export type { OsmElement, OsmNode, OsmRelation, OsmWay, OverpassResponse, Tags } from "./osm.ts";
 export {
-  extractRoadWays, isRoad, onewayDirection, parseMaxspeed, roadAttributes, roadStructure,
+  extractRoadWays, isRoad, onewayDirection, parseMaxspeed, roadAttributes, roadSidewalks, roadStructure, SIDEWALK_LEFT, SIDEWALK_RIGHT,
   type ExtractStats, type RoadWay,
 } from "./roads.ts";
 export {

@@ -19,6 +19,7 @@
 //                                        length      float32   m
 //                                        name        dictionary<uint32, utf8>; "" = unnamed
 //                                        structure   dictionary<uint8, utf8>   "ground" | "bridge" | "tunnel"
+//                                        sidewalks   uint8     bits: 1 left, 2 right (from → to)
 //                                        osm_way_id  float64
 //                                        points      list<fixed_size_list<float32, 2>>  x, y in m
 //                                        point_z     list<float32>  z per point, m (same offsets as points)
@@ -80,6 +81,7 @@ export function roadGraphToArrow(g: RoadGraph, metadata: GraphMetadata): RoadGra
       length: f32(edges.length),
       name: utf8Dictionary(1, new Uint32(), edges.name, g.names),
       structure: utf8Dictionary(2, new Uint8(), edges.structure, ROAD_STRUCTURES),
+      sidewalks: u8(edges.sidewalks),
       osm_way_id: f64(edges.osmWayId),
       points,
       point_z: makeData({
@@ -138,6 +140,7 @@ export function roadGraphFromArrow(files: RoadGraphFiles): { graph: RoadGraph; m
     length: values(ec("length"), edgeCount, Float32Array, "edges.length"),
     name: values(nameData, edgeCount, Uint32Array, "edges.name"),
     structure: values(ec("structure"), edgeCount, Uint8Array, "edges.structure"),
+    sidewalks: values(ec("sidewalks"), edgeCount, Uint8Array, "edges.sidewalks"),
     osmWayId: values(ec("osm_way_id"), edgeCount, Float64Array, "edges.osm_way_id"),
     pointStart: pts.offsets,
   };
