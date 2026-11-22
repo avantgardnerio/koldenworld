@@ -8,7 +8,7 @@ use crate::s2;
 use crate::ways::wkb_line_string;
 use clipper2_rust::{EndType, FillRule, JoinType, Paths64, inflate_paths_64, union_subjects_64};
 use glam::DVec2;
-use postgres::Client;
+use tokio_postgres::Client;
 
 /// Water as columns: lines with a width, and area rings (outer rings counterclockwise, holes clockwise), each a run
 /// of points (CSR).
@@ -21,23 +21,25 @@ pub struct Water {
 }
 
 /// Every waterway and water area intersecting a lon/lat box.
-pub fn load_water(
-    db: &mut Client,
+pub async fn load_water(
+    db: &Client,
     west: f64,
     south: f64,
     east: f64,
     north: f64,
-) -> Result<Water, Box<dyn std::error::Error>> {
+) -> Result<Water, Box<dyn std::error::Error + Send + Sync>> {
     let mut water = Water {
         line_start: vec![0],
         ring_start: vec![],
         ..Default::default()
     };
-    let lines = db.query(
-        "SELECT width_m, ST_AsBinary(geom) FROM waterways
+    let lines = db
+        .query(
+            "SELECT width_m, ST_AsBinary(geom) FROM waterways
          WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326)) ORDER BY osm_way_id",
-        &[&west, &south, &east, &north],
-    )?;
+            &[&west, &south, &east, &north],
+        )
+        .await?;
     for row in &lines {
         let width: f32 = row.get(0);
         wkb_line_string(row.get(1), &mut water.lonlat)?;
@@ -52,7 +54,7 @@ pub fn load_water(
            WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326)) ORDER BY osm_type, osm_id
          ) rings",
         &[&west, &south, &east, &north],
-    )?;
+    ).await?;
     water.ring_start.push(water.lonlat.len() as u32);
     for row in &rings {
         wkb_line_string(row.get(0), &mut water.lonlat)?;

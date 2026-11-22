@@ -1,6 +1,6 @@
 //! Road ways, the input: OSM ways tagged highway=*, loaded from Postgres (road_ways) into columns.
 
-use postgres::Client;
+use tokio_postgres::Client;
 
 /// OSM highway=* values we store, as in packages/world/src/road-graph.ts; a way's class is an index into this.
 pub const ROAD_CLASSES: [&str; 15] = [
@@ -54,13 +54,13 @@ const SIDEWALK_CLASSES: [&str; 6] = [
 const SIDEWALK_MAX_SPEED: f32 = 40.0 * 0.44704;
 
 /// Every road way intersecting a lon/lat box, ordered by OSM id.
-pub fn load_road_ways(
-    db: &mut Client,
+pub async fn load_road_ways(
+    db: &Client,
     west: f64,
     south: f64,
     east: f64,
     north: f64,
-) -> Result<RoadWays, Box<dyn std::error::Error>> {
+) -> Result<RoadWays, Box<dyn std::error::Error + Send + Sync>> {
     let rows = db.query(
         "SELECT osm_way_id, class, name, node_ids, ST_AsBinary(geom), lanes_fwd, lanes_back, speed_limit_mps,
                 tags ->> 'sidewalk', tags ->> 'sidewalk:both', tags ->> 'sidewalk:left', tags ->> 'sidewalk:right',
@@ -69,7 +69,7 @@ pub fn load_road_ways(
          WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
          ORDER BY osm_way_id",
         &[&west, &south, &east, &north],
-    )?;
+    ).await?;
     let mut ways = RoadWays {
         node_start: vec![0],
         names: vec![String::new()],

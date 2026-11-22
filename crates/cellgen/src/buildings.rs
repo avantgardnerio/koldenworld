@@ -23,7 +23,7 @@ use clipper2_rust::{
     point_in_polygon, union_subjects_64,
 };
 use glam::DVec2;
-use postgres::Client;
+use tokio_postgres::Client;
 
 /// Merged where closer than this, m.
 pub const GAP: f64 = 10.0;
@@ -103,11 +103,11 @@ pub struct Massing {
 }
 
 /// Every building whose footprint touches a lon/lat box and whose owner point `owns` (lon, lat).
-pub fn load(
-    db: &mut Client,
+pub async fn load(
+    db: &Client,
     [west, south, east, north]: [f64; 4],
     owns: impl Fn(f64, f64) -> bool,
-) -> Result<Buildings, Box<dyn std::error::Error>> {
+) -> Result<Buildings, Box<dyn std::error::Error + Send + Sync>> {
     let rows = db.query(
         "SELECT osm_id, height_m, (r).path[1], ST_AsBinary(ST_ExteriorRing((r).geom)) FROM (
            SELECT osm_id, height_m, ST_DumpRings((ST_Dump(ST_ForcePolygonCCW(geom))).geom) AS r FROM buildings
@@ -115,7 +115,7 @@ pub fn load(
            ORDER BY osm_type, osm_id
          ) rings",
         &[&west, &south, &east, &north],
-    )?;
+    ).await?;
     let mut b = Buildings {
         ring_start: vec![0],
         ring_of: vec![0],

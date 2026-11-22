@@ -14,8 +14,8 @@ use crate::{
     markings, mesh, polygon, s2, simplify, terrain, water, ways, widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
+use deadpool_postgres::Pool;
 use glam::DVec2;
-use postgres::Client;
 use std::path::Path;
 use std::time::Instant;
 
@@ -138,6 +138,14 @@ impl Cell {
                 == s2::cell_id(self.face, self.center(), self.level)
     }
 
+    /// The lon/lat box everything for the cell is loaded from: its square and a quarter of a cell further each way.
+    pub fn load_box(&self) -> [f64; 4] {
+        let cell = self.square;
+        let m = 0.25 * (cell[2] - cell[0]);
+        let view = [cell[0] - m, cell[1] - m, cell[2] + m, cell[3] + m];
+        s2::lat_lon_bounds(self.face, view, 0.001)
+    }
+
     fn center(&self) -> [f64; 2] {
         [
             (self.square[0] + self.square[2]) / 2.0,
@@ -146,13 +154,70 @@ impl Cell {
     }
 }
 
-/// Where a cell's roads, water and heights come from.
-pub enum Source<'a> {
-    /// Postgres (road_ways, waterways, water_areas) and the elevation data under `data` (data/dem).
-    Postgres { db: &'a mut Client, data: &'a Path },
-    /// Fixed ways (every one of them, whatever the cell), no water, and flat terrain `height` m above the ellipsoid:
-    /// for tests and fixtures, no database or elevation data needed.
-    Fixture { ways: &'a RoadWays, height: f64 },
+/// What a cell is built from: its roads, water and heights, and a coarse tile's buildings.
+pub struct Inputs {
+    ways: RoadWays,
+    water: water::Water,
+    heights: Heights,
+    buildings: Option<buildings::Buildings>,
+}
+
+/// An error that can cross an await (loading runs concurrently).
+pub type LoadError = Box<dyn std::error::Error + Send + Sync>;
+
+impl Inputs {
+    /// From Postgres (road_ways, waterways, water_areas; buildings, for a coarse tile) and the elevation data under
+    /// `data` (data/dem), all at once: each query on its own connection from `pool`, the elevation files on a
+    /// blocking thread.
+    pub async fn load(pool: &Pool, data: &Path, c: &Cell) -> Result<Inputs, LoadError> {
+        let [west, south, east, north] = c.load_box();
+        let dem = data.join("dem");
+        let (ways, water, buildings, heights) = tokio::try_join!(
+            async {
+                let db = pool.get().await?;
+                ways::load_road_ways(&db, west, south, east, north).await
+            },
+            async {
+                let db = pool.get().await?;
+                water::load_water(&db, west, south, east, north).await
+            },
+            async {
+                if c.level > COARSE_LEVEL {
+                    return Ok(None);
+                }
+                let db = pool.get().await?;
+                let owns = |lon, lat| c.owns(lon, lat);
+                Ok::<_, LoadError>(Some(
+                    buildings::load(&db, [west, south, east, north], owns).await?,
+                ))
+            },
+            async {
+                tokio::task::spawn_blocking(move || {
+                    elevation::Elevation::region(&dem, [west, south, east, north])
+                        .map_err(|e| e.to_string())
+                })
+                .await?
+                .map_err(LoadError::from)
+            },
+        )?;
+        Ok(Inputs {
+            ways,
+            water,
+            heights: Heights::Dem(heights),
+            buildings,
+        })
+    }
+
+    /// Fixed ways (every one of them, whatever the cell), no water, no buildings, and flat terrain `height` m above
+    /// the ellipsoid: for tests and fixtures, no database or elevation data needed.
+    pub fn fixture(ways: &RoadWays, height: f64, c: &Cell) -> Inputs {
+        Inputs {
+            ways: ways.clone(),
+            water: water::Water::empty(),
+            heights: Heights::Flat(height),
+            buildings: (c.level <= COARSE_LEVEL).then(buildings::Buildings::default),
+        }
+    }
 }
 
 /// Ground heights: the elevation data, or flat.
@@ -177,9 +242,9 @@ impl Heights {
     }
 }
 
-/// Builds a cell from `source`. With `pictures`, also draws cell.png, heights.png, draped.png and mesh.png there.
+/// Builds a cell from its inputs. With `pictures`, also draws cell.png, heights.png, draped.png and mesh.png there.
 pub fn build(
-    source: Source,
+    inputs: Inputs,
     c: &Cell,
     options: &Options,
     pictures: Option<&Path>,
@@ -188,32 +253,14 @@ pub fn build(
     let mut log = Vec::new();
     let nonzero = FillRule::NonZero;
 
-    // 1. Every way and waterway around the cell (a quarter of a cell further each way), every node onto its face.
+    // 1. Every way around the cell (a quarter of a cell further each way), every node onto its face.
     let started = Instant::now();
-    let m = 0.25 * (cell[2] - cell[0]);
-    let view = [cell[0] - m, cell[1] - m, cell[2] + m, cell[3] + m];
-    let [west, south, east, north] = s2::lat_lon_bounds(face, view, 0.001);
-    let bbox = [west, south, east, north];
-    // Coarse tiles draw their buildings as massing (the fine cells' come from the TS cell server).
-    let coarse = c.level <= COARSE_LEVEL;
-    let (mut ways, water, heights, owned) = match source {
-        Source::Postgres { db, data } => (
-            ways::load_road_ways(db, west, south, east, north)?,
-            water::load_water(db, west, south, east, north)?,
-            Heights::Dem(elevation::Elevation::region(&data.join("dem"), bbox)?),
-            if coarse {
-                Some(buildings::load(db, bbox, |lon, lat| c.owns(lon, lat))?)
-            } else {
-                None
-            },
-        ),
-        Source::Fixture { ways, height } => (
-            ways.clone(),
-            water::Water::empty(),
-            Heights::Flat(height),
-            coarse.then(buildings::Buildings::default),
-        ),
-    };
+    let Inputs {
+        mut ways,
+        water,
+        heights,
+        buildings: owned,
+    } = inputs;
     if let Some(min) = options.min_class {
         ways = ways.keep(|w| ways.class[w] <= min);
     }

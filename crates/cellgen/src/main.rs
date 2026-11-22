@@ -83,25 +83,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 o.sidewalks &= flag("--no-sidewalks").is_none();
                 o
             };
-            let (mut client, data) = match fixture {
+            let (pool, data) = match fixture {
                 Some(_) => (None, None),
-                None => (
-                    Some(postgres::Client::connect(&db, postgres::NoTls)?),
-                    Some(data_dir()?),
-                ),
+                None => (Some(pool(&db)?), Some(data_dir()?)),
             };
+            let runtime = tokio::runtime::Runtime::new()?;
             let out = match value("--out")? {
                 Some(o) => PathBuf::from(o),
                 None => data.clone().unwrap_or(data_dir()?).join("rust-cells"),
             };
             for c in &cells {
                 let started = std::time::Instant::now();
-                let source = match (&fixture, client.as_mut(), data.as_deref()) {
-                    (Some(ways), _, _) => cell::Source::Fixture { ways, height },
-                    (None, Some(db), Some(data)) => cell::Source::Postgres { db, data },
+                let inputs = match (&fixture, &pool, data.as_deref()) {
+                    (Some(ways), _, _) => cell::Inputs::fixture(ways, height, c),
+                    (None, Some(pool), Some(data)) => runtime
+                        .block_on(cell::Inputs::load(pool, data, c))
+                        .map_err(|e| e.to_string())?,
                     _ => unreachable!(),
                 };
-                let built = cell::build(source, c, &options(c), pictures.as_deref())?;
+                let loaded = started.elapsed();
+                let built = cell::build(inputs, c, &options(c), pictures.as_deref())?;
                 let dir = out.join(&c.token);
                 std::fs::create_dir_all(&dir)?;
                 std::fs::write(dir.join("ground.arrow"), &built.ground)?;
@@ -110,7 +111,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::fs::write(dir.join("buildings.arrow"), v)?;
                     std::fs::write(dir.join("buildings_triangles.arrow"), t)?;
                 }
-                println!("cell {} built in {:.0?}", c.token, started.elapsed());
+                println!(
+                    "cell {} built in {:.0?} (loaded in {loaded:.0?})",
+                    c.token,
+                    started.elapsed()
+                );
                 for line in &built.log {
                     println!("  {line}");
                 }
@@ -122,9 +127,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let what = args.get(1).ok_or(USAGE)?;
             let c = cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?;
             let started = std::time::Instant::now();
-            let mut db = postgres::Client::connect(&db, postgres::NoTls)?;
+            let pool = pool(&db)?;
             let box_ = s2::lat_lon_bounds(c.face, c.square, 0.0);
-            let b = buildings::load(&mut db, box_, |lon, lat| c.owns(lon, lat))?;
+            let b = tokio::runtime::Runtime::new()?
+                .block_on(async {
+                    let db = pool.get().await?;
+                    buildings::load(&db, box_, |lon, lat| c.owns(lon, lat)).await
+                })
+                .map_err(|e| e.to_string())?;
             let loaded = started.elapsed();
             let metric = s2::cell_metric(c.face, c.square);
             let gap: f64 = flag("--gap")
@@ -167,10 +177,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(i) => args.get(i + 1).ok_or(USAGE)?.parse()?,
                 None => 5175,
             };
-            serve::serve(port, data_dir()?, db)
+            serve::serve(port, data_dir()?, pool(&db)?)
         }
         _ => Err(USAGE.into()),
     }
+}
+
+/// A pool of Postgres connections from a connection string (as libpq's: "host=… user=… dbname=…").
+fn pool(db: &str) -> Result<deadpool_postgres::Pool, Box<dyn std::error::Error>> {
+    let config: tokio_postgres::Config = db.parse()?;
+    let manager = deadpool_postgres::Manager::from_config(
+        config,
+        tokio_postgres::NoTls,
+        deadpool_postgres::ManagerConfig {
+            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+        },
+    );
+    Ok(deadpool_postgres::Pool::builder(manager)
+        .max_size(32)
+        .build()?)
 }
 
 /// GAME_DATA, or the nearest data/ with a dem/ in it, from the working directory up.
