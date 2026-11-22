@@ -178,3 +178,62 @@ pub fn draw_draped(
     pixmap.save_png(path)?;
     Ok(())
 }
+
+/// GPU buffers drawn top-down from nothing but the buffers: x east to the right, y north up, every triangle in its
+/// material's color, shaded by its normal (light from the northwest, high).
+pub fn draw_mesh(
+    m: &crate::mesh::Mesh,
+    colors: &[[u8; 3]],
+    size: u32,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in &m.positions {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let span = (hi[0] - lo[0]).max(hi[1] - lo[1]);
+    let to_px = |p: [f32; 3]| {
+        (
+            (p[0] - lo[0]) / span * size as f32,
+            (hi[1] - p[1]) / span * size as f32,
+        )
+    };
+    let light = glam::Vec3::new(-1.0, 1.0, 2.0).normalize();
+    let mut pixmap = tiny_skia::Pixmap::new(size, size).ok_or("bad image size")?;
+    pixmap.fill(tiny_skia::Color::WHITE);
+    for t in m.indices.chunks(3) {
+        let [a, b, c] = [t[0], t[1], t[2]].map(|i| i as usize);
+        let shade = 0.35 + 0.75 * glam::Vec3::from_array(m.normals[a]).dot(light).max(0.0);
+        let [r, g, bl] =
+            colors[m.material[a] as usize].map(|c| (c as f32 * shade).min(255.0) as u8);
+        let mut tri = tiny_skia::PathBuilder::new();
+        let ((x0, y0), (x1, y1), (x2, y2)) = (
+            to_px(m.positions[a]),
+            to_px(m.positions[b]),
+            to_px(m.positions[c]),
+        );
+        tri.move_to(x0, y0);
+        tri.line_to(x1, y1);
+        tri.line_to(x2, y2);
+        tri.close();
+        let paint = tiny_skia::Paint {
+            shader: tiny_skia::Shader::SolidColor(tiny_skia::Color::from_rgba8(r, g, bl, 255)),
+            anti_alias: false,
+            ..Default::default()
+        };
+        if let Some(tri) = tri.finish() {
+            pixmap.fill_path(
+                &tri,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+    }
+    pixmap.save_png(path)?;
+    Ok(())
+}

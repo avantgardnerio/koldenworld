@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clipper2-rust = { version = "1.2.0", features = ["using_z"] }
+earcutr = "0.5.0"
 glam = "0.34.3"
 postgres = "0.19.14"
 robust = "1.2.0"

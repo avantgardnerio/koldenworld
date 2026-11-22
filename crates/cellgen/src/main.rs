@@ -2,9 +2,11 @@ mod clip;
 mod draw;
 mod elevation;
 mod faces;
+mod geodesy;
 mod geom;
 mod graph;
 mod markings;
+mod mesh;
 mod polygon;
 mod s2;
 mod terrain;
@@ -392,6 +394,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cell_frame,
         "target/draped.png",
     )?;
+
+    // GPU buffers: the draped pieces triangulated, positions and normals in the cell's ENU frame.
+    let started = std::time::Instant::now();
+    let mesh = mesh::build(&draped, &terrain, face, cell);
+    let took = started.elapsed();
+    let tri_area = |t: &[u32], flat: bool| {
+        let p = |i: u32| {
+            let v = glam::Vec3::from_array(mesh.positions[i as usize]).as_dvec3();
+            if flat { v.with_z(0.0) } else { v }
+        };
+        (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).length() / 2.0
+    };
+    let (flat, sloped): (f64, f64) = mesh
+        .indices
+        .chunks(3)
+        .map(|t| (tri_area(t, true), tri_area(t, false)))
+        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
+    // The check: the triangles' top-down area against the cell's own, both in the ENU frame: the cell's boundary traced
+    // through the exact (s, t) → ground map, 1,024 points a side (the map bends edges a little over a kilometre), at the
+    // terrain's mean height (the ground is 1.6 km up, where a square is 0.05% bigger than on the ellipsoid; the cell's
+    // own relief leaves the check a few m² either way).
+    let mean_h = terrain.heights.iter().sum::<f64>() / terrain.heights.len() as f64;
+    let cell_enu = {
+        let (clat, clon) =
+            s2::st_to_lat_lon(face, [(cell[0] + cell[2]) / 2.0, (cell[1] + cell[3]) / 2.0]);
+        let frame = geodesy::Frame::at(clat, clon, 0.0);
+        let k = 1024;
+        let corners = [
+            [cell[0], cell[1]],
+            [cell[2], cell[1]],
+            [cell[2], cell[3]],
+            [cell[0], cell[3]],
+        ];
+        let ring = (0..4).flat_map(|c| {
+            let (a, b) = (corners[c], corners[(c + 1) % 4]);
+            (0..k).map(move |i| {
+                [
+                    a[0] + (b[0] - a[0]) * i as f64 / k as f64,
+                    a[1] + (b[1] - a[1]) * i as f64 / k as f64,
+                ]
+            })
+        });
+        let ring = ring.map(|st| {
+            let (lat, lon) = s2::st_to_lat_lon(face, st);
+            frame.local(geodesy::ecef(lat, lon, mean_h)).truncate()
+        });
+        geom::signed_area(ring)
+    };
+    println!(
+        "mesh in {took:.0?}: {} vertices, {} triangles ({} pieces failed); {} index ranges by kind; {:.1} MB; \
+         area top-down {flat:.2} m², the cell at {mean_h:.0} m {cell_enu:.2} m² (off by {:.2}); on the slopes {sloped:.0} m²",
+        mesh.positions.len(),
+        mesh.indices.len() / 3,
+        mesh.failed,
+        mesh.ranges.len(),
+        (mesh.positions.len() * 25 + mesh.indices.len() * 4) as f64 / 1e6,
+        flat - cell_enu
+    );
+    draw::draw_mesh(&mesh, &colors, 4096, "target/mesh.png")?;
 
     // Close up: the busiest marked junction in the cell (most marked roads meeting), 70 m across.
     let marked = |e: usize| widths::profile(ways.class[graph.edge_way[e] as usize]).2;

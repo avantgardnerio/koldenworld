@@ -8,7 +8,9 @@
 
 use crate::clip::UNITS;
 use crate::geom::{self, Metric};
-use clipper2_rust::{Path64, Paths64, Point64, Rect64, rect_clip_64};
+use clipper2_rust::{
+    ClipType, Clipper64, FillRule, Path64, Paths64, Point64, PolyTree64, Rect64, rect_clip_64,
+};
 use glam::DVec2;
 
 /// Clipper units per lattice spacing in grid coordinates (a spacing is about 17 m: a unit is 17 µm).
@@ -22,11 +24,12 @@ pub struct Terrain {
 }
 
 /// Ground pieces cut to terrain triangles, as columns: piece p is points start[p]..start[p + 1], of kind kind[p] in
-/// triangle tri[p] ((j·n + i)·2, + 1 for the upper-left one). A hole is a piece wound clockwise, in the same triangle.
+/// triangle tri[p] ((j·n + i)·2, + 1 for the upper-left one). A hole is wound clockwise and follows its outer ring.
 #[derive(Default)]
 pub struct Draped {
     pub kind: Vec<u8>,
     pub tri: Vec<u32>,
+    pub outer: Vec<u32>, // the outer ring a piece is a hole in (itself, for an outer ring); holes follow their outer
     pub start: Vec<u32>,
     pub st: Vec<DVec2>,
     pub h: Vec<f64>,
@@ -82,12 +85,24 @@ impl Terrain {
                         (0, Rect64::new(d, j * g, d + g, (j + 1) * g)),
                         (1, Rect64::new(d - g, j * g, d, (j + 1) * g)),
                     ] {
-                        for p in rect_clip_64(&rect, &sheared) {
-                            let piece: Path64 = p
-                                .iter()
-                                .map(|q| Point64::new_z(q.x + q.y, q.y, q.z))
-                                .collect();
-                            self.push(&mut out, k as u8, ((j * n + i) * 2 + upper) as u32, &piece);
+                        let clipped: Paths64 = rect_clip_64(&rect, &sheared)
+                            .iter()
+                            .map(|p| {
+                                p.iter()
+                                    .map(|q| Point64::new_z(q.x + q.y, q.y, q.z))
+                                    .collect()
+                            })
+                            .collect();
+                        // Resolved nonzero (a hole cut from a path apart from its outer cancels it here), each outer ring
+                        // followed by its own holes.
+                        let tri = ((j * n + i) * 2 + upper) as u32;
+                        for (outer, holes) in resolve(&clipped) {
+                            let Some(o) = self.push(&mut out, k as u8, tri, &outer, None) else {
+                                continue;
+                            };
+                            for hole in &holes {
+                                self.push(&mut out, k as u8, tri, hole, Some(o));
+                            }
                         }
                     }
                 }
@@ -132,10 +147,19 @@ impl Terrain {
         Point64::new_z(g.x.round() as i64, g.y.round() as i64, q.z)
     }
 
-    fn push(&self, out: &mut Draped, kind: u8, tri: u32, piece: &Path64) {
+    /// Adds a piece (a hole in `outer`, or an outer ring if None) and returns its index; None if it's too short.
+    fn push(
+        &self,
+        out: &mut Draped,
+        kind: u8,
+        tri: u32,
+        piece: &Path64,
+        outer: Option<u32>,
+    ) -> Option<u32> {
         if piece.len() < 3 {
-            return;
+            return None;
         }
+        let index = out.kind.len() as u32;
         let (square, upper) = ((tri / 2) as usize, tri % 2 == 1);
         let (i, j) = (square % self.n, square / self.n);
         let side = self.n + 1;
@@ -156,7 +180,9 @@ impl Terrain {
         }
         out.kind.push(kind);
         out.tri.push(tri);
+        out.outer.push(outer.unwrap_or(index));
         out.start.push(out.st.len() as u32);
+        Some(index)
     }
 }
 
@@ -178,5 +204,25 @@ fn overlapping(paths: &Paths64, i: Option<i64>, j: Option<i64>) -> Paths64 {
                 && j.is_none_or(|j| y1 > j * g && y0 < (j + 1) * g)
         })
         .cloned()
+        .collect()
+}
+
+/// Paths resolved nonzero into outer rings, each with its holes (islands in a hole are outer rings again).
+fn resolve(paths: &Paths64) -> Vec<(Path64, Vec<Path64>)> {
+    let mut c = Clipper64::new();
+    c.add_subject(paths);
+    let (mut tree, mut open) = (PolyTree64::new(), Paths64::new());
+    c.execute_tree(ClipType::Union, FillRule::NonZero, &mut tree, &mut open);
+    (1..tree.nodes.len())
+        .filter(|&i| !tree.is_hole(i))
+        .map(|i| {
+            let node = &tree.nodes[i];
+            let holes = node
+                .children()
+                .iter()
+                .map(|&h| tree.nodes[h].polygon().clone())
+                .collect();
+            (node.polygon().clone(), holes)
+        })
         .collect()
 }

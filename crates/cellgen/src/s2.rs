@@ -2,6 +2,7 @@
 //! is its largest axis, (u, v) in [-1, 1] is where it meets that face (gnomonic), and (s, t) in [0, 1] stretches
 //! (u, v) quadratically to even out cell sizes. Lat/lon are taken as spherical coordinates, as S2 does.
 
+use crate::geodesy;
 use crate::geom::Metric;
 use glam::{DMat2, DVec2};
 
@@ -34,28 +35,21 @@ pub fn cell_square([s, t]: [f64; 2], level: u32) -> [f64; 4] {
 }
 
 /// Metres per unit of s and t across a cell, east and north: the columns of the 2×2 matrix taking a small (s, t)
-/// step to metres on the ground, measured across the cell (central differences between its edges' midpoints).
-/// Over a level-13 cell the true local scale varies by about 1 part in 10,000, so one matrix serves the cell.
+/// step to metres on the ground, measured across the cell (central differences between its edges' midpoints) in the
+/// cell's ENU frame (the frame its mesh is in, so the two agree). Over a level-13 cell the true local scale varies by
+/// about 1 part in 10,000, so one matrix serves the cell.
 pub fn cell_metric(face: u32, [s0, t0, s1, t1]: [f64; 4]) -> Metric {
     let c = [(s0 + s1) / 2.0, (t0 + t1) / 2.0];
     let (lat0, lon0) = st_to_lat_lon(face, c);
-    // WGS84 radii of curvature at the cell's latitude: meridian (north) and prime vertical (east).
-    let (a, e2) = (6_378_137.0, 0.006_694_379_990_141_317);
-    let w = 1.0 - e2 * (lat0 * DEG).sin().powi(2);
-    let (r_north, r_east) = (
-        a * (1.0 - e2) / w.powf(1.5),
-        a / w.sqrt() * (lat0 * DEG).cos(),
-    );
+    let frame = geodesy::Frame::at(lat0, lon0, 0.0);
     let metres = |st: [f64; 2]| {
         let (lat, lon) = st_to_lat_lon(face, st);
-        [(lon - lon0) * DEG * r_east, (lat - lat0) * DEG * r_north]
+        frame.local(geodesy::ecef(lat, lon, 0.0)).truncate()
     };
-    let (e0, e1) = (metres([s0, c[1]]), metres([s1, c[1]]));
-    let (n0, n1) = (metres([c[0], t0]), metres([c[0], t1]));
     let (ds, dt) = (s1 - s0, t1 - t0);
     let to_m = DMat2::from_cols(
-        DVec2::new(e1[0] - e0[0], e1[1] - e0[1]) / ds,
-        DVec2::new(n1[0] - n0[0], n1[1] - n0[1]) / dt,
+        (metres([s1, c[1]]) - metres([s0, c[1]])) / ds,
+        (metres([c[0], t1]) - metres([c[0], t0])) / dt,
     );
     Metric::new(DVec2::from_array(c), to_m)
 }
