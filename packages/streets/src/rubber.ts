@@ -36,19 +36,19 @@ export function push(loops: Point[][], d: number): Point[][] {
     const a = loop[(i - 1 + loop.length) % loop.length]!, b = loop[(i + 1) % loop.length]!;
     const n1 = unit(p.y - a.y, -(p.x - a.x)), n2 = unit(b.y - p.y, -(b.x - p.x));
     const m = unit(n1.x + n2.x, n1.y + n2.y), k = Math.min(MITER, 1 / Math.max(1 / MITER, m.x * n1.x + m.y * n1.y));
-    return { x: p.x + m.x * d * k, y: p.y + m.y * d * k };
+    return { x: p.x + m.x * d * k, y: p.y + m.y * d * k, z: p.z };
   }));
 }
 
 /** The pavement, then a band per width, each pushed out from the last. */
-export function layers(g: Graph, widths: number[]): Layers {
+export function layers(g: Graph, widths: number[], opts: { triangles?: boolean } = {}): Layers {
   const { streets, junctions } = splitStreets(g);
-  const pavement = slabs([...streets, ...junctions.map((j) => j.ring)].map((p) => [p]), (w) => w.some((v) => v !== 0));
+  const pavement = slabs([...streets, ...junctions.map((j) => j.ring)].map((p) => [p]), (w) => w.some((v) => v !== 0), opts);
   const bands: Layers["bands"] = [];
   let inner = pavement.loops;
   for (const width of widths) {
     const outer = push(inner, width);
-    bands.push({ width, loops: outer, result: slabs([outer, inner], (w) => w[0] !== 0 && !(w[1]! > 0)) });
+    bands.push({ width, loops: outer, result: slabs([outer, inner], (w) => w[0] !== 0 && !(w[1]! > 0), opts) });
     inner = outer;
   }
   return { pavement, bands };

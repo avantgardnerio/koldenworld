@@ -17,7 +17,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, streetsTriangles, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
@@ -34,7 +34,7 @@ import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
-  AEROWAY, BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, MARKING_FADE, MARKINGS, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
+  AEROWAY, BUILDING_COLORS_RGB, STREETS, CLASS_COLORS_RGB, fogRange, MARKING_FADE, MARKINGS, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -125,6 +125,7 @@ interface CellGpu {
   lods: { start: number; count: number }[];
   roads?: FlatLayer;
   water?: FlatLayer;
+  streets?: FlatLayer;
   aeroways?: FlatLayer;
   lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
   traffic?: TrafficCell;  // this cell's roads in the traffic sim
@@ -170,7 +171,9 @@ async function start(): Promise<void> {
     for (let i = 2; i < tm.positions.length; i += 3) { z0 = Math.min(z0, tm.positions[i]!); z1 = Math.max(z1, tm.positions[i]!); }
     const sphere = (flat: number) => ({ centerZ: (z0 + z1) / 2, radius: Math.hypot(flat, (z1 - z0) / 2) });
     if (!c) return { frame, missing: true, ...sphere(groundReach), model, terrain, ground, lods: tm.lods, counts: zero };
-    const surface = roadSurfaceMesh(c.graph);
+    // The pavement (with grass and sidewalks) is the streets mesh when the cell has one; the road surface adds the markings.
+    const streets = streetsTriangles(c.streets), hasStreets = streets.material.length > 0;
+    const surface = roadSurfaceMesh(c.graph, { surface: !hasStreets });
     const lines = roadLineMesh(c.graph);
     const tris = buildingMesh(c.buildings);
     // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
@@ -185,6 +188,10 @@ async function start(): Promise<void> {
       ground,
       lods: tm.lods,
       roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fade: MARKINGS, bias: ROAD_BIAS }),
+      streets: !hasStreets ? undefined : createFlatLayer(gl!, {
+        positions: streets.positions, dims: 3, material: streets.material,
+        indices: Uint32Array.from({ length: streets.material.length }, (_, i) => i),
+      }, { mode: gl!.TRIANGLES, colors: STREETS, bias: ROAD_BIAS }),
       water: c.water.material.length === 0 ? undefined : createFlatLayer(gl!, {
         positions: c.water.positions, dims: 3, material: c.water.material,
         indices: Uint32Array.from({ length: c.water.material.length }, (_, i) => i),
@@ -208,7 +215,7 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 8,
     dispose: (g) => {
-      [g.ground, g.water, g.aeroways, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose());
+      [g.ground, g.water, g.aeroways, g.streets, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose());
       if (g.traffic) traffic.remove(g.traffic);
     },
     onChange: () => {
@@ -328,6 +335,7 @@ async function start(): Promise<void> {
     }
     for (const g of visible) g.water?.draw(f, g.model);
     for (const g of visible) g.aeroways?.draw(f, g.model);
+    for (const g of visible) g.streets?.draw(f, g.model);
     for (const g of visible) g.roads?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     let carTriangles = 0;

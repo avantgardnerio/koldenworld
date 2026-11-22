@@ -1,7 +1,8 @@
 // A street graph from OSM ways: nodes where ways meet or end, streets
 // (edges) between them as polylines in meters, each with its half width.
 
-export interface Point { x: number; y: number }
+/** A point in meters; z (height) when the streets have heights, carried through everything made from them. */
+export interface Point { x: number; y: number; z?: number }
 
 /** An OSM way as the database has it: node ids and their [lon, lat], class, total lanes. */
 export interface WayInput {

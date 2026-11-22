@@ -28,7 +28,7 @@ export function splitStreets(g: Graph): StreetPolygons {
   });
   const beside: StreetPolygons["ends"] = new Map(), junctions: StreetPolygons["junctions"] = [];
   const copy = (n: number, angle: number, d: number): Point =>
-    ({ x: g.nodes[n]!.x + Math.cos(angle) * d, y: g.nodes[n]!.y + Math.sin(angle) * d });
+    ({ x: g.nodes[n]!.x + Math.cos(angle) * d, y: g.nodes[n]!.y + Math.sin(angle) * d, z: g.nodes[n]!.z });
   for (const [n, list] of ends) {
     if (list.length === 1) {
       const { dir, street, end } = list[0]!, hw = g.streets[street]!.hw;
@@ -76,7 +76,7 @@ function offsets(pts: Point[], d: number, from: Point, to: Point): Point[] {
     const p = pts[i]!, a = pts[i - 1]!, b = pts[i + 1]!;
     const n1 = unit(-(p.y - a.y), p.x - a.x), n2 = unit(-(b.y - p.y), b.x - p.x);
     const m = unit(n1.x + n2.x, n1.y + n2.y), k = Math.min(MITER, 1 / Math.max(1 / MITER, m.x * n1.x + m.y * n1.y));
-    out.push({ x: p.x + m.x * d * k, y: p.y + m.y * d * k });
+    out.push({ x: p.x + m.x * d * k, y: p.y + m.y * d * k, z: p.z });
   }
   return out;
 }

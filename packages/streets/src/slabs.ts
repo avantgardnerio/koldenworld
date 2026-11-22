@@ -41,12 +41,32 @@ export interface SlabResult {
   tied: [Point, Point, Point, Point][];  // distinct pairs of pieces that tied: each piece's two ends
 }
 
+/** A loop of vertex indices, split wherever it comes back to a vertex it has passed: simple loops. */
+function unpinch(loop: number[]): number[][] {
+  const out: number[][] = [], stack: number[] = [], at = new Map<number, number>();
+  for (const k of loop) {
+    const seen = at.get(k);
+    if (seen !== undefined) {
+      // Back at k: what's on the stack since it is a loop of its own.
+      const sub = stack.splice(seen);
+      for (const j of sub) at.delete(j);
+      out.push(sub);
+    }
+    at.set(k, stack.length);
+    stack.push(k);
+  }
+  out.push(stack);
+  return out.filter((l) => l.length >= 3);
+}
+
 /** A grid cell about four times the typical line's length, for the crossing search. */
 function gridSize(lines: { i: number; j: number }[], P: Point[]): number {
   if (lines.length === 0) return 1;
   const lengths = lines.map((l) => Math.hypot(P[l.j]!.x - P[l.i]!.x, P[l.j]!.y - P[l.i]!.y)).sort((a, b) => a - b);
   return Math.max(1, 4 * lengths[Math.floor(lengths.length / 2)]!);
 }
+
+const lerpZ = (a: Point, b: Point, t: number) => (a.z === undefined || b.z === undefined ? undefined : a.z + (b.z - a.z) * t);
 
 const orient = (a: Point, b: Point, c: Point) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 const between = (a: Point, b: Point, p: Point) =>
@@ -64,7 +84,8 @@ interface Piece { lo: number; hi: number; turns: Map<number, number> }
  * polys: per polygon, its rings (shared point objects are shared vertices).
  * inside(w): w[i] is polygon i's winding number in a cell.
  */
-export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): SlabResult {
+export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean, opts: { triangles?: boolean } = {}): SlabResult {
+  const wantTriangles = opts.triangles ?? false;
   const P: Point[] = [], index = new Map<Point, number>();
   const id = (p: Point) => {
     if (!index.has(p)) index.set(p, P.push(p) - 1);
@@ -128,7 +149,9 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
       const shared = e.i === f.i || e.i === f.j || e.j === f.i || e.j === f.j;
       const o1 = orient(a, b, c), o2 = orient(a, b, d), o3 = orient(c, d, a), o4 = orient(c, d, b);
       if (!shared && Math.sign(o1) * Math.sign(o2) < 0 && Math.sign(o3) * Math.sign(o4) < 0) {
-        const t = o3 / (o3 - o4), v = P.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }) - 1;
+        // Its height from whichever edge has heights (a clipping window may not).
+        const t = o3 / (o3 - o4), u = o1 / (o1 - o2);
+        const v = P.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: lerpZ(a, b, t) ?? lerpZ(c, d, u) }) - 1;
         e.on.push(v);
         f.on.push(v);
         events.crossings++;
@@ -178,6 +201,12 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
     if (y === b.y) return b.x;
     return a.x + ((b.x - a.x) * (y - a.y)) / (b.y - a.y);
   };
+  const zAt = (p: Piece, y: number) => {
+    const a = P[p.lo]!, b = P[p.hi]!;
+    if (y === a.y) return a.z;
+    if (y === b.y) return b.z;
+    return lerpZ(a, b, (y - a.y) / (b.y - a.y));
+  };
   const n = polys.length, triangles: Point[][] = [], outline: [number, number][] = [];
   const side = new Map<Piece, "west" | "east" | "none">();
   const tied: SlabResult["tied"] = [], tiedSeen = new Set<string>();  // which side the result is on, if just one
@@ -186,7 +215,7 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
     const y0 = ys[k]!, y1 = ys[k + 1]!, ym = (y0 + y1) / 2;
     while (next < rising.length && P[rising[next]!.lo]!.y <= y0) active.push(rising[next++]!);
     active = active.filter((p) => P[p.hi]!.y >= y1);
-    const span = active.map((p) => ({ p, x0: xAt(p, y0), x1: xAt(p, y1), xm: xAt(p, ym) }))
+    const span = active.map((p) => ({ p, x0: xAt(p, y0), x1: xAt(p, y1), xm: xAt(p, ym), z0: zAt(p, y0), z1: zAt(p, y1) }))
       .sort((s, t) => s.xm - t.xm);
     for (let i = 0; i + 1 < span.length; i++) {
       if (span[i]!.xm !== span[i + 1]!.xm) continue;
@@ -205,9 +234,9 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
       wasIn = isIn;
       if (!isIn) return;
       const t = span[i + 1]!;
-      const c = [{ x: s.x0, y: y0 }, { x: t.x0, y: y0 }, { x: t.x1, y: y1 }, { x: s.x1, y: y1 }] as const;
-      if (t.x0 !== s.x0) triangles.push([c[0], c[1], c[2]]);
-      if (t.x1 !== s.x1) triangles.push([c[0], c[2], c[3]]);
+      const c = [{ x: s.x0, y: y0, z: s.z0 }, { x: t.x0, y: y0, z: t.z0 }, { x: t.x1, y: y1, z: t.z1 }, { x: s.x1, y: y1, z: s.z1 }] as const;
+      if (wantTriangles && t.x0 !== s.x0) triangles.push([c[0], c[1], c[2]]);
+      if (wantTriangles && t.x1 !== s.x1) triangles.push([c[0], c[2], c[3]]);
       cells.push({ x0: s.x0, x1: t.x0, top0: s.x1, top1: t.x1 });
     });
     picked.push(cells);
@@ -251,8 +280,11 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
       };
       cur = (from.get(v) ?? []).filter((i) => !used.has(i)).sort((i, j) => turn(i) - turn(j))[0];
     }
-    const pts = loop.map((k) => P[k]!);
-    if (pts.length >= 3 && area(pts) !== 0) loops.push(pts);
+    // A loop that touches itself at a vertex is split there into simple loops.
+    for (const simple of unpinch(loop)) {
+      const pts = simple.map((k) => P[k]!);
+      if (pts.length >= 3 && area(pts) !== 0) loops.push(pts);
+    }
   }
   return { triangles, loops, events, tied };
 }

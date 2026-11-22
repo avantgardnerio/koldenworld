@@ -12,7 +12,7 @@ export {
   ownerPoint, type CellContents, type CellFiles, type GroundMesh,
 } from "./cell.ts";
 export {
-  drapeCell, flatTerrain, footprintMax, groundNoise, groundSampler, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,
+  drapeCell, drapeRoadGraph, flatTerrain, footprintMax, groundNoise, groundSampler, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,
   terrainToArrow, type CellTerrain, type GroundSampler, type HeightFn, type TerrainMesh,
 } from "./terrain.ts";
 export {
@@ -39,6 +39,10 @@ export {
   AEROWAY_LIFT, AerowayMaterial, aerowaysFromArrow, aerowaysToArrow, cellAeroways, emptyAeroways,
   type AerowayAreaInput, type AerowayLineInput, type AerowayMesh,
 } from "./aeroways.ts";
+export {
+  cellStreets, emptyStreets, STREET_BANDS, StreetsMaterial, streetsFromArrow, streetsGraph, streetsToArrow, streetsTriangles,
+  type StreetPolygon, type StreetsPolygons,
+} from "./streets-mesh.ts";
 export { readGlb, type ModelMesh } from "./glb.ts";
 export {
   AIRCRAFT_KINDS, AIRCRAFT_PALETTE, aircraftKind, aircraftMesh, aircraftMeshes, parseAircraft, tailColor, TAIL_COLORS,

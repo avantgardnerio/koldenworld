@@ -209,22 +209,36 @@ export function terrainFromArrow(bytes: Uint8Array): CellTerrain {
  * between their nodes instead, with no skirts. Pure: returns new tables.
  */
 export function drapeCell(c: CellContents, ground: GroundSampler, maxSegment = 8): CellContents {
-  const toLonLat = enuUnprojection(c.frame);
+  const { place, groundAt } = placing(c.frame, ground);
+  return {
+    ...c,
+    graph: drapeRoadGraph(c.graph, c.frame, ground, maxSegment),
+    buildings: drapeBuildings(c.buildings, place, groundAt),
+    terrain: ground.terrain(c.cell),
+  };
+}
+
+/**
+ * Puts any road graph in `frame` on the drawn ground, as drapeCell does: e.g. every road around a
+ * cell, so its neighbors' roads come out as they draw them (a road's heights depend only on the ground).
+ */
+export function drapeRoadGraph(g: RoadGraph, frame: Frame, ground: GroundSampler, maxSegment = 8): RoadGraph {
+  const { place, groundAt, toLonLat } = placing(frame, ground);
+  const maxOver = (corners: [number, number][]) => footprintMax(ground, corners.map(([x, y]) => toLonLat(x, y)));
+  return drapeGraph(g, place, groundAt, maxOver, maxSegment);
+}
+
+function placing(frame: Frame, ground: GroundSampler) {
+  const toLonLat = enuUnprojection(frame);
   const groundAt = (x: number, y: number) => {
     const [lon, lat] = toLonLat(x, y);
     return ground(lat, lon);
   };
   const place = (x: number, y: number, h?: number): Vec3 => {
     const [lon, lat] = toLonLat(x, y);
-    return ecefToLocal(c.frame, geodeticToEcef({ lat, lon, h: h ?? ground(lat, lon) }));
+    return ecefToLocal(frame, geodeticToEcef({ lat, lon, h: h ?? ground(lat, lon) }));
   };
-  const maxOver = (corners: [number, number][]) => footprintMax(ground, corners.map(([x, y]) => toLonLat(x, y)));
-  return {
-    ...c,
-    graph: drapeGraph(c.graph, place, groundAt, maxOver, maxSegment),
-    buildings: drapeBuildings(c.buildings, place, groundAt),
-    terrain: ground.terrain(c.cell),
-  };
+  return { toLonLat, groundAt, place };
 }
 
 type Place = (x: number, y: number, h?: number) => Vec3;

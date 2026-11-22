@@ -12,7 +12,7 @@ import path from "node:path";
 import { fetchAreas, hasFetch, loadAeroways, loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
 import type { OverpassResponse } from "@game/osm-import";
 import {
-  BUILDINGS_VERSION, buildCell, carveWater, cellAeroways, cellFromLatLon, cellWater, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
+  BUILDINGS_VERSION, buildCell, buildRoadGraph, carveWater, cellAeroways, cellStreets, drapeRoadGraph, enuProjection, cellFromLatLon, cellWater, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
   cellToken, geodeticToEcef, ROAD_GRAPH_VERSION, type CellFiles, type CellId,
 } from "@game/world";
 import { Elevation } from "./elevation.ts";
@@ -163,6 +163,8 @@ export class CellService {
     const contents = {
       ...draped, water: cellWater(cell, draped.frame, water.areas, water.lines, heights),
       aeroways: cellAeroways(cell, draped.frame, aeroways.areas, aeroways.lines, ground),
+      // Pavement, grass and sidewalk from every road around the cell, draped as its owner drapes it.
+      streets: cellStreets(cell, draped.frame, drapeRoadGraph(buildRoadGraph(ways, enuProjection(draped.frame)), draped.frame, ground)),
     };
     const files = cellToArrow(contents);
     lap("drape");

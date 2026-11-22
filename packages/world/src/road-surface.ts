@@ -278,18 +278,24 @@ export function nodeRadii(g: RoadGraph): Float32Array {
   return r;
 }
 
-export function roadSurfaceMesh(g: RoadGraph): SurfaceMesh {
+/**
+ * The road surface. With `surface: false`, only the markings: when the pavement itself comes from
+ * the cell's streets mesh (streets-mesh.ts), which joins every street and intersection as one.
+ */
+export function roadSurfaceMesh(g: RoadGraph, opts: { surface?: boolean } = {}): SurfaceMesh {
+  const surface = opts.surface ?? true;
   const m = new MeshBuilder();
   const radius = nodeRadii(g);
   const degree = (n: number) => g.nodes.edgeStart[n + 1]! - g.nodes.edgeStart[n]!;
   const lines: Polyline[] = [];
 
-  for (let n = 0; n < g.nodes.count; n++) disc(m, g.nodes.x[n]!, g.nodes.y[n]!, g.nodes.z[n]!, radius[n]!, g.nodes.drop[n]!);
+  if (surface) for (let n = 0; n < g.nodes.count; n++) disc(m, g.nodes.x[n]!, g.nodes.y[n]!, g.nodes.z[n]!, radius[n]!, g.nodes.drop[n]!);
 
   for (let e = 0; e < g.edges.count; e++) {
     const pl = edgePolyline(g, e);
     if (pl.length < 2 * S) continue;
     lines[e] = pl;
+    if (!surface) continue;
     const hw = edgeHalfWidth(g, e), walks = g.edges.sidewalks[e]!;
     ribbon(m, pl, -hw, hw, SurfaceMaterial.Asphalt);
     // Fill skirts hang from the road's edges, or from the sidewalks' outer edges where there are sidewalks.

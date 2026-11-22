@@ -23,6 +23,9 @@ export const TERRAIN_STYLE: TerrainStyle = {
 /** vec3 per WaterMaterial: lake, river, stream. */
 export const WATER = palette(["#3b6a8c", "#4a7690", "#55809a"]);
 
+/** vec3 per StreetsMaterial: pavement (as asphalt), grass, sidewalk. */
+export const STREETS = palette(["#2e3034", "#5f8f3e", "#b4b1aa"]);
+
 /** vec3 per AerowayMaterial: apron, taxiway, runway (concrete, the runway lightest). */
 export const AEROWAY = palette(["#8f9196", "#7d8086", "#a4a6aa"]);
 
