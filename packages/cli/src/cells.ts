@@ -12,7 +12,7 @@ import path from "node:path";
 import { fetchAreas, hasFetch, loadAeroways, loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
 import type { OverpassResponse } from "@game/osm-import";
 import {
-  BUILDINGS_VERSION, buildCell, buildRoadGraph, carveWater, cellAeroways, cellStreets, drapeRoadGraph, enuProjection, cellFromLatLon, cellWater, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
+  BUILDINGS_VERSION, buildCell, carveWater, cellAeroways, cellFromLatLon, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
   cellToken, geodeticToEcef, ROAD_GRAPH_VERSION, type CellFiles, type CellId,
 } from "@game/world";
 import { Elevation } from "./elevation.ts";
@@ -165,17 +165,11 @@ export class CellService {
     lap("dem+water+aeroways");
     const ground = groundSampler(dem, cellLevel(cell), carveWater(water.areas));
     const draped = drapeCell(flat, ground);
-    const heights = { dem, surface: groundSampler(dem, cellLevel(cell)), ground };
     lap("drape");
-    const waterMesh = cellWater(cell, draped.frame, water.areas, water.lines, heights);
     const aerowayMesh = cellAeroways(cell, draped.frame, aeroways.areas, aeroways.lines, ground);
-    lap("water+aeroways");
-    // Pavement, grass and sidewalk from every road around the cell, draped as its owner drapes it.
-    const around = drapeRoadGraph(buildRoadGraph(ways, enuProjection(draped.frame)), draped.frame, ground);
-    lap("streets-drape");
-    const streets = cellStreets(cell, draped.frame, around);
-    lap("streets");
-    const contents = { ...draped, water: waterMesh, aeroways: aerowayMesh, streets };
+    lap("aeroways");
+    // The drawn ground (pavement, markings, grass, sidewalks, lots and water) comes from the Rust generator.
+    const contents = { ...draped, aeroways: aerowayMesh };
     const files = cellToArrow(contents);
     lap("arrow");
     await mkdir(dir, { recursive: true });

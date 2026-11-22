@@ -1,19 +1,6 @@
-// Water for one cell (decision 25): lakes, river surfaces and waterway lines,
-// clipped to the cell's own square, triangulated, and placed on the ground.
-//
-// Unlike roads and buildings, water isn't owned by one cell: a reservoir or a
-// 50 km river would stretch far past any owner. Each cell clips to its own
-// square instead, so neighbors' pieces meet along the shared edge.
-//
-// Heights (with a HeightFn; without one everything is at h = 0):
-// - lakes are flat at one level, sampled inside the lake. USGS elevation is
-//   hydro-flattened (lakes are one height in the data), so every cell sampling
-//   the same lake gets the same level.
-// - river surfaces follow the ground, so they're cut into a grid first and
-//   every vertex is draped (wide rivers are flattened downstream in the data too).
-// - waterway lines become ribbons of their width, draped along the centerline.
-//
-// The output is a plain triangle list (no index buffer) with a material per vertex.
+// Water helpers: the terrain carved a little under lakes and river surfaces (for the heights cars and the camera use),
+// and the polygon and ribbon helpers airport surfaces share. The drawn water is part of the ground from the Rust
+// generator (crates/cellgen), where road wins over it.
 
 import earcut from "earcut";
 import type { FileMetadata } from "./arrow-util.ts";
@@ -37,14 +24,8 @@ export interface WaterwayInput {
   points: [lon: number, lat: number][];
 }
 
-export const WaterMaterial = { Lake: 0, River: 1, Stream: 2 } as const;
 
-export interface WaterMesh {
-  positions: Float32Array;  // x, y, z per vertex, three vertices per triangle, in the cell frame
-  material: Uint8Array;     // WaterMaterial per vertex
-}
 
-export const emptyWater = (): WaterMesh => ({ positions: new Float32Array(0), material: new Uint8Array(0) });
 
 const RIVER_GRID = 20;    // m: river surfaces are cut into squares this size before draping
 const LINE_SEGMENT = 20;  // m: waterway centerlines are densified to this
@@ -116,13 +97,6 @@ const area2 = (r: Pt[]) => {
 
 // --- the operator ------------------------------------------------------------------
 
-/** Where water surfaces go (decision 29). Without one, everything is at h = 0. */
-export interface WaterHeights {
-  dem: HeightFn;           // the raw elevation: a lake's level is sampled from it inside the lake
-  surface: HeightFn;       // the drawn ground before carving (groundSampler without carve): river surfaces
-  ground: GroundSampler;   // the drawn ground: streams sit at its highest point across their width
-}
-
 /** How far the terrain lattice is lowered inside lakes and river surfaces, m. */
 export const WATER_CARVE = 1;
 
@@ -159,86 +133,6 @@ export function carveWater(areas: WaterAreaInput[]): (cell: CellId, t: CellTerra
     }
     return { n: t.n, heights };
   };
-}
-
-export function cellWater(
-  cell: CellId, frame: Frame, areas: WaterAreaInput[], lines: WaterwayInput[], heights?: WaterHeights,
-): WaterMesh {
-  const height = heights?.surface;
-  const project = enuProjection(frame), unproject = enuUnprojection(frame);
-  let win: Pt[] = cellOutline(cell).corners.map((c) => project(c.lon, c.lat));
-  if (area2(win) < 0) win = win.reverse();
-  const pos: number[] = [], mat: number[] = [];
-  /** A vertex at (x, y) on the tangent plane, placed at height h (or the ground's) at its true position. */
-  const put = (x: number, y: number, m: number, h?: number) => {
-    const [lon, lat] = unproject(x, y);
-    const p = height ? ecefToLocal(frame, geodeticToEcef({ lat, lon, h: h ?? height(lat, lon) })) : [x, y, 0];
-    pos.push(p[0]!, p[1]!, p[2]!);
-    mat.push(m);
-  };
-  const fill = (rings: Pt[][], m: number, h?: number) => {
-    const flat = rings.flat(), holes: number[] = [];
-    let n = 0;
-    for (const r of rings.slice(0, -1)) holes.push((n += r.length));
-    const tris = earcut(flat.flat(), holes.length ? holes : undefined, 2);
-    for (const i of tris) put(flat[i]![0], flat[i]![1], m, h);
-  };
-
-  for (const a of areas) {
-    for (const polygon of a.polygons) {
-      const rings = polygon.map((r) => r.slice(0, -1).map(([lon, lat]) => project(lon, lat)));
-      const clipped = rings.map((r) => clipPolygon(r, win)).filter((r, i) => i > 0 ? r.length >= 3 : true);
-      if (clipped[0]!.length < 3) continue;
-      if (a.kind === "lake") {
-        fill(clipped, WaterMaterial.Lake, heights ? lakeLevel(clipped, unproject, heights.dem) : undefined);
-        continue;
-      }
-      // A river surface: cut into grid squares so every vertex can follow the ground.
-      const xs = clipped[0]!.map((p) => p[0]), ys = clipped[0]!.map((p) => p[1]);
-      for (let gx = Math.floor(Math.min(...xs) / RIVER_GRID) * RIVER_GRID; gx < Math.max(...xs); gx += RIVER_GRID) {
-        for (let gy = Math.floor(Math.min(...ys) / RIVER_GRID) * RIVER_GRID; gy < Math.max(...ys); gy += RIVER_GRID) {
-          const sq: Pt[] = [[gx, gy], [gx + RIVER_GRID, gy], [gx + RIVER_GRID, gy + RIVER_GRID], [gx, gy + RIVER_GRID]];
-          const outer = clipPolygon(clipped[0]!, sq);
-          if (outer.length < 3) continue;
-          fill([outer, ...clipped.slice(1).map((h) => clipPolygon(h, sq)).filter((h) => h.length >= 3)], WaterMaterial.River);
-        }
-      }
-    }
-  }
-
-  for (const w of lines) {
-    const m = w.kind === "river" || w.kind === "canal" ? WaterMaterial.River : WaterMaterial.Stream;
-    const line: Pt[] = [];
-    for (const [k, [lon, lat]] of w.points.entries()) {
-      const p = project(lon, lat);
-      if (k > 0) {
-        const q = line.at(-1)!, steps = Math.ceil(Math.hypot(p[0] - q[0], p[1] - q[1]) / LINE_SEGMENT);
-        for (let s = 1; s < steps; s++) line.push([q[0] + ((p[0] - q[0]) * s) / steps, q[1] + ((p[1] - q[1]) * s) / steps]);
-      }
-      line.push(p);
-    }
-    for (const piece of clipPolyline(line, win)) {
-      ribbon(piece, w.width / 2, m, put, heights ? (corners) => footprintMax(heights.ground, corners.map(([x, y]) => unproject(x, y))) : undefined);
-    }
-  }
-
-  return { positions: Float32Array.from(pos), material: Uint8Array.from(mat) };
-}
-
-/** The level of a lake: the median ground height at a few points inside its clipped part. */
-function lakeLevel(rings: Pt[][], unproject: (x: number, y: number) => [number, number], height: HeightFn): number {
-  const flat = rings.flat(), holes: number[] = [];
-  let n = 0;
-  for (const r of rings.slice(0, -1)) holes.push((n += r.length));
-  const tris = earcut(flat.flat(), holes.length ? holes : undefined, 2);
-  const hs: number[] = [];
-  for (let t = 0; t < tris.length && hs.length < 25; t += 3) {
-    const [a, b, c] = [flat[tris[t]!]!, flat[tris[t + 1]!]!, flat[tris[t + 2]!]!];
-    const [lon, lat] = unproject((a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3);
-    hs.push(height(lat, lon));
-  }
-  hs.sort((x, y) => x - y);
-  return hs[Math.floor(hs.length / 2)] ?? 0;
 }
 
 /**
@@ -278,23 +172,4 @@ export function ribbon(
       put(x, y, m, h);
     }
   }
-}
-
-// --- Arrow -------------------------------------------------------------------------
-//   water.arrow: one row per vertex: pos fixed_size_list<float32, 3>, material uint8
-
-export function waterToArrow(w: WaterMesh, metadata: FileMetadata): Uint8Array {
-  const type = new FixedSizeList(3, new Field("xyz", new Float32(), false));
-  const count = w.material.length;
-  return toIPC({
-    pos: makeData({ type, length: count, nullCount: 0, child: makeData({ type: new Float32(), length: 3 * count, nullCount: 0, data: w.positions }) }),
-    material: u8(w.material),
-  }, count, metadata);
-}
-
-export function waterFromArrow(bytes: Uint8Array): WaterMesh {
-  const { table } = readTable(bytes, "water");
-  const n = table.numRows;
-  const pos = column(table, "pos", "water").children[0]!.values as Float32Array;
-  return { positions: pos.subarray(0, 3 * n), material: (column(table, "material", "water").values as Uint8Array).subarray(0, n) };
 }
