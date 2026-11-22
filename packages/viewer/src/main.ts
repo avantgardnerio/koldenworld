@@ -32,7 +32,7 @@ import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
-  BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, MARKING_FADE, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
+  BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, MARKING_FADE, MARKINGS, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -177,11 +177,11 @@ async function start(): Promise<void> {
       terrain,
       ground,
       lods: tm.lods,
-      roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fadeToBase: true, bias: ROAD_BIAS }),
+      roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fade: MARKINGS, bias: ROAD_BIAS }),
       water: c.water.material.length === 0 ? undefined : createFlatLayer(gl!, {
         positions: c.water.positions, dims: 3, material: c.water.material,
         indices: Uint32Array.from({ length: c.water.material.length }, (_, i) => i),
-      }, { mode: gl!.TRIANGLES, colors: WATER, fadeToBase: false, bias: WATER_BIAS }),
+      }, { mode: gl!.TRIANGLES, colors: WATER, bias: WATER_BIAS }),
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       traffic: c.graph.edges.count === 0 ? undefined
         : traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model),
@@ -317,7 +317,7 @@ async function start(): Promise<void> {
     Object.assign(status, { cars, carTriangles, simTime: traffic.simTime });
     if (status.graphOverlay) {
       for (const g of visible) {
-        if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, fadeToBase: false, bias: 1 });
+        if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, bias: 1 });
         g.graph?.draw(f, g.model);
       }
     }

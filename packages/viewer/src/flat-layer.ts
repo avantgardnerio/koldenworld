@@ -20,7 +20,7 @@ const VERTEX = `#version 300 es
 uniform mat4 u_view;
 uniform mat4 u_model;
 uniform vec3 u_colors[${MAX_MATERIALS}];
-uniform bool u_fadeToBase;
+uniform uint u_fadeMaterials;  // materials 1..u_fadeMaterials blend into material 0 at a distance (0: none)
 uniform vec3 u_eye;
 uniform float u_bias;
 in vec3 a_pos;  // z defaults to 0 for 2D positions
@@ -38,7 +38,7 @@ void main() {
   }
   gl_Position = u_view * world;
   v_color = u_colors[a_mat];
-  v_base = u_fadeToBase && a_mat > 0u ? u_colors[0] : v_color;
+  v_base = a_mat > 0u && a_mat <= u_fadeMaterials ? u_colors[0] : v_color;
 }`;
 
 const FRAGMENT = `#version 300 es
@@ -104,12 +104,12 @@ function program(gl: WebGL2RenderingContext): WebGLProgram {
 export function createFlatLayer(
   gl: WebGL2RenderingContext,
   mesh: FlatMesh,
-  opts: { mode: GLenum; colors: Float32Array; fadeToBase: boolean; bias?: number },
+  opts: { mode: GLenum; colors: Float32Array; fade?: number; bias?: number },
 ): FlatLayer {
   if (opts.colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
   const p = program(gl);
   const u = (name: string) => gl.getUniformLocation(p, name);
-  const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uFadeToBase = u("u_fadeToBase");
+  const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uFadeMaterials = u("u_fadeMaterials");
   const uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uFade = u("u_fade"), uBias = u("u_bias");
 
   const vao = gl.createVertexArray();
@@ -137,7 +137,7 @@ export function createFlatLayer(
       gl.uniformMatrix4fv(uView, false, f.view);
       gl.uniformMatrix4fv(uModel, false, model);
       gl.uniform3fv(uColors, opts.colors);
-      gl.uniform1i(uFadeToBase, opts.fadeToBase ? 1 : 0);
+      gl.uniform1ui(uFadeMaterials, opts.fade ?? 0);
       gl.uniform3f(uEye, f.eye[0], f.eye[1], f.eye[2]);
       gl.uniform3fv(uSky, f.sky);
       gl.uniform2f(uFog, f.fog[0], f.fog[1]);

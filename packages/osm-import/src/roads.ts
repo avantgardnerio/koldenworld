@@ -83,6 +83,14 @@ export function extractRoadWays(elements: OsmElement[]): { ways: RoadWay[]; stat
   return { ways, stats: { roadWays: osmWays.length, skippedWays } };
 }
 
+/** Bridges and tunnels run straight between their ends instead of following the ground (decision 29). */
+export function roadStructure(tags: Tags): "bridge" | "tunnel" | null {
+  if (tags.bridge !== undefined && tags.bridge !== "no") return "bridge";
+  // A building passage is a short gap under a building at ground level, not a tunnel through ground.
+  if (tags.tunnel !== undefined && tags.tunnel !== "no" && tags.tunnel !== "building_passage") return "tunnel";
+  return null;
+}
+
 export function roadAttributes(tags: Tags): RoadAttributes & { reversed: boolean } {
   const cls = tags.highway as RoadClass;
   const dir = onewayDirection(tags);

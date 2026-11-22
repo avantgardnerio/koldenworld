@@ -12,7 +12,7 @@ import path from "node:path";
 import { fetchAreas, hasFetch, loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
 import type { OverpassResponse } from "@game/osm-import";
 import {
-  BUILDINGS_VERSION, buildCell, cellWater, drapeCell, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
+  BUILDINGS_VERSION, buildCell, carveWater, cellFromLatLon, cellWater, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
   cellToken, geodeticToEcef, ROAD_GRAPH_VERSION, type CellFiles, type CellId,
 } from "@game/world";
 import { Elevation } from "./elevation.ts";
@@ -60,6 +60,24 @@ function contentBox(c: CellContents, marginM: number): Bbox {
     south: Math.min(box.south, ...corners.map((p) => p[1])), north: Math.max(box.north, ...corners.map((p) => p[1])),
     west: Math.min(box.west, ...corners.map((p) => p[0])), east: Math.max(box.east, ...corners.map((p) => p[0])),
   };
+}
+
+/** A box covering every cell (at `level`) that overlaps a box, whole. */
+function cellsBox(b: Bbox, level: number): Bbox {
+  const out = { ...b };
+  const dLat = 150 / 111_000, dLon = dLat / Math.cos((((b.south + b.north) / 2) * Math.PI) / 180);
+  const seen = new Set<CellId>();
+  for (let lat = b.south; lat <= b.north + dLat; lat += dLat) {
+    for (let lon = b.west; lon <= b.east + dLon; lon += dLon) {
+      const c = cellFromLatLon(Math.min(lat, b.north), Math.min(lon, b.east), level);
+      if (seen.has(c)) continue;
+      seen.add(c);
+      const cb = cellBox(c, 20);
+      out.south = Math.min(out.south, cb.south); out.north = Math.max(out.north, cb.north);
+      out.west = Math.min(out.west, cb.west); out.east = Math.max(out.east, cb.east);
+    }
+  }
+  return out;
 }
 
 /** The download cells whose data a cell's export needs: everything within its reach plus the margin. */
@@ -128,17 +146,21 @@ export class CellService {
     await Promise.all(fetchCellsFor(cell).map((f) => this.ensureFetched(f)));
     lap("deps");
     const box = cellBox(cell, MARGIN_M);
-    const [ways, buildingInputs, water] = await Promise.all([
+    const [ways, buildingInputs] = await Promise.all([
       loadRoadWays(box).then((w) => { lap("roads"); return w; }),
       loadBuildings(box).then((b) => { lap("buildings"); return b; }),
-      loadWater(cellBox(cell, 50)).then((w) => { lap("water"); return w; }),
     ]);
     const flat = buildCell(cell, ways, buildingInputs);
     lap("build");
-    const height = await this.elevation.region(contentBox(flat, 100));
-    lap("dem");
-    const draped = drapeCell(flat, height);
-    const contents = { ...draped, water: cellWater(cell, draped.frame, water.areas, water.lines, height) };
+    // Objects reach into neighbors and are placed on the neighbors' terrain lattices, which need
+    // elevation (and water, for carving) over those whole cells.
+    const region = cellsBox(contentBox(flat, 100), cellLevel(cell));
+    const [dem, water] = await Promise.all([this.elevation.region(region), loadWater(region)]);
+    lap("dem+water");
+    const ground = groundSampler(dem, cellLevel(cell), carveWater(water.areas));
+    const draped = drapeCell(flat, ground);
+    const heights = { dem, surface: groundSampler(dem, cellLevel(cell)), ground };
+    const contents = { ...draped, water: cellWater(cell, draped.frame, water.areas, water.lines, heights) };
     const files = cellToArrow(contents);
     lap("drape");
     await mkdir(dir, { recursive: true });

@@ -11,22 +11,25 @@
 //   x         float32                    from        uint32
 //   y         float32                    to          uint32
 //   z         float32                    class       dictionary<uint8, utf8>
+//   drop      float32
 //   osm_id    float64
 //   edges     list<uint32>               lanes_fwd   uint8
 //                                        lanes_back  uint8
 //                                        speed_limit float32   m/s
 //                                        length      float32   m
 //                                        name        dictionary<uint32, utf8>; "" = unnamed
+//                                        structure   dictionary<uint8, utf8>   "ground" | "bridge" | "tunnel"
 //                                        osm_way_id  float64
 //                                        points      list<fixed_size_list<float32, 2>>  x, y in m
 //                                        point_z     list<float32>  z per point, m (same offsets as points)
+//                                        point_drop  list<float32>  fill skirt depth per point, m
 
 import { Field, FixedSizeList, Float32, List, makeData, Uint32, Uint8 } from "apache-arrow";
 import {
   column, dictionaryStrings, f32, f64, listParts, readTable, toIPC, u32, u8, utf8Dictionary, values,
   type FileMetadata,
 } from "./arrow-util.ts";
-import { ROAD_CLASSES, type RoadEdges, type RoadGraph, type RoadNodes } from "./road-graph.ts";
+import { ROAD_CLASSES, ROAD_STRUCTURES, type RoadEdges, type RoadGraph, type RoadNodes } from "./road-graph.ts";
 
 export interface RoadGraphFiles {
   nodes: Uint8Array;
@@ -63,6 +66,7 @@ export function roadGraphToArrow(g: RoadGraph, metadata: GraphMetadata): RoadGra
       x: f32(nodes.x),
       y: f32(nodes.y),
       z: f32(nodes.z),
+      drop: f32(nodes.drop),
       osm_id: f64(nodes.osmId),
       edges: incident,
     }, nodes.count, metadata),
@@ -75,6 +79,7 @@ export function roadGraphToArrow(g: RoadGraph, metadata: GraphMetadata): RoadGra
       speed_limit: f32(edges.speedLimit),
       length: f32(edges.length),
       name: utf8Dictionary(1, new Uint32(), edges.name, g.names),
+      structure: utf8Dictionary(2, new Uint8(), edges.structure, ROAD_STRUCTURES),
       osm_way_id: f64(edges.osmWayId),
       points,
       point_z: makeData({
@@ -83,6 +88,13 @@ export function roadGraphToArrow(g: RoadGraph, metadata: GraphMetadata): RoadGra
         nullCount: 0,
         valueOffsets: edges.pointStart,
         child: f32(g.pointZ),
+      }),
+      point_drop: makeData({
+        type: new List(new Field("drop", new Float32(), false)),
+        length: edges.count,
+        nullCount: 0,
+        valueOffsets: edges.pointStart,
+        child: f32(g.pointDrop),
       }),
     }, edges.count, metadata),
   };
@@ -102,6 +114,7 @@ export function roadGraphFromArrow(files: RoadGraphFiles): { graph: RoadGraph; m
     x: values(nc("x"), nodeCount, Float32Array, "nodes.x"),
     y: values(nc("y"), nodeCount, Float32Array, "nodes.y"),
     z: values(nc("z"), nodeCount, Float32Array, "nodes.z"),
+    drop: values(nc("drop"), nodeCount, Float32Array, "nodes.drop"),
     osmId: values(nc("osm_id"), nodeCount, Float64Array, "nodes.osm_id"),
     edgeStart: incident.offsets,
     edgeList: values(incident.child, incident.offsets[nodeCount]!, Uint32Array, "nodes.edges"),
@@ -124,6 +137,7 @@ export function roadGraphFromArrow(files: RoadGraphFiles): { graph: RoadGraph; m
     speedLimit: values(ec("speed_limit"), edgeCount, Float32Array, "edges.speed_limit"),
     length: values(ec("length"), edgeCount, Float32Array, "edges.length"),
     name: values(nameData, edgeCount, Uint32Array, "edges.name"),
+    structure: values(ec("structure"), edgeCount, Uint8Array, "edges.structure"),
     osmWayId: values(ec("osm_way_id"), edgeCount, Float64Array, "edges.osm_way_id"),
     pointStart: pts.offsets,
   };
@@ -134,6 +148,7 @@ export function roadGraphFromArrow(files: RoadGraphFiles): { graph: RoadGraph; m
       edges,
       points: values(pts.child.children[0]!, pointCount * 2, Float32Array, "edges.points"),
       pointZ: values(listParts(ec("point_z"), "edges.point_z").child, pointCount, Float32Array, "edges.point_z"),
+      pointDrop: values(listParts(ec("point_drop"), "edges.point_drop").child, pointCount, Float32Array, "edges.point_drop"),
       names: dictionaryStrings(nameData, "edges.name"),
     },
     metadata: { ...n.metadata, ...e.metadata },

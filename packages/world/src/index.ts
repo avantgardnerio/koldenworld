@@ -12,11 +12,11 @@ export {
   ownerPoint, type CellContents, type CellFiles, type GroundMesh,
 } from "./cell.ts";
 export {
-  drapeCell, flatTerrain, groundNoise, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,
-  terrainToArrow, type CellTerrain, type HeightFn, type TerrainMesh,
+  drapeCell, flatTerrain, footprintMax, groundNoise, groundSampler, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,
+  terrainToArrow, type CellTerrain, type GroundSampler, type HeightFn, type TerrainMesh,
 } from "./terrain.ts";
 export {
-  buildRoadGraph, componentSizes, ROAD_CLASSES, ROAD_GRAPH_VERSION,
+  buildRoadGraph, componentSizes, ROAD_CLASSES, ROAD_GRAPH_VERSION, ROAD_STRUCTURES,
   type RoadClass, type RoadEdges, type RoadGraph, type RoadNodes, type RoadWayInput,
 } from "./road-graph.ts";
 export { roadGraphFromArrow, roadGraphToArrow, type GraphMetadata, type RoadGraphFiles } from "./road-graph-arrow.ts";
@@ -32,8 +32,8 @@ export { buildingsFromArrow, buildingsToArrow } from "./buildings-arrow.ts";
 export { BUILDING_MATERIALS, buildingMesh, idShade, type BuildingMesh } from "./building-mesh.ts";
 export type { FileMetadata } from "./arrow-util.ts";
 export {
-  cellWater, clipPolygon, clipPolyline, emptyWater, WaterMaterial, waterFromArrow, waterToArrow,
-  type WaterAreaInput, type WaterMesh, type WaterwayInput,
+  carveWater, cellWater, clipPolygon, clipPolyline, emptyWater, WATER_CARVE, WaterMaterial, waterFromArrow, waterToArrow,
+  type WaterAreaInput, type WaterHeights, type WaterMesh, type WaterwayInput,
 } from "./water.ts";
 export { readGlb, type ModelMesh } from "./glb.ts";
 export {

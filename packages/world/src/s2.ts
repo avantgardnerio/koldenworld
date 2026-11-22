@@ -188,12 +188,18 @@ export function cellLattice(id: CellId, n: number): Float64Array {
 
 /** Where a point lies in a cell's (s, t) square, as fractions (outside [0, 1] when the point is outside the cell). */
 export function cellFractions(id: CellId, lat: number, lon: number): [fs: number, ft: number] {
+  return cellFractionsFn(id)(lat, lon);
+}
+
+/** cellFractions for one cell, with the id decoded once: for many points in the same cell. */
+export function cellFractionsFn(id: CellId): (lat: number, lon: number) => [fs: number, ft: number] {
   const { face, i, j, level } = cellFaceIJ(id);
   const size = 2 ** level;
-  // Project onto the cell's face even if the point's own face differs (it is near the edge).
-  const [x, y, z] = latLonToXyz(lat, lon);
-  const [, u, v] = faceUVOn(face, [x, y, z]);
-  return [uvToST(u) * size - i, uvToST(v) * size - j];
+  return (lat, lon) => {
+    // Project onto the cell's face even if the point's own face differs (it is near the edge).
+    const [, u, v] = faceUVOn(face, latLonToXyz(lat, lon));
+    return [uvToST(u) * size - i, uvToST(v) * size - j];
+  };
 }
 
 /** (u, v) of a direction on a given face (gnomonic), whichever face the direction is closest to. */

@@ -27,7 +27,10 @@ const SURFACE: Record<keyof typeof SurfaceMaterial, string> = {
   Asphalt: "#2e3034",
   Yellow: "#e2b62a",
   White: "#e6e6e2",
+  Fill: "#7c705a",   // earth: the embankment under a road above the ground
 };
+/** Surface materials that are markings (1..MARKINGS): they fade into the asphalt at a distance. */
+export const MARKINGS = 2;
 /** vec3 per SurfaceMaterial, in material order. */
 export const SURFACE_COLORS = palette(
   Object.entries(SurfaceMaterial).sort((a, b) => a[1] - b[1]).map(([k]) => SURFACE[k as keyof typeof SurfaceMaterial]),

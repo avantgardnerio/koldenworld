@@ -27,7 +27,7 @@ import {
 export const CELL_LEVEL = 13;
 
 /** Bump when a cell's contents change for the same input (ownership rules, layout). */
-export const CELL_VERSION = 3;
+export const CELL_VERSION = 4;
 
 export interface CellContents {
   cell: CellId;

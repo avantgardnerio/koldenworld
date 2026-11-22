@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildCell, CELL_LEVEL, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellToArrow, drapeCell, ecefToLocal,
+  buildCell, CELL_LEVEL, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellToArrow, drapeCell, ecefToLocal, groundSampler,
   enuFrame, enuUnprojection, frameToFrame, geodeticToEcef, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainHeightAt,
   terrainMesh, transformPoint, type BuildingInput, type HeightFn, type RoadWayInput, type Vec3,
 } from "../src/index.ts";
@@ -69,22 +69,72 @@ describe("drapeCell", () => {
     osmType: "way", osmId: 9, kind: "house", isPart: false, height: 6, minHeight: 0, heightSource: "default",
     polygons: [[[ll(-400, 20), ll(-380, 20), ll(-380, 40), ll(-400, 40), ll(-400, 20)]]],
   };
-  const A = drapeCell(buildCell(a, [road, other], [house]), slope);
-  const B = drapeCell(buildCell(b, [road, other], [house]), slope);
-  const local = (c: typeof A, lat: number, lon: number, h: number) => ecefToLocal(c.frame, geodeticToEcef({ lat, lon, h }));
+  // Bumpy ground: the plane plus ripples of a few meters at ~40–90 m wavelengths, crossing the roads.
+  const bumpy: HeightFn = (lat, lon) => slope(lat, lon) + 3 * Math.sin(lon * 85_000 / 13) * Math.cos(lat * 111_000 / 29);
+  const drape = (cell: typeof a, h: HeightFn, ways = [road, other]) => drapeCell(buildCell(cell, ways, [house]), groundSampler(h, CELL_LEVEL));
+  const A = drape(a, slope), B = drape(b, slope);
 
-  it("densifies roads and puts every point on the ground", () => {
-    const g = A.graph.edges.count > 0 ? A.graph : B.graph;
-    const c = A.graph.edges.count > 0 ? A : B;
-    const back = enuUnprojection(c.frame);
-    for (let e = 0; e < g.edges.count; e++) {
-      for (let p = g.edges.pointStart[e]! + 1; p < g.edges.pointStart[e + 1]!; p++) {
-        expect(Math.hypot(g.points[2 * p]! - g.points[2 * p - 2]!, g.points[2 * p + 1]! - g.points[2 * p - 1]!)).toBeLessThanOrEqual(20.01);
+  it("densifies roads to 8 m", () => {
+    for (const c of [A, B]) {
+      const g = c.graph;
+      for (let e = 0; e < g.edges.count; e++) {
+        for (let p = g.edges.pointStart[e]! + 1; p < g.edges.pointStart[e + 1]!; p++) {
+          expect(Math.hypot(g.points[2 * p]! - g.points[2 * p - 2]!, g.points[2 * p + 1]! - g.points[2 * p - 1]!)).toBeLessThanOrEqual(8.01);
+        }
       }
     }
-    for (let p = 0; p < g.pointZ.length; p += 7) {
-      const [lon, lat] = back(g.points[2 * p]!, g.points[2 * p + 1]!);
-      expect(g.pointZ[p]).toBeCloseTo(local(c, lat, lon, slope(lat, lon))[2], 1);
+  });
+
+  it("never puts any part of a road's surface below the drawn ground, even on bumpy ground", () => {
+    for (const cell of [a, b]) {
+      const ground = groundSampler(bumpy, CELL_LEVEL);
+      const c = drapeCell(buildCell(cell, [road, other], []), ground);
+      const g = c.graph, back = enuUnprojection(c.frame);
+      const hw = 4;  // residential, 1 + 1 lanes: 3 m lanes + 1 m shoulders
+      let checked = 0;
+      for (let e = 0; e < g.edges.count; e++) {
+        for (let p = g.edges.pointStart[e]!; p + 1 < g.edges.pointStart[e + 1]!; p++) {
+          const [x0, y0, x1, y1] = [g.points[2 * p]!, g.points[2 * p + 1]!, g.points[2 * p + 2]!, g.points[2 * p + 3]!];
+          const len = Math.hypot(x1 - x0, y1 - y0), rx = (y1 - y0) / len, ry = -(x1 - x0) / len;
+          for (const f of [0.1, 0.5, 0.9]) {
+            for (const o of [-0.95 * hw, 0, 0.95 * hw]) {
+              const x = x0 + (x1 - x0) * f + rx * o, y = y0 + (y1 - y0) * f + ry * o;
+              const [lon, lat] = back(x, y);
+              const z = g.pointZ[p]! + (g.pointZ[p + 1]! - g.pointZ[p]!) * f;  // the road surface there
+              const groundZ = ecefToLocal(c.frame, geodeticToEcef({ lat, lon, h: ground(lat, lon) }))[2];
+              expect(z).toBeGreaterThanOrEqual(groundZ - 0.02);  // float32 storage
+              checked++;
+            }
+          }
+        }
+      }
+      expect(checked).toBeGreaterThan(100);
+    }
+  });
+
+  it("sits level across a side slope, with a fill skirt down to the ground on the low side", () => {
+    // The plane rises 10 m per 100 m eastward: the north–south road crosses that slope.
+    const c = A.graph.edges.count > 0 ? A : B;
+    const g = c.graph;
+    let max = 0;
+    for (let p = 0; p < g.pointDrop.length; p++) max = Math.max(max, g.pointDrop[p]!);
+    expect(max).toBeGreaterThan(0.5);  // 8 m across at 10%: ~0.8 m
+    expect(max).toBeLessThan(1.5);
+  });
+
+  it("runs bridges straight between their nodes", () => {
+    // A 400 m bridge across the bumps: straight in z, whatever the ground does.
+    const bridge: RoadWayInput = { ...road, osmWayId: 7, nodeIds: [10, 11, 12], points: [ll(-200, 150), ll(0, 150), ll(200, 150)], structure: "bridge" };
+    const c = [a, b].map((cell) => drape(cell, bumpy, [bridge])).find((x) => x.graph.edges.count > 0)!;
+    const g = c.graph;
+    for (let e = 0; e < g.edges.count; e++) {
+      const p0 = g.edges.pointStart[e]!, p1 = g.edges.pointStart[e + 1]! - 1;
+      const L = Math.hypot(g.points[2 * p1]! - g.points[2 * p0]!, g.points[2 * p1 + 1]! - g.points[2 * p0 + 1]!);
+      for (let p = p0; p <= p1; p++) {
+        const f = Math.hypot(g.points[2 * p]! - g.points[2 * p0]!, g.points[2 * p + 1]! - g.points[2 * p0 + 1]!) / L;
+        expect(g.pointZ[p]).toBeCloseTo(g.pointZ[p0]! + (g.pointZ[p1]! - g.pointZ[p0]!) * f, 0);
+        expect(g.pointDrop[p]).toBe(0);
+      }
     }
   });
 
@@ -109,6 +159,7 @@ describe("drapeCell", () => {
     const back = cellFromArrow(cellToArrow(c));
     expect([...back.buildings.base]).toEqual([...c.buildings.base]);
     expect([...back.graph.pointZ]).toEqual([...c.graph.pointZ]);
+    expect([...back.graph.pointDrop]).toEqual([...c.graph.pointDrop]);
     expect([...back.terrain.heights]).toEqual([...c.terrain.heights]);
   });
 });

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildCell, CELL_LEVEL, cellCenter, cellEdgeNeighbors, cellFromLatLon, cellWater, clipPolygon, clipPolyline, enuFrame,
-  enuUnprojection, frameToFrame, transformPoint, WaterMaterial, waterFromArrow, waterToArrow, type HeightFn, type Vec3,
+  buildCell, carveWater, CELL_LEVEL, cellCenter, cellEdgeNeighbors, cellFromLatLon, cellLattice, cellWater, clipPolygon,
+  clipPolyline, enuFrame, enuUnprojection, frameToFrame, groundSampler, transformPoint, WATER_CARVE, WaterMaterial,
+  waterFromArrow, waterToArrow, type HeightFn, type Vec3,
 } from "../src/index.ts";
 
 const square = [[0, 0], [10, 0], [10, 10], [0, 10]] as [number, number][];
@@ -26,8 +27,10 @@ describe("clipping to a convex window", () => {
 const a = cellFromLatLon(39.758861, -104.964699, CELL_LEVEL);
 const [, b] = cellEdgeNeighbors(a);
 const ca = cellCenter(a), cb = cellCenter(b);
-const mid = enuFrame({ lat: (ca.lat + cb.lat) / 2, lon: (ca.lon + cb.lon) / 2, h: 0 });
+const mid0 = { lat: (ca.lat + cb.lat) / 2, lon: (ca.lon + cb.lon) / 2 };
+const mid = enuFrame({ ...mid0, h: 0 });
 const ll = enuUnprojection(mid);
+const toLocal = (lat: number, lon: number): [number, number] => [(lon - mid0.lon) * 85_400, (lat - mid0.lat) * 111_030];
 const ring = (pts: [number, number][]) => [...pts, pts[0]!].map(([x, y]) => ll(x, y));
 const lake = { osmId: 1, kind: "lake" as const, polygons: [[ring([[-200, -100], [200, -100], [200, 100], [-200, 100]])]] };
 const stream = { osmId: 2, kind: "stream", width: 3, points: [ll(-300, 300), ll(0, 300), ll(300, 300)] };
@@ -40,7 +43,10 @@ const height: HeightFn = (lat, lon) => {
 
 describe("cellWater", () => {
   const fa = buildCell(a, [], []).frame, fb = buildCell(b, [], []).frame;
-  const wa = cellWater(a, fa, [lake], [stream], height), wb = cellWater(b, fb, [lake], [stream], height);
+  const heights = {
+    dem: height, surface: groundSampler(height, CELL_LEVEL), ground: groundSampler(height, CELL_LEVEL, carveWater([lake])),
+  };
+  const wa = cellWater(a, fa, [lake], [stream], heights), wb = cellWater(b, fb, [lake], [stream], heights);
   const verts = (w: typeof wa, f: typeof fa, m: number): Vec3[] => {
     const out: Vec3[] = [];
     for (let v = 0; v < w.material.length; v++) {
@@ -70,6 +76,31 @@ describe("cellWater", () => {
     expect(Math.max(...zs) - Math.min(...zs)).toBeGreaterThan(20);
     // Triangles: corners opposite each other across the stream share a height.
     for (let i = 0; i < s.length; i += 6) expect(Math.abs(s[i]![2] - s[i + 1]![2])).toBeLessThan(0.01);
+  });
+
+  it("lowers the terrain inside the lake, identically in both cells along their shared edge", () => {
+    const carved = carveWater([lake]), plain = groundSampler(height, CELL_LEVEL);
+    let lowered = 0;
+    for (const cell of [a, b]) {
+      const t0 = plain.terrain(cell), t1 = carved(cell, t0), ll = cellLattice(cell, t0.n);
+      for (let k = 0; k < t0.heights.length; k++) {
+        const d = t0.heights[k]! - t1.heights[k]!;
+        expect([0, WATER_CARVE]).toContainEqual(Math.round(d * 1000) / 1000);
+        if (d > 0) {
+          lowered++;
+          // Only inside the lake: 400 × 200 m around the shared edge's midpoint.
+          const [x, y] = toLocal(ll[2 * k]!, ll[2 * k + 1]!);
+          expect(Math.abs(x)).toBeLessThan(200);
+          expect(Math.abs(y)).toBeLessThan(100);
+        }
+      }
+    }
+    // ~80,000 m² at ~17 m spacing: a few hundred lattice points between the two cells.
+    expect(lowered).toBeGreaterThan(150);
+    expect(lowered).toBeLessThan(500);
+    // Shared edge: a's right column (i = n) is b's left column (i = 0).
+    const n = 64, w = n + 1, ta = carved(a, plain.terrain(a)), tb = carved(b, plain.terrain(b));
+    for (let j = 0; j <= n; j++) expect(ta.heights[j * w + n]).toBe(tb.heights[j * w]);
   });
 
   it("round-trips through Arrow", () => {

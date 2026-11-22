@@ -11,7 +11,7 @@
 import type { Projection } from "./projection.ts";
 
 /** Bump when buildRoadGraph's output changes for the same input. */
-export const ROAD_GRAPH_VERSION = 2;
+export const ROAD_GRAPH_VERSION = 3;
 
 export const ROAD_CLASSES = [
   "motorway", "motorway_link",
@@ -24,6 +24,9 @@ export const ROAD_CLASSES = [
 
 export type RoadClass = (typeof ROAD_CLASSES)[number];
 
+/** Edge structure: index 0 follows the ground; bridges and tunnels run straight between their ends. */
+export const ROAD_STRUCTURES = ["ground", "bridge", "tunnel"] as const;
+
 /** What the graph needs from a stored road way (Postgres row, or osm-import's RoadWay). */
 export interface RoadWayInput {
   osmWayId: number;
@@ -34,13 +37,15 @@ export interface RoadWayInput {
   lanesFwd: number;
   lanesBack: number;
   speedLimitMps: number;
+  structure?: "bridge" | "tunnel" | null;  // default: on the ground
 }
 
 export interface RoadNodes {
   count: number;
   x: Float32Array;           // m east, in the projection's frame
   y: Float32Array;           // m north
-  z: Float32Array;           // m up: the ground's height in the frame (0 until draped on terrain)
+  z: Float32Array;           // m up: the road's height in the frame (0 until draped on terrain)
+  drop: Float32Array;        // m from the node's disc down to the lowest ground at its rim (fill skirt), 0 until draped
   osmId: Float64Array;
   edgeStart: Int32Array;     // count + 1 offsets into edgeList (CSR; Int32 like Arrow list offsets)
   edgeList: Uint32Array;     // incident edge ids; a self-loop is listed twice
@@ -56,6 +61,7 @@ export interface RoadEdges {
   speedLimit: Float32Array;  // m/s
   length: Float32Array;      // m, along the points
   name: Uint32Array;         // index into names; 0 = unnamed
+  structure: Uint8Array;     // index into ROAD_STRUCTURES
   osmWayId: Float64Array;
   pointStart: Int32Array;    // count + 1 offsets, in points, into RoadGraph.points (CSR)
 }
@@ -65,6 +71,7 @@ export interface RoadGraph {
   edges: RoadEdges;
   points: Float32Array;      // x, y interleaved; each edge's points include both end nodes
   pointZ: Float32Array;      // z per point (0 until draped on terrain)
+  pointDrop: Float32Array;   // m from the road's edge down to the ground below its lower side (fill skirt) per point
   names: string[];           // names[0] = ""
 }
 
@@ -117,7 +124,7 @@ export function buildRoadGraph(
   const e = {
     from: [] as number[], to: [] as number[], class: [] as number[],
     lanesFwd: [] as number[], lanesBack: [] as number[], speedLimit: [] as number[],
-    length: [] as number[], name: [] as number[], osmWayId: [] as number[], pointStart: [0],
+    length: [] as number[], name: [] as number[], structure: [] as number[], osmWayId: [] as number[], pointStart: [0],
   };
   const points: number[] = [];
 
@@ -151,6 +158,7 @@ export function buildRoadGraph(
       e.speedLimit.push(w.speedLimitMps);
       e.length.push(length);
       e.name.push(name);
+      e.structure.push(ROAD_STRUCTURES.indexOf(w.structure ?? "ground"));
       e.osmWayId.push(w.osmWayId);
       e.pointStart.push(points.length / 2);
       start = i;
@@ -179,6 +187,7 @@ export function buildRoadGraph(
       x: Float32Array.from(nodeX),
       y: Float32Array.from(nodeY),
       z: new Float32Array(nodeCount),
+      drop: new Float32Array(nodeCount),
       osmId: Float64Array.from(nodeOsm),
       edgeStart,
       edgeList,
@@ -193,11 +202,13 @@ export function buildRoadGraph(
       speedLimit: Float32Array.from(e.speedLimit),
       length: Float32Array.from(e.length),
       name: Uint32Array.from(e.name),
+      structure: Uint8Array.from(e.structure),
       osmWayId: Float64Array.from(e.osmWayId),
       pointStart: Int32Array.from(e.pointStart),
     },
     points: Float32Array.from(points),
     pointZ: new Float32Array(points.length / 2),
+    pointDrop: new Float32Array(points.length / 2),
     names,
   };
 }

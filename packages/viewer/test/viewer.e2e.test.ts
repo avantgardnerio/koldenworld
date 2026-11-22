@@ -9,6 +9,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   buildCell, CELL_LEVEL, CELL_TABLES, cellCenter, cellFromLatLon, cellToArrow, cellToken, drapeCell, edgeArcLengths, enuFrame,
+  groundSampler,
   enuUnprojection, lanePose, placeVehicles,
   type BuildingInput, type RoadWayInput,
 } from "@game/world";
@@ -223,7 +224,7 @@ describe("traffic", () => {
   let highDir: string;
   beforeAll(async () => {
     highDir = await mkdtemp(path.join(tmpdir(), "viewer-e2e-high-"));
-    const files = cellToArrow(drapeCell(buildCell(cell, ways, buildings), () => GROUND_H));
+    const files = cellToArrow(drapeCell(buildCell(cell, ways, buildings), groundSampler(() => GROUND_H, CELL_LEVEL)));
     const cellDir = path.join(highDir, "cells", cellToken(cell));
     await mkdir(cellDir, { recursive: true });
     for (const t of CELL_TABLES) await writeFile(path.join(cellDir, `${t}.arrow`), files[t]);

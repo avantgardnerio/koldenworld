@@ -20,8 +20,8 @@ import type { FileMetadata } from "./arrow-util.ts";
 import { column, readTable, toIPC, u8 } from "./arrow-util.ts";
 import { ecefToLocal, geodeticToEcef, type Frame } from "./geodesy.ts";
 import { enuProjection, enuUnprojection } from "./projection.ts";
-import { cellOutline, type CellId } from "./s2.ts";
-import type { HeightFn } from "./terrain.ts";
+import { cellLattice, cellOutline, type CellId } from "./s2.ts";
+import { footprintMax, type CellTerrain, type GroundSampler, type HeightFn } from "./terrain.ts";
 import { FixedSizeList, Field, Float32, makeData } from "apache-arrow";
 
 export interface WaterAreaInput {
@@ -116,9 +116,55 @@ const area2 = (r: Pt[]) => {
 
 // --- the operator ------------------------------------------------------------------
 
+/** Where water surfaces go (decision 29). Without one, everything is at h = 0. */
+export interface WaterHeights {
+  dem: HeightFn;           // the raw elevation: a lake's level is sampled from it inside the lake
+  surface: HeightFn;       // the drawn ground before carving (groundSampler without carve): river surfaces
+  ground: GroundSampler;   // the drawn ground: streams sit at its highest point across their width
+}
+
+/** How far the terrain lattice is lowered inside lakes and river surfaces, m. */
+export const WATER_CARVE = 1;
+
+/**
+ * Lowers the terrain lattice inside water areas, so the drawn ground near a
+ * shore (which the 17 m lattice smooths up toward the bank) can't cover the
+ * water. Each cell decides for its own lattice points from the same polygons,
+ * so neighbors agree along shared edges. For groundSampler's `carve`.
+ */
+export function carveWater(areas: WaterAreaInput[]): (cell: CellId, t: CellTerrain) => CellTerrain {
+  const polys = areas.flatMap((a) => a.polygons).map((rings) => {
+    const lons = rings[0]!.map((p) => p[0]), lats = rings[0]!.map((p) => p[1]);
+    return { rings, w: Math.min(...lons), e: Math.max(...lons), s: Math.min(...lats), n: Math.max(...lats) };
+  });
+  const inRing = (lon: number, lat: number, r: [number, number][]) => {
+    let inside = false;
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const [xi, yi] = r[i]!, [xj, yj] = r[j]!;
+      if ((yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  };
+  return (cell, t) => {
+    if (polys.length === 0) return t;
+    const ll = cellLattice(cell, t.n), heights = Float32Array.from(t.heights);
+    for (let k = 0; k < heights.length; k++) {
+      const lat = ll[2 * k]!, lon = ll[2 * k + 1]!;
+      for (const p of polys) {
+        if (lon < p.w || lon > p.e || lat < p.s || lat > p.n || !inRing(lon, lat, p.rings[0]!)) continue;
+        if (p.rings.slice(1).some((h) => inRing(lon, lat, h))) continue;
+        heights[k] = heights[k]! - WATER_CARVE;
+        break;
+      }
+    }
+    return { n: t.n, heights };
+  };
+}
+
 export function cellWater(
-  cell: CellId, frame: Frame, areas: WaterAreaInput[], lines: WaterwayInput[], height?: HeightFn,
+  cell: CellId, frame: Frame, areas: WaterAreaInput[], lines: WaterwayInput[], heights?: WaterHeights,
 ): WaterMesh {
+  const height = heights?.surface;
   const project = enuProjection(frame), unproject = enuUnprojection(frame);
   let win: Pt[] = cellOutline(cell).corners.map((c) => project(c.lon, c.lat));
   if (area2(win) < 0) win = win.reverse();
@@ -129,12 +175,6 @@ export function cellWater(
     const p = height ? ecefToLocal(frame, geodeticToEcef({ lat, lon, h: h ?? height(lat, lon) })) : [x, y, 0];
     pos.push(p[0]!, p[1]!, p[2]!);
     mat.push(m);
-  };
-  /** The ground's height under a tangent-plane point (undefined without a HeightFn). */
-  const groundH = (x: number, y: number) => {
-    if (!height) return undefined;
-    const [lon, lat] = unproject(x, y);
-    return height(lat, lon);
   };
   const fill = (rings: Pt[][], m: number, h?: number) => {
     const flat = rings.flat(), holes: number[] = [];
@@ -150,7 +190,7 @@ export function cellWater(
       const clipped = rings.map((r) => clipPolygon(r, win)).filter((r, i) => i > 0 ? r.length >= 3 : true);
       if (clipped[0]!.length < 3) continue;
       if (a.kind === "lake") {
-        fill(clipped, WaterMaterial.Lake, height ? lakeLevel(clipped, unproject, height) : undefined);
+        fill(clipped, WaterMaterial.Lake, heights ? lakeLevel(clipped, unproject, heights.dem) : undefined);
         continue;
       }
       // A river surface: cut into grid squares so every vertex can follow the ground.
@@ -177,7 +217,9 @@ export function cellWater(
       }
       line.push(p);
     }
-    for (const piece of clipPolyline(line, win)) ribbon(piece, w.width / 2, m, put, groundH);
+    for (const piece of clipPolyline(line, win)) {
+      ribbon(piece, w.width / 2, m, put, heights ? (corners) => footprintMax(heights.ground, corners.map(([x, y]) => unproject(x, y))) : undefined);
+    }
   }
 
   return { positions: Float32Array.from(pos), material: Uint8Array.from(mat) };
@@ -199,12 +241,15 @@ function lakeLevel(rings: Pt[][], unproject: (x: number, y: number) => [number, 
   return hs[Math.floor(hs.length / 2)] ?? 0;
 }
 
-/** A strip of half width hw along a polyline, two triangles per segment, level across. */
+/**
+ * A strip of half width hw along a polyline, two triangles per segment, level
+ * across: each point at the highest ground under the segments on either side
+ * of it (maxOver), so the water is never below the drawn ground.
+ */
 function ribbon(
   pl: Pt[], hw: number, m: number, put: (x: number, y: number, m: number, h?: number) => void,
-  groundH: (x: number, y: number) => number | undefined,
+  maxOver?: (corners: Pt[]) => number,
 ): void {
-  const hs = pl.map(([x, y]) => groundH(x, y));
   const side: Pt[] = pl.map((_, i) => {
     let nx = 0, ny = 0;
     for (const j of [i - 1, i]) {
@@ -217,9 +262,14 @@ function ribbon(
     const k = i > 0 && i < pl.length - 1 ? Math.min(MITER_LIMIT, 2 / nl) : 1;
     return [(nx / nl) * hw * k, (ny / nl) * hw * k];
   });
+  const corners = (i: number): Pt[] => {
+    const [ax, ay] = pl[i]!, [bx, by] = pl[i + 1]!, [sx, sy] = side[i]!, [tx, ty] = side[i + 1]!;
+    return [[ax - sx, ay - sy], [ax + sx, ay + sy], [bx + tx, by + ty], [bx - tx, by - ty]];
+  };
+  const quad = maxOver ? Array.from({ length: pl.length - 1 }, (_, i) => maxOver(corners(i))) : [];
+  const hs = pl.map((_, i) => (maxOver ? Math.max(quad[i - 1] ?? -Infinity, quad[i] ?? -Infinity) : undefined));
   for (let i = 0; i + 1 < pl.length; i++) {
     const [ax, ay] = pl[i]!, [bx, by] = pl[i + 1]!, [sx, sy] = side[i]!, [tx, ty] = side[i + 1]!;
-    // Corners take their centerline's height, so the water is level across.
     const quad: [number, number, number | undefined][] = [
       [ax - sx, ay - sy, hs[i]], [ax + sx, ay + sy, hs[i]], [bx + tx, by + ty, hs[i + 1]], [bx - tx, by - ty, hs[i + 1]],
     ];
