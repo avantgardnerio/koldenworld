@@ -41,7 +41,7 @@ export {
 } from "./aeroways.ts";
 export {
   cellStreets, emptyStreets, STREET_BANDS, StreetsMaterial, streetsFromArrow, streetsGraph, streetsToArrow, streetsTriangles,
-  type StreetPolygon, type StreetsPolygons,
+  type StreetsPolygons,
 } from "./streets-mesh.ts";
 export { SIGN_SETBACK, signText, streetSigns, type StreetSign } from "./signs.ts";
 export { readGlb, type ModelMesh } from "./glb.ts";

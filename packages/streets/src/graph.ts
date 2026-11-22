@@ -1,8 +1,9 @@
-// A street graph from OSM ways: nodes where ways meet or end, streets
-// (edges) between them as polylines in meters, each with its half width.
+// A street graph, as columns: nodes where streets meet or end, streets between
+// them as polylines in meters (CSR into point columns), each with its half
+// width and layer. Built from OSM ways (the one place objects come in: the
+// ways' JSON) or straight from a road graph's typed arrays.
 
-/** A point in meters; z (height) when the streets have heights, carried through everything made from them. */
-export interface Point { x: number; y: number; z?: number }
+import { F64, I32 } from "./arrays.ts";
 
 /** An OSM way as the database has it: node ids and their [lon, lat], class, total lanes. */
 export interface WayInput {
@@ -16,18 +17,15 @@ export interface WayInput {
   name?: string | null;
 }
 
-export interface Street {
-  a: number;     // node index at its start
-  b: number;     // node index at its end
-  pts: Point[];  // a to b, both ends included
-  hw: number;    // half width, m
-  way: string;
-  layer: number; // 0 on the ground; above it for bridges, below for tunnels
-}
-
 export interface Graph {
-  nodes: (Point & { id: string })[];
-  streets: Street[];
+  nodeCount: number;
+  nx: Float64Array; ny: Float64Array; nz: Float64Array;   // per node
+  streetCount: number;
+  a: Int32Array; b: Int32Array;                           // per street: its end nodes
+  hw: Float64Array;                                       // per street: half width, m
+  layer: Int8Array;                                       // per street: 0 on the ground, above for bridges, below for tunnels
+  pointStart: Int32Array;                                 // streetCount + 1: its points, a to b, both ends included
+  px: Float64Array; py: Float64Array; pz: Float64Array;
 }
 
 /** [lane width, shoulder] by OSM class, m (as the game's road profiles). */
@@ -50,34 +48,51 @@ export function layerOf(w: WayInput): number {
   return 0;
 }
 
-/** Ways cut at every node another way shares, in meters around (lat0, lon0), y north. */
+/** Ways cut at every node another way shares, in meters around (lat0, lon0), y north; heights 0. */
 export function buildGraph(ways: WayInput[], lat0: number, lon0: number): Graph {
   const kx = 111320 * Math.cos((lat0 * Math.PI) / 180), ky = 110540;
-  const at = ([lon, lat]: [number, number]): Point => ({ x: (lon - lon0) * kx, y: (lat - lat0) * ky });
   const uses = new Map<string, number>();
   for (const w of ways) for (const id of w.nodes) uses.set(id, (uses.get(id) ?? 0) + 1);
-  const nodes: Graph["nodes"] = [], index = new Map<string, number>(), streets: Street[] = [];
-  const node = (id: string, c: [number, number]) => {
-    if (!index.has(id)) index.set(id, nodes.push({ id, ...at(c) }) - 1);
-    return index.get(id)!;
+  const index = new Map<string, number>(), NX = new F64(), NY = new F64();
+  const node = (id: string, lon: number, lat: number) => {
+    let n = index.get(id);
+    if (n === undefined) {
+      n = NX.length;
+      index.set(id, n);
+      NX.push((lon - lon0) * kx);
+      NY.push((lat - lat0) * ky);
+    }
+    return n;
   };
+  const A = new I32(), B = new I32(), HW = new F64(), LAYER = new I32(), start = new I32(), PX = new F64(), PY = new F64();
+  start.push(0);
   for (const w of ways) {
-    let start = 0;
+    let first = 0;
     for (let i = 1; i < w.nodes.length; i++) {
       if (i < w.nodes.length - 1 && uses.get(w.nodes[i]!)! < 2) continue;
-      const pts: Point[] = [];
-      for (let k = start; k <= i; k++) {
-        const p = at(w.coords[k]!), last = pts.at(-1);
-        if (!last || p.x !== last.x || p.y !== last.y) pts.push(p);
+      const before = PX.length;
+      for (let k = first; k <= i; k++) {
+        const x = (w.coords[k]![0] - lon0) * kx, y = (w.coords[k]![1] - lat0) * ky;
+        if (PX.length > before && x === PX.data[PX.length - 1] && y === PY.data[PY.length - 1]) continue;
+        PX.push(x);
+        PY.push(y);
       }
-      if (pts.length >= 2) {
-        streets.push({
-          a: node(w.nodes[start]!, w.coords[start]!), b: node(w.nodes[i]!, w.coords[i]!), pts,
-          hw: halfWidth(w.cls, w.lanes), way: w.id, layer: layerOf(w),
-        });
+      if (PX.length - before >= 2) {
+        A.push(node(w.nodes[first]!, ...w.coords[first]!));
+        B.push(node(w.nodes[i]!, ...w.coords[i]!));
+        HW.push(halfWidth(w.cls, w.lanes));
+        LAYER.push(layerOf(w));
+        start.push(PX.length);
+      } else {
+        PX.length = before;
+        PY.length = before;
       }
-      start = i;
+      first = i;
     }
   }
-  return { nodes, streets };
+  return {
+    nodeCount: NX.length, nx: NX.view().slice(), ny: NY.view().slice(), nz: new Float64Array(NX.length),
+    streetCount: A.length, a: A.view().slice(), b: B.view().slice(), hw: HW.view().slice(), layer: Int8Array.from(LAYER.view()),
+    pointStart: start.view().slice(), px: PX.view().slice(), py: PY.view().slice(), pz: new Float64Array(PX.length),
+  };
 }

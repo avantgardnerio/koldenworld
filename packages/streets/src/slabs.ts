@@ -1,290 +1,370 @@
-// Polygon booleans by slabs, tracked by index. No tolerances anywhere.
+// Polygon booleans by slabs, tracked by index. No tolerances, no objects:
+// vertices are indices into a Verts table, and everything else is columns.
 //
-// Points: every vertex is an index into one table; polygons that share a point
-// object share its index. The only points ever made are crossings: two edges
-// that cross get one new vertex, made once, that both are split at. A vertex
-// lying exactly on another edge splits that edge at its own index. Nothing is
-// snapped or compared within a tolerance; where an exact test lands on zero in
-// a way indices don't explain, it's counted in `events` instead of hidden.
-//
-// 1. Split every edge at its crossings and at vertices lying on it. Pieces
-//    with the same two ends are one piece, carrying each polygon's winding
-//    change (an edge two polygons share).
-// 2. Every vertex's y is a slab line (equal y: one line). In a slab no pieces
-//    cross, so they sort left to right; each cell between neighbors is a
-//    trapezoid (a triangle when one side is a point).
-// 3. Walking a slab left to right, winding numbers change at each piece:
-//    every cell is classified at once by `inside(w)`.
-// 4. Picked cells → triangles (their corners on slab lines are for drawing only).
-// 5. The outline: pieces with the result on one side only (decided once per
-//    piece: nothing crosses a piece, so its sides never change along it),
+// 1. Every polygon's edges; edges two polygons share (the same two vertices)
+//    are one line, so whatever crosses it crosses it once. Lines are split
+//    where they cross (one new vertex, shared) and where a vertex lies exactly
+//    on them (at that vertex's own index). Exact zeros that indices don't
+//    explain are counted in `events`, not hidden.
+// 2. Pieces: lines cut at their vertices. Pieces with the same two ends are one
+//    piece, carrying each polygon's winding change across it.
+// 3. A sweep upward through every vertex's y (equal y: one line). In a slab no
+//    pieces cross, so they sort left to right; walking them, winding numbers
+//    change at each piece, and each operand keeps a count of its polygons
+//    winding non-zero and winding positive: `inside(nz, pos)` picks the cells
+//    (Vatti's part).
+// 4. The outline: pieces with the result on one side only (decided once per
+//    piece; nothing crosses one, so its sides never change along it),
 //    directed with the result on their left, stitched by index into loops,
-//    taking the sharpest right turn where several continue from one vertex.
+//    taking the sharpest right turn where several continue from a vertex, and
+//    split where a loop touches itself into simple loops (Weiler's part).
 //
 // Polygons are turned counterclockwise as a whole first, so winding +1 is a
-// polygon's normal inside and −1 a loop of it turned inside out.
+// polygon's normal inside and −1 a part of it turned inside out.
 
-import type { Point } from "./graph.ts";
+import { F64, I32, RingsBuilder, ringArea, ringCount, sortBy, type Rings, type Verts } from "./arrays.ts";
 
 export interface SlabEvents {
-  crossings: number;     // new vertices made where two edges cross
-  touches: number;       // a vertex exactly on another polygon's edge
-  overlaps: number;      // two edges exactly collinear and overlapping
-  ties: number;          // two different pieces at exactly the same place in a slab
-  disagree: number;      // a piece whose sides came out differently in two slabs
+  crossings: number;   // new vertices made where two lines cross
+  touches: number;     // a vertex exactly on another polygon's line
+  overlaps: number;    // two lines exactly collinear and overlapping
+  ties: number;        // two different pieces at exactly the same place in a slab
+  disagree: number;    // a piece whose sides came out differently in two slabs
 }
 
 export interface SlabResult {
-  triangles: Point[][];
-  loops: Point[][];      // the result on their left: outer loops counterclockwise, holes clockwise
+  loops: Rings;        // the result on their left: outer loops counterclockwise, holes clockwise
   events: SlabEvents;
-  tied: [Point, Point, Point, Point][];  // distinct pairs of pieces that tied: each piece's two ends
+  tied: Int32Array;    // per tie: the two pieces' ends (lo, hi, lo, hi)
 }
 
-/** A loop of vertex indices, split wherever it comes back to a vertex it has passed: simple loops. */
-function unpinch(loop: number[]): number[][] {
-  const out: number[][] = [], stack: number[] = [], at = new Map<number, number>();
-  for (const k of loop) {
-    const seen = at.get(k);
-    if (seen !== undefined) {
-      // Back at k: what's on the stack since it is a loop of its own.
-      const sub = stack.splice(seen);
-      for (const j of sub) at.delete(j);
-      out.push(sub);
-    }
-    at.set(k, stack.length);
-    stack.push(k);
-  }
-  out.push(stack);
-  return out.filter((l) => l.length >= 3);
-}
-
-/** A grid cell about four times the typical line's length, for the crossing search. */
-function gridSize(lines: { i: number; j: number }[], P: Point[]): number {
-  if (lines.length === 0) return 1;
-  const lengths = lines.map((l) => Math.hypot(P[l.j]!.x - P[l.i]!.x, P[l.j]!.y - P[l.i]!.y)).sort((a, b) => a - b);
-  return Math.max(1, 4 * lengths[Math.floor(lengths.length / 2)]!);
-}
-
-const lerpZ = (a: Point, b: Point, t: number) => (a.z === undefined || b.z === undefined ? undefined : a.z + (b.z - a.z) * t);
-
-const orient = (a: Point, b: Point, c: Point) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-const between = (a: Point, b: Point, p: Point) =>
-  Math.min(a.x, b.x) <= p.x && p.x <= Math.max(a.x, b.x) && Math.min(a.y, b.y) <= p.y && p.y <= Math.max(a.y, b.y);
-export const area = (ring: Point[]) => ring.reduce((s, p, i) => {
-  const q = ring[(i + 1) % ring.length]!;
-  return s + p.x * q.y - q.x * p.y;
-}, 0) / 2;
-
-interface Line { i: number; j: number; on: number[] }  // one geometric edge: vertices splitting it in `on`
-interface Edge { i: number; j: number; poly: number; line: Line }
-interface Piece { lo: number; hi: number; turns: Map<number, number> }
+const KEY = 67108864;  // 2^26: vertex index pairs as one number (fewer than 2^26 vertices)
 
 /**
- * polys: per polygon, its rings (shared point objects are shared vertices).
- * inside(w): w[i] is polygon i's winding number in a cell.
+ * rings: every polygon's rings (vertex indices into V); ringPoly: each ring's polygon;
+ * polyOp: each polygon's operand (0 .. nOps − 1). inside(nz, pos): for each operand, how many of
+ * its polygons wind non-zero and positive in a cell.
  */
-export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean, opts: { triangles?: boolean } = {}): SlabResult {
-  const wantTriangles = opts.triangles ?? false;
-  const P: Point[] = [], index = new Map<Point, number>();
-  const id = (p: Point) => {
-    if (!index.has(p)) index.set(p, P.push(p) - 1);
-    return index.get(p)!;
-  };
+export function slabs(
+  V: Verts, rings: Rings, ringPoly: Int32Array, polyOp: Int32Array, nOps: number,
+  inside: (nz: Int32Array, pos: Int32Array) => boolean,
+): SlabResult {
+  const nPolys = polyOp.length, nRings = ringCount(rings);
   const events: SlabEvents = { crossings: 0, touches: 0, overlaps: 0, ties: 0, disagree: 0 };
 
-  // Edges of polygons, and the lines they lie on: polygons' edges with the same two ends (an edge
-  // they share) are one line, so whatever crosses it crosses it once, at one vertex they all share.
-  const edges: Edge[] = [], lines = new Map<string, Line>();
-  polys.forEach((rings, poly) => {
-    const flip = rings.reduce((s, r) => s + area(r), 0) < 0;
-    for (const ring of rings) {
-      const r = (flip ? [...ring].reverse() : ring).map(id);
-      r.forEach((i, k) => {
-        const j = r[(k + 1) % r.length]!;
-        if (i === j) return;
-        const key = i < j ? `${i},${j}` : `${j},${i}`;
-        if (!lines.has(key)) lines.set(key, { i, j, on: [] });
-        edges.push({ i, j, poly, line: lines.get(key)! });
-      });
-    }
-  });
-  const unique = [...lines.values()];
+  // Each polygon counterclockwise as a whole.
+  const polyArea = new Float64Array(nPolys);
+  for (let r = 0; r < nRings; r++) polyArea[ringPoly[r]!]! += ringArea(V, rings, r);
 
-  // 1. Crossings and touches, by exact orientation signs, between lines whose boxes share a grid cell
-  // (each pair once: in the first cell, in grid order, that both boxes cover).
-  const cell = gridSize(unique, P), grid = new Map<string, number[]>();
-  const cells = (l: Line) => {
-    const a = P[l.i]!, b = P[l.j]!, out: [number, number][] = [];
-    for (let gx = Math.floor(Math.min(a.x, b.x) / cell); gx <= Math.floor(Math.max(a.x, b.x) / cell); gx++) {
-      for (let gy = Math.floor(Math.min(a.y, b.y) / cell); gy <= Math.floor(Math.max(a.y, b.y) / cell); gy++) out.push([gx, gy]);
+  // 1. Edges and the lines they lie on.
+  const EI = new I32(), EJ = new I32(), EP = new I32(), EL = new I32();
+  const LI = new I32(), LJ = new I32(), lineOf = new Map<number, number>();
+  for (let r = 0; r < nRings; r++) {
+    const p = ringPoly[r]!, a = rings.start[r]!, b = rings.start[r + 1]!, flip = polyArea[p]! < 0;
+    for (let k = a; k < b; k++) {
+      const nx = k + 1 < b ? k + 1 : a;
+      const i = flip ? rings.verts[nx]! : rings.verts[k]!, j = flip ? rings.verts[k]! : rings.verts[nx]!;
+      if (i === j) continue;
+      const key = i < j ? i * KEY + j : j * KEY + i;
+      let l = lineOf.get(key);
+      if (l === undefined) {
+        l = LI.length;
+        lineOf.set(key, l);
+        LI.push(i);
+        LJ.push(j);
+      }
+      EI.push(i); EJ.push(j); EP.push(p); EL.push(l);
     }
-    return out;
+  }
+  const nLines = LI.length, li = LI.view(), lj = LJ.view();
+
+  // Crossings: lines whose boxes share a grid cell, each pair tested once (in the first cell both cover).
+  const lens = new Float64Array(nLines);
+  for (let l = 0; l < nLines; l++) lens[l] = Math.hypot(V.x(lj[l]!) - V.x(li[l]!), V.y(lj[l]!) - V.y(li[l]!));
+  const sortedLens = lens.slice().sort();
+  const cell = Math.max(1, 4 * (sortedLens[nLines >> 1] ?? 1));
+  const gx0 = new Int32Array(nLines), gx1 = new Int32Array(nLines), gy0 = new Int32Array(nLines), gy1 = new Int32Array(nLines);
+  const cellKeys = new F64(), cellLine = new I32();
+  for (let l = 0; l < nLines; l++) {
+    const ax = V.x(li[l]!), ay = V.y(li[l]!), bx = V.x(lj[l]!), by = V.y(lj[l]!);
+    gx0[l] = Math.floor(Math.min(ax, bx) / cell); gx1[l] = Math.floor(Math.max(ax, bx) / cell);
+    gy0[l] = Math.floor(Math.min(ay, by) / cell); gy1[l] = Math.floor(Math.max(ay, by) / cell);
+    for (let gx = gx0[l]!; gx <= gx1[l]!; gx++) {
+      for (let gy = gy0[l]!; gy <= gy1[l]!; gy++) { cellKeys.push((gx + 1048576) * 2097152 + (gy + 1048576)); cellLine.push(l); }
+    }
+  }
+  const order = new Int32Array(cellKeys.length);
+  for (let k = 0; k < order.length; k++) order[k] = k;
+  sortBy(order, cellKeys.view());
+  const splitLine = new I32(), splitVert = new I32();  // vertices splitting each line
+
+  /** Splits line l at vertex k if k lies exactly on it (o, the orientation test, exactly zero) inside its box. */
+  const touch = (l: number, k: number, o: number) => {
+    if (o !== 0 || k === li[l] || k === lj[l]) return 0;
+    const px = V.x(li[l]!), py = V.y(li[l]!), qx = V.x(lj[l]!), qy = V.y(lj[l]!), x = V.x(k), y = V.y(k);
+    if (x < Math.min(px, qx) || x > Math.max(px, qx) || y < Math.min(py, qy) || y > Math.max(py, qy)) return 0;
+    splitLine.push(l);
+    splitVert.push(k);
+    return 1;
   };
-  unique.forEach((l, m) => {
-    for (const [gx, gy] of cells(l)) {
-      const k = `${gx},${gy}`;
-      if (!grid.has(k)) grid.set(k, []);
-      grid.get(k)!.push(m);
-    }
-  });
-  const pairs: [number, number][] = [];
-  for (const [k, members] of grid) {
-    const [gx, gy] = k.split(",").map(Number) as [number, number];
-    for (let x = 0; x < members.length; x++) {
-      for (let y = x + 1; y < members.length; y++) {
-        const m = members[x]!, n = members[y]!;
-        // Only in the first cell both cover, so each pair is tested once.
-        const first = cells(unique[m]!).find(([ax, ay]) => cells(unique[n]!).some(([bx, by]) => ax === bx && ay === by))!;
-        if (first[0] === gx && first[1] === gy) pairs.push([m, n]);
+  const ck = cellKeys.view(), cl = cellLine.view();
+  for (let s = 0; s < order.length;) {
+    let e = s;
+    while (e < order.length && ck[order[e]!] === ck[order[s]!]) e++;
+    const key = ck[order[s]!]!, gx = Math.floor(key / 2097152) - 1048576, gy = key - (gx + 1048576) * 2097152 - 1048576;
+    for (let x = s; x < e; x++) {
+      for (let y = x + 1; y < e; y++) {
+        const m = cl[order[x]!]!, n = cl[order[y]!]!;
+        if (Math.max(gx0[m]!, gx0[n]!) !== gx || Math.max(gy0[m]!, gy0[n]!) !== gy) continue;
+        const ei = li[m]!, ej = lj[m]!, fi = li[n]!, fj = lj[n]!;
+        const ax = V.x(ei), ay = V.y(ei), bx = V.x(ej), by = V.y(ej), cx = V.x(fi), cy = V.y(fi), dx = V.x(fj), dy = V.y(fj);
+        if (Math.max(ax, bx) < Math.min(cx, dx) || Math.max(cx, dx) < Math.min(ax, bx)) continue;
+        if (Math.max(ay, by) < Math.min(cy, dy) || Math.max(cy, dy) < Math.min(ay, by)) continue;
+        const shared = ei === fi || ei === fj || ej === fi || ej === fj;
+        const o1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax), o2 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
+        const o3 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx), o4 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
+        if (!shared && Math.sign(o1) * Math.sign(o2) < 0 && Math.sign(o3) * Math.sign(o4) < 0) {
+          // A proper crossing: one new vertex, both lines split at it. Its height from whichever line has heights.
+          const t = o3 / (o3 - o4), u = o1 / (o1 - o2);
+          const za = V.z(ei), zb = V.z(ej), zc = V.z(fi), zd = V.z(fj);
+          const z = za === za && zb === zb ? za + (zb - za) * t : zc + (zd - zc) * u;
+          const v = V.push(ax + (bx - ax) * t, ay + (by - ay) * t, z);
+          splitLine.push(m); splitVert.push(v);
+          splitLine.push(n); splitVert.push(v);
+          events.crossings++;
+          continue;
+        }
+        const hits = touch(m, fi, o1) + touch(m, fj, o2) + touch(n, ei, o3) + touch(n, ej, o4);
+        if (hits) {
+          if (o1 === 0 && o2 === 0) events.overlaps++;
+          else if (!shared) events.touches++;
+        }
       }
     }
-  }
-  for (const [m, n] of pairs) {
-    {
-      const e = unique[m]!, f = unique[n]!;
-      const a = P[e.i]!, b = P[e.j]!, c = P[f.i]!, d = P[f.j]!;
-      if (Math.max(a.x, b.x) < Math.min(c.x, d.x) || Math.max(c.x, d.x) < Math.min(a.x, b.x)) continue;
-      if (Math.max(a.y, b.y) < Math.min(c.y, d.y) || Math.max(c.y, d.y) < Math.min(a.y, b.y)) continue;
-      const shared = e.i === f.i || e.i === f.j || e.j === f.i || e.j === f.j;
-      const o1 = orient(a, b, c), o2 = orient(a, b, d), o3 = orient(c, d, a), o4 = orient(c, d, b);
-      if (!shared && Math.sign(o1) * Math.sign(o2) < 0 && Math.sign(o3) * Math.sign(o4) < 0) {
-        // Its height from whichever edge has heights (a clipping window may not).
-        const t = o3 / (o3 - o4), u = o1 / (o1 - o2);
-        const v = P.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: lerpZ(a, b, t) ?? lerpZ(c, d, u) }) - 1;
-        e.on.push(v);
-        f.on.push(v);
-        events.crossings++;
-        continue;
-      }
-      const touch = (g: Line, k: number, o: number, p: Point) => {
-        if (o !== 0 || k === g.i || k === g.j || !between(P[g.i]!, P[g.j]!, p)) return false;
-        g.on.push(k);
-        return true;
-      };
-      const hits = [touch(e, f.i, o1, c), touch(e, f.j, o2, d), touch(f, e.i, o3, a), touch(f, e.j, o4, b)].filter(Boolean).length;
-      if (hits) {
-        if (o1 === 0 && o2 === 0) events.overlaps++;
-        else if (!shared) events.touches++;
-      }
-    }
+    s = e;
   }
 
-  // Pieces: each edge cut at its vertices, in order along it; the same two ends → one piece.
-  const pieces = new Map<string, Piece>();
-  for (const e of edges) {
-    const a = P[e.i]!, b = P[e.j]!, dx = b.x - a.x, dy = b.y - a.y;
-    const along = (k: number) => (P[k]!.x - a.x) * dx + (P[k]!.y - a.y) * dy;
-    const chain = [e.i, ...[...new Set(e.line.on)].sort((p, q) => along(p) - along(q)), e.j];
+  // 2. Pieces: each line cut at its vertices, in order along it; then each edge's pieces with its winding change.
+  const nSplits = splitLine.length, sl = splitLine.view(), sv = splitVert.view();
+  const splitKey = new Float64Array(nSplits), splitOrder = new Int32Array(nSplits);
+  for (let k = 0; k < nSplits; k++) {
+    const l = sl[k]!, a = li[l]!, b = lj[l]!;
+    // Along the line from li to lj, as a fraction, ordered within the line.
+    const t = ((V.x(sv[k]!) - V.x(a)) * (V.x(b) - V.x(a)) + (V.y(sv[k]!) - V.y(a)) * (V.y(b) - V.y(a))) / (lens[l]! * lens[l]! || 1);
+    splitKey[k] = l * 4 + Math.min(Math.max(t, 0), 1) * 2 + 1;
+    splitOrder[k] = k;
+  }
+  sortBy(splitOrder, splitKey);
+  const lineSplitStart = new Int32Array(nLines + 1);
+  for (let k = 0; k < nSplits; k++) lineSplitStart[sl[k]! + 1]!++;
+  for (let l = 0; l < nLines; l++) lineSplitStart[l + 1]! += lineSplitStart[l]!;
+  const lineSplits = new Int32Array(nSplits);
+  for (let k = 0; k < nSplits; k++) lineSplits[k] = sv[splitOrder[k]!]!;  // by line, then along it
+
+  const pieceOf = new Map<number, number>(), PLo = new I32(), PHi = new I32();
+  const turnPiece = new I32(), turnPoly = new I32(), turnDelta = new I32(), chain = new I32();
+  const eiv = EI.view(), ejv = EJ.view(), epv = EP.view(), elv = EL.view();
+  for (let e = 0; e < eiv.length; e++) {
+    const l = elv[e]!, forward = eiv[e] === li[l], s0 = lineSplitStart[l]!, s1 = lineSplitStart[l + 1]!;
+    chain.length = 0;
+    chain.push(eiv[e]!);
+    if (forward) for (let k = s0; k < s1; k++) chain.push(lineSplits[k]!);
+    else for (let k = s1 - 1; k >= s0; k--) chain.push(lineSplits[k]!);
+    chain.push(ejv[e]!);
     for (let k = 0; k + 1 < chain.length; k++) {
-      const u = chain[k]!, v = chain[k + 1]!;
+      const u = chain.data[k]!, v = chain.data[k + 1]!;
       if (u === v) continue;
       // Stored bottom to top. Crossing, west to east, a piece that runs down goes into a counterclockwise polygon.
-      const up = P[u]!.y < P[v]!.y || (P[u]!.y === P[v]!.y && P[u]!.x < P[v]!.x);
-      const [lo, hi] = up ? [u, v] : [v, u], key = `${lo},${hi}`;
-      if (!pieces.has(key)) pieces.set(key, { lo, hi, turns: new Map() });
-      const piece = pieces.get(key)!;
-      piece.turns.set(e.poly, (piece.turns.get(e.poly) ?? 0) + (up ? -1 : 1));
+      const up = V.y(u) < V.y(v) || (V.y(u) === V.y(v) && V.x(u) < V.x(v));
+      const lo = up ? u : v, hi = up ? v : u, key = lo * KEY + hi;
+      let piece = pieceOf.get(key);
+      if (piece === undefined) {
+        piece = PLo.length;
+        pieceOf.set(key, piece);
+        PLo.push(lo);
+        PHi.push(hi);
+      }
+      turnPiece.push(piece); turnPoly.push(epv[e]!); turnDelta.push(up ? -1 : 1);
     }
   }
-  const list = [...pieces.values()].filter((p) => [...p.turns.values()].some((d) => d !== 0));
+  // Each piece's winding changes, summed per polygon (CSR, zeros dropped).
+  const nPieces = PLo.length, plo = PLo.view(), phi = PHi.view();
+  const nTurns = turnPiece.length, tkey = new Float64Array(nTurns), torder = new Int32Array(nTurns);
+  for (let k = 0; k < nTurns; k++) { tkey[k] = turnPiece.data[k]! * (nPolys + 1) + turnPoly.data[k]!; torder[k] = k; }
+  sortBy(torder, tkey);
+  const turnStart = new Int32Array(nPieces + 1), TP = new I32(), TD = new I32();
+  for (let s = 0, piece = 0; piece < nPieces; piece++) {
+    turnStart[piece] = TP.length;
+    while (s < nTurns && turnPiece.data[torder[s]!] === piece) {
+      const poly = turnPoly.data[torder[s]!]!;
+      let d = 0;
+      while (s < nTurns && turnPiece.data[torder[s]!] === piece && turnPoly.data[torder[s]!] === poly) d += turnDelta.data[torder[s++]!]!;
+      if (d !== 0) { TP.push(poly); TD.push(d); }
+    }
+  }
+  turnStart[nPieces] = TP.length;
+  const tp = TP.view(), td = TD.view();
+  const live = (p: number) => turnStart[p] !== turnStart[p + 1];
 
-  // 2–4. Slabs, swept bottom to top with the pieces spanning each. A piece's x at a slab line is its
-  // own endpoint's when it ends there.
-  const ys = [...new Set(list.flatMap((p) => [P[p.lo]!.y, P[p.hi]!.y]))].sort((p, q) => p - q);
-  const slabOf = new Map(ys.map((y, k) => [y, k]));
-  const rising = list.filter((p) => P[p.lo]!.y !== P[p.hi]!.y).sort((p, q) => P[p.lo]!.y - P[q.lo]!.y);
-  let next = 0, active: Piece[] = [];
-  const xAt = (p: Piece, y: number) => {
-    const a = P[p.lo]!, b = P[p.hi]!;
-    if (y === a.y) return a.x;
-    if (y === b.y) return b.x;
-    return a.x + ((b.x - a.x) * (y - a.y)) / (b.y - a.y);
+  // 3. The sweep.
+  const ysAll = new Float64Array(2 * nPieces);
+  let nY = 0;
+  for (let p = 0; p < nPieces; p++) if (live(p)) { ysAll[nY++] = V.y(plo[p]!); ysAll[nY++] = V.y(phi[p]!); }
+  const ysSorted = ysAll.subarray(0, nY).sort();
+  const ys = new F64();
+  for (let k = 0; k < nY; k++) if (k === 0 || ysSorted[k] !== ysSorted[k - 1]) ys.push(ysSorted[k]!);
+  const Y = ys.view(), nSlabs = Math.max(0, Y.length - 1);
+  const rising = new I32();
+  for (let p = 0; p < nPieces; p++) if (live(p) && V.y(plo[p]!) !== V.y(phi[p]!)) rising.push(p);
+  const riseKey = new Float64Array(nPieces);
+  for (let p = 0; p < nPieces; p++) riseKey[p] = V.y(plo[p]!);
+  const rise = rising.view().slice();
+  sortBy(rise, riseKey);
+
+  const side = new Int8Array(nPieces).fill(-1);  // 0 none, 1 result to its west, 2 to its east
+  const w = new Int32Array(nPolys), nz = new Int32Array(nOps), pos = new Int32Array(nOps), touched = new I32(), tied = new I32();
+  let active = new Int32Array(64), nActive = 0;
+  const xm = new Float64Array(nPieces), x0 = new Float64Array(nPieces), x1 = new Float64Array(nPieces);
+  const pickStart = new Int32Array(nSlabs + 1), pick0 = new F64(), pick1 = new F64(), pickT0 = new F64(), pickT1 = new F64();
+  const xAt = (p: number, y: number) => {
+    const a = plo[p]!, b = phi[p]!;
+    if (y === V.y(a)) return V.x(a);
+    if (y === V.y(b)) return V.x(b);
+    return V.x(a) + ((V.x(b) - V.x(a)) * (y - V.y(a))) / (V.y(b) - V.y(a));
   };
-  const zAt = (p: Piece, y: number) => {
-    const a = P[p.lo]!, b = P[p.hi]!;
-    if (y === a.y) return a.z;
-    if (y === b.y) return b.z;
-    return lerpZ(a, b, (y - a.y) / (b.y - a.y));
-  };
-  const n = polys.length, triangles: Point[][] = [], outline: [number, number][] = [];
-  const side = new Map<Piece, "west" | "east" | "none">();
-  const tied: SlabResult["tied"] = [], tiedSeen = new Set<string>();  // which side the result is on, if just one
-  const picked: { x0: number; x1: number; top0: number; top1: number }[][] = [];
-  for (let k = 0; k + 1 < ys.length; k++) {
-    const y0 = ys[k]!, y1 = ys[k + 1]!, ym = (y0 + y1) / 2;
-    while (next < rising.length && P[rising[next]!.lo]!.y <= y0) active.push(rising[next++]!);
-    active = active.filter((p) => P[p.hi]!.y >= y1);
-    const span = active.map((p) => ({ p, x0: xAt(p, y0), x1: xAt(p, y1), xm: xAt(p, ym), z0: zAt(p, y0), z1: zAt(p, y1) }))
-      .sort((s, t) => s.xm - t.xm);
-    for (let i = 0; i + 1 < span.length; i++) {
-      if (span[i]!.xm !== span[i + 1]!.xm) continue;
+  let next = 0;
+  for (let s = 0; s < nSlabs; s++) {
+    const y0 = Y[s]!, y1 = Y[s + 1]!, ym = (y0 + y1) / 2;
+    while (next < rise.length && V.y(plo[rise[next]!]!) <= y0) {
+      if (nActive === active.length) { const grown = new Int32Array(active.length * 2); grown.set(active); active = grown; }
+      active[nActive++] = rise[next++]!;
+    }
+    let keep = 0;
+    for (let k = 0; k < nActive; k++) if (V.y(phi[active[k]!]!) >= y1) active[keep++] = active[k]!;
+    nActive = keep;
+    const span = active.subarray(0, nActive);
+    for (let k = 0; k < nActive; k++) { const p = span[k]!; xm[p] = xAt(p, ym); x0[p] = xAt(p, y0); x1[p] = xAt(p, y1); }
+    sortBy(span, xm);
+    for (let k = 0; k + 1 < nActive; k++) {
+      if (xm[span[k]!] !== xm[span[k + 1]!]) continue;
       events.ties++;
-      const p = span[i]!.p, q = span[i + 1]!.p, key = `${p.lo},${p.hi}/${q.lo},${q.hi}`;
-      if (!tiedSeen.has(key)) { tiedSeen.add(key); tied.push([P[p.lo]!, P[p.hi]!, P[q.lo]!, P[q.hi]!]); }
+      tied.push(plo[span[k]!]!); tied.push(phi[span[k]!]!); tied.push(plo[span[k + 1]!]!); tied.push(phi[span[k + 1]!]!);
     }
-    const w = new Int32Array(n), cells: (typeof picked)[number] = [];
+    pickStart[s] = pick0.length;
     let wasIn = false;
-    span.forEach((s, i) => {
-      for (const [poly, d] of s.p.turns) w[poly]! += d;
-      const isIn = i + 1 < span.length && inside(w);
-      const here = isIn === wasIn ? "none" : wasIn ? "west" : "east";
-      if (!side.has(s.p)) side.set(s.p, here);
-      else if (side.get(s.p) !== here) events.disagree++;
+    for (let k = 0; k < nActive; k++) {
+      const p = span[k]!;
+      for (let t = turnStart[p]!; t < turnStart[p + 1]!; t++) {
+        const poly = tp[t]!, op = polyOp[poly]!, old = w[poly]!, now = old + td[t]!;
+        if (old === 0) touched.push(poly);
+        if (old !== 0 && now === 0) nz[op]!--;
+        if (old === 0 && now !== 0) nz[op]!++;
+        if (old > 0 && now <= 0) pos[op]!--;
+        if (old <= 0 && now > 0) pos[op]!++;
+        w[poly] = now;
+      }
+      const isIn = k + 1 < nActive && inside(nz, pos);
+      const here = isIn === wasIn ? 0 : wasIn ? 1 : 2;
+      if (side[p] === -1) side[p] = here;
+      else if (side[p] !== here) events.disagree++;
       wasIn = isIn;
-      if (!isIn) return;
-      const t = span[i + 1]!;
-      const c = [{ x: s.x0, y: y0, z: s.z0 }, { x: t.x0, y: y0, z: t.z0 }, { x: t.x1, y: y1, z: t.z1 }, { x: s.x1, y: y1, z: s.z1 }] as const;
-      if (wantTriangles && t.x0 !== s.x0) triangles.push([c[0], c[1], c[2]]);
-      if (wantTriangles && t.x1 !== s.x1) triangles.push([c[0], c[2], c[3]]);
-      cells.push({ x0: s.x0, x1: t.x0, top0: s.x1, top1: t.x1 });
-    });
-    picked.push(cells);
+      if (isIn) {
+        const q = span[k + 1]!;
+        pick0.push(x0[p]!); pick1.push(x0[q]!); pickT0.push(x1[p]!); pickT1.push(x1[q]!);
+      }
+    }
+    // Back to zero for the next slab: only what changed.
+    for (let k = 0; k < touched.length; k++) w[touched.data[k]!] = 0;
+    touched.length = 0;
+    nz.fill(0);
+    pos.fill(0);
   }
-  // Result on the left: going up (low to high) when it's to the west, down when to the east.
-  for (const [p, s] of side) {
-    if (s === "west") outline.push([p.lo, p.hi]);
-    else if (s === "east") outline.push([p.hi, p.lo]);
+  pickStart[nSlabs] = pick0.length;
+
+  // 4. The outline, the result on its left: up (low to high) when it's to the west, down when to the east.
+  const OF = new I32(), OT = new I32();
+  for (let p = 0; p < nPieces; p++) {
+    if (side[p] === 1) { OF.push(plo[p]!); OT.push(phi[p]!); }
+    else if (side[p] === 2) { OF.push(phi[p]!); OT.push(plo[p]!); }
   }
-  // Horizontal pieces are outline where the result is on one side of them only.
-  const covered = (k: number, x: number, top: boolean) =>
-    (picked[k] ?? []).some((c) => (top ? c.top0 < x && x < c.top1 : c.x0 < x && x < c.x1));
-  for (const p of list) {
-    const a = P[p.lo]!, b = P[p.hi]!;
-    if (a.y !== b.y) continue;
-    const k = slabOf.get(a.y)!, xm = (a.x + b.x) / 2;
-    const above = covered(k, xm, false), below = k > 0 && covered(k - 1, xm, true);
-    if (above && !below) outline.push([p.lo, p.hi]);       // result above: east keeps it on the left
-    else if (below && !above) outline.push([p.hi, p.lo]);  // result below: west
+  // Horizontal pieces: outline where the result is on one side of them only.
+  const slabAt = new Map<number, number>();
+  for (let s = 0; s < Y.length; s++) slabAt.set(Y[s]!, s);
+  const covered = (s: number, x: number, top: boolean) => {
+    if (s < 0 || s >= nSlabs) return false;
+    for (let k = pickStart[s]!; k < pickStart[s + 1]!; k++) {
+      if (top ? pickT0.data[k]! < x && x < pickT1.data[k]! : pick0.data[k]! < x && x < pick1.data[k]!) return true;
+    }
+    return false;
+  };
+  for (let p = 0; p < nPieces; p++) {
+    if (!live(p) || V.y(plo[p]!) !== V.y(phi[p]!)) continue;
+    const s = slabAt.get(V.y(plo[p]!))!, x = (V.x(plo[p]!) + V.x(phi[p]!)) / 2;
+    const above = covered(s, x, false), below = covered(s - 1, x, true);
+    if (above && !below) { OF.push(plo[p]!); OT.push(phi[p]!); }       // result above: east keeps it on the left
+    else if (below && !above) { OF.push(phi[p]!); OT.push(plo[p]!); }  // result below: west
   }
 
-  // 5. Stitch by index, taking the sharpest right turn.
-  const from = new Map<number, number[]>();
-  outline.forEach(([u], i) => {
-    if (!from.has(u)) from.set(u, []);
-    from.get(u)!.push(i);
-  });
-  const used = new Set<number>(), loops: Point[][] = [];
-  for (let start = 0; start < outline.length; start++) {
-    if (used.has(start)) continue;
-    const loop: number[] = [];
-    for (let cur: number | undefined = start; cur !== undefined && !used.has(cur);) {
-      used.add(cur);
-      const [u, v]: [number, number] = outline[cur]!;
+  // Stitch by index, taking the sharpest right turn; split loops where they touch themselves.
+  const nOut = OF.length, of = OF.view(), ot = OT.view();
+  const fromKey = new Float64Array(nOut), fromOrder = new Int32Array(nOut);
+  for (let k = 0; k < nOut; k++) { fromKey[k] = of[k]!; fromOrder[k] = k; }
+  sortBy(fromOrder, fromKey);
+  const firstFrom = new Map<number, number>();
+  for (let k = nOut - 1; k >= 0; k--) firstFrom.set(of[fromOrder[k]!]!, k);
+  const used = new Uint8Array(nOut), out = new RingsBuilder(), loop = new I32(), stack = new I32();
+  const seenAt = new Int32Array(V.count).fill(-1);
+  for (let start = 0; start < nOut; start++) {
+    if (used[start]) continue;
+    loop.length = 0;
+    for (let cur = start; cur >= 0 && !used[cur];) {
+      used[cur] = 1;
+      const u = of[cur]!, v = ot[cur]!;
       loop.push(u);
-      const back = Math.atan2(P[u]!.y - P[v]!.y, P[u]!.x - P[v]!.x);
-      const turn = (i: number) => {
-        const [a, b] = outline[i]!, out = Math.atan2(P[b]!.y - P[a]!.y, P[b]!.x - P[a]!.x);
-        const r = (out - back) % (2 * Math.PI);
-        return r <= 0 ? r + 2 * Math.PI : r;  // counterclockwise from straight back: smallest is the sharpest right
-      };
-      cur = (from.get(v) ?? []).filter((i) => !used.has(i)).sort((i, j) => turn(i) - turn(j))[0];
+      const back = Math.atan2(V.y(u) - V.y(v), V.x(u) - V.x(v));
+      let best = -1, bestTurn = Infinity;
+      const f = firstFrom.get(v);
+      if (f !== undefined) {
+        for (let k = f; k < nOut && of[fromOrder[k]!] === v; k++) {
+          const c = fromOrder[k]!;
+          if (used[c]) continue;
+          const by = ((Math.atan2(V.y(ot[c]!) - V.y(v), V.x(ot[c]!) - V.x(v)) - back) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) || 2 * Math.PI;
+          if (by < bestTurn) { bestTurn = by; best = c; }  // counterclockwise from straight back: smallest is the sharpest right
+        }
+      }
+      cur = best;
     }
-    // A loop that touches itself at a vertex is split there into simple loops.
-    for (const simple of unpinch(loop)) {
-      const pts = simple.map((k) => P[k]!);
-      if (pts.length >= 3 && area(pts) !== 0) loops.push(pts);
-    }
+    unpinch(loop, stack, seenAt, out, V);
   }
-  return { triangles, loops, events, tied };
+  return { loops: out.rings(), events, tied: tied.view().slice() };
+}
+
+/** Adds a loop to `out`, split wherever it comes back to a vertex it has passed: simple loops, none of zero area. */
+function unpinch(loop: I32, stack: I32, seenAt: Int32Array, out: RingsBuilder, V: Verts): void {
+  stack.length = 0;
+  for (let k = 0; k < loop.length; k++) {
+    const v = loop.data[k]!, at = seenAt[v]!;
+    if (at >= 0 && at < stack.length && stack.data[at] === v) {
+      // Back at v: what's on the stack since it is a loop of its own.
+      emit(stack, at, stack.length, out, V);
+      for (let j = at; j < stack.length; j++) seenAt[stack.data[j]!] = -1;
+      stack.length = at;
+    }
+    seenAt[v] = stack.length;
+    stack.push(v);
+  }
+  emit(stack, 0, stack.length, out, V);
+  for (let j = 0; j < stack.length; j++) seenAt[stack.data[j]!] = -1;
+}
+
+function emit(stack: I32, a: number, b: number, out: RingsBuilder, V: Verts): void {
+  if (b - a < 3) return;
+  let s = 0;
+  for (let k = a; k < b; k++) {
+    const p = stack.data[k]!, q = stack.data[k + 1 < b ? k + 1 : a]!;
+    s += V.x(p) * V.y(q) - V.x(q) * V.y(p);
+  }
+  if (s === 0) return;
+  for (let k = a; k < b; k++) out.add(stack.data[k]!);
+  out.close();
 }
