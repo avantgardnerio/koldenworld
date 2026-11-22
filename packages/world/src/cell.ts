@@ -189,33 +189,3 @@ export function horizonDistance(eye: number, target = 0): number {
   return Math.sqrt(2 * R * Math.max(0, eye)) + Math.sqrt(2 * R * Math.max(0, target));
 }
 
-// --- ground -------------------------------------------------------------------
-
-export interface GroundMesh {
-  positions: Float32Array;  // x, y, z in the cell frame, m
-  material: Uint8Array;
-  indices: Uint32Array;
-}
-
-/**
- * The cell's ground on the ellipsoid (h = 0), as an n × n grid in its frame.
- * True positions, so it curves away from the tangent plane and meets the
- * neighbors' ground exactly along shared edges.
- */
-export function cellGroundMesh(cell: CellId, frame: Frame, n = 8): GroundMesh {
-  const positions = new Float32Array(3 * (n + 1) ** 2);
-  for (let j = 0, v = 0; j <= n; j++) {
-    for (let i = 0; i <= n; i++, v++) {
-      positions.set(ecefToLocal(frame, geodeticToEcef({ ...cellPoint(cell, i / n, j / n), h: 0 })), 3 * v);
-    }
-  }
-  const indices = new Uint32Array(6 * n * n);
-  for (let j = 0, k = 0; j < n; j++) {
-    for (let i = 0; i < n; i++) {
-      const a = j * (n + 1) + i, b = a + 1, c = a + n + 1, d = c + 1;
-      indices.set([a, b, d, a, d, c], k);
-      k += 6;
-    }
-  }
-  return { positions, material: new Uint8Array((n + 1) ** 2), indices };
-}

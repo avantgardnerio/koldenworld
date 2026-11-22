@@ -10,7 +10,6 @@
 // polygons meet along the shared edge. They are triangulated only to be drawn.
 // Columns throughout (decision 1): no object per point.
 
-import earcut from "earcut";
 import { F64, I32, layers, ringArea, ringCount, RingsBuilder, slabs, Verts, concatRings, type Graph, type Rings } from "@game/streets";
 import type { FileMetadata } from "./arrow-util.ts";
 import { column, readTable, toIPC, u8, u32 } from "./arrow-util.ts";
@@ -168,29 +167,6 @@ function fillHeights(V: Verts, loops: Rings): void {
       V.xyz[3 * v + 2] = zb + ((za - zb) * before) / (before + after || 1);
     }
   }
-}
-
-/** For drawing: every polygon as triangles (a plain triangle list), with a material per vertex. */
-export function streetsTriangles(s: StreetsPolygons): { positions: Float32Array; material: Uint8Array } {
-  const pos = new F64(), mat = new I32(), flat = new F64(), holes: number[] = [];
-  const n = s.polygon.length;
-  for (let a = 0; a < n;) {
-    let b = a;
-    while (b < n && s.polygon[b] === s.polygon[a]) b++;
-    flat.length = 0;
-    holes.length = 0;
-    for (let i = a; i < b; i++) {
-      if (i > a && s.ring[i] !== s.ring[i - 1]) holes.push(i - a);
-      flat.push(s.x[i]!); flat.push(s.y[i]!);
-    }
-    const tris = earcut(flat.view(), holes.length ? holes : undefined, 2);
-    for (const t of tris) {
-      pos.push(s.x[a + t]!); pos.push(s.y[a + t]!); pos.push(s.z[a + t]!);
-      mat.push(s.material[a]!);
-    }
-    a = b;
-  }
-  return { positions: Float32Array.from(pos.view()), material: Uint8Array.from(mat.view()) };
 }
 
 // --- Arrow -------------------------------------------------------------------------

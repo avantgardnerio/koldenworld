@@ -8,12 +8,12 @@ export {
   cellFractions, cellFromLatLon, cellFromToken, cellLattice, cellLevel, cellOutline, cellParent, cellPoint, cellToInt64, cellToken, MAX_LEVEL, type CellId,
 } from "./s2.ts";
 export {
-  buildCell, CELL_LEVEL, CELL_TABLES, CELL_VERSION, cellFromArrow, cellGroundMesh, cellsWithin, cellToArrow, horizonDistance,
-  ownerPoint, packCellFiles, unpackCellFiles, type CellContents, type CellFiles, type GroundMesh,
+  buildCell, CELL_LEVEL, CELL_TABLES, CELL_VERSION, cellFromArrow, cellsWithin, cellToArrow, horizonDistance,
+  ownerPoint, packCellFiles, unpackCellFiles, type CellContents, type CellFiles,
 } from "./cell.ts";
 export {
-  drapeCell, drapeRoadGraph, flatTerrain, footprintMax, groundNoise, groundSampler, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainFromArrow, terrainHeightAt, terrainMesh,
-  terrainToArrow, type CellTerrain, type GroundSampler, type HeightFn, type TerrainMesh,
+  drapeCell, drapeRoadGraph, flatTerrain, footprintMax, groundSampler, sampleTerrain, TERRAIN_N, terrainFromArrow, terrainHeightAt,
+  terrainToArrow, type CellTerrain, type GroundSampler, type HeightFn,
 } from "./terrain.ts";
 export {
   buildRoadGraph, componentSizes, ROAD_CLASSES, ROAD_GRAPH_VERSION, ROAD_STRUCTURES,
@@ -22,7 +22,7 @@ export {
 export { roadGraphFromArrow, roadGraphToArrow, type GraphMetadata, type RoadGraphFiles } from "./road-graph-arrow.ts";
 export { roadLineMesh, type Bounds, type RoadLineMesh } from "./road-lines.ts";
 export {
-  edgeExtents, edgeHalfWidth, MARKING, nodeRadii, ROAD_PROFILES, roadSurfaceMesh, SIDEWALK, SurfaceMaterial, type SurfaceMesh,
+  edgeExtents, edgeHalfWidth, nodeRadii, ROAD_PROFILES, SIDEWALK,
 } from "./road-surface.ts";
 export {
   BUILDING_GROUPS, BUILDINGS_VERSION, buildBuildings, buildingGroup, HEIGHT_SOURCES, OSM_TYPES, signedArea2,
@@ -40,7 +40,7 @@ export {
   type AerowayAreaInput, type AerowayLineInput, type AerowayMesh,
 } from "./aeroways.ts";
 export {
-  cellStreets, emptyStreets, STREET_BANDS, StreetsMaterial, streetsFromArrow, streetsGraph, streetsToArrow, streetsTriangles,
+  cellStreets, emptyStreets, STREET_BANDS, StreetsMaterial, streetsFromArrow, streetsGraph, streetsToArrow,
   type StreetsPolygons,
 } from "./streets-mesh.ts";
 export { SIGN_SETBACK, signText, streetSigns, type StreetSign } from "./signs.ts";
@@ -53,3 +53,4 @@ export {
   edgeArcLengths, edgeLanes, junctionReach, laneGeometry, laneOffset, lanePoint, placeVehicles, turnPoint, VEHICLE_MODELS, VEHICLE_SCALE,
   type LaneGeometry, type VehicleModel, type VehiclePlacements,
 } from "./vehicles.ts";
+export { groundFromArrow, type CellGround } from "./ground-arrow.ts";

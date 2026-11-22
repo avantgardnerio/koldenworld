@@ -95,7 +95,18 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
                 mesh.normals.push(nm);
                 mesh.material.push(kind);
             }
-            mesh.indices.extend(tris.iter().map(|&t| first + t as u32));
+            // Every triangle counterclockwise seen from above (the viewer culls back faces): (s, t) on an S2 face is
+            // right-handed from outside the globe, so counterclockwise there is counterclockwise on the ground.
+            for t in tris.chunks(3) {
+                let at = |k: usize| DVec2::new(flat[2 * t[k]], flat[2 * t[k] + 1]);
+                let ccw = (at(1) - at(0)).perp_dot(at(2) - at(0)) >= 0.0;
+                let [a, b, c] = if ccw {
+                    [t[0], t[1], t[2]]
+                } else {
+                    [t[0], t[2], t[1]]
+                };
+                mesh.indices.extend([a, b, c].map(|k| first + k as u32));
+            }
         }
         // Index ranges by kind: pieces come grouped by kind, so each kind is one run.
         match mesh.ranges.last_mut() {

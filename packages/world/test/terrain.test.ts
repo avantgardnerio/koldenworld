@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCell, CELL_LEVEL, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellToArrow, drapeCell, ecefToLocal, groundSampler,
-  enuFrame, enuUnprojection, frameToFrame, geodeticToEcef, sampleTerrain, TERRAIN_LOD_STEPS, TERRAIN_N, terrainHeightAt,
-  terrainMesh, transformPoint, type BuildingInput, type HeightFn, type RoadWayInput, type Vec3,
+  enuFrame, enuUnprojection, frameToFrame, geodeticToEcef, sampleTerrain, TERRAIN_N, terrainHeightAt,
+  transformPoint, type BuildingInput, type HeightFn, type RoadWayInput, type Vec3,
 } from "../src/index.ts";
 
 // Two neighboring cells in Denver on a tilted plane: rising 10 m per 100 m eastward, plus a gentle north slope.
@@ -24,39 +24,8 @@ describe("terrain lattice", () => {
     }
   });
 
-  it("meets the neighbor's terrain exactly along the shared edge, at every level of detail", () => {
-    const fa = buildCell(a, [], []).frame, fb = buildCell(b, [], []).frame;
-    const ma = terrainMesh(a, fa, sampleTerrain(a, slope)), mb = terrainMesh(b, fb, sampleTerrain(b, slope));
-    const w = TERRAIN_N + 1;
-    const p = (m: typeof ma, k: number): Vec3 => [m.positions[3 * k]!, m.positions[3 * k + 1]!, m.positions[3 * k + 2]!];
-    for (let j = 0; j <= TERRAIN_N; j++) {
-      // a's right column (i = n) is b's left column (i = 0).
-      const pa = transformPoint(frameToFrame(fa, mid), p(ma, j * w + TERRAIN_N));
-      const pb = transformPoint(frameToFrame(fb, mid), p(mb, j * w));
-      expect(dist(pa, pb)).toBeLessThan(0.001);
-    }
-    expect(ma.lods.map((l) => l.count / 3)).toEqual(
-      TERRAIN_LOD_STEPS.map((s) => 2 * (TERRAIN_N / s) ** 2 + 2 * (4 * TERRAIN_N) / s));
-  });
 
-  it("carries height and the same noise on both sides of a shared edge", () => {
-    const fa = buildCell(a, [], []).frame, fb = buildCell(b, [], []).frame;
-    const ma = terrainMesh(a, fa, sampleTerrain(a, slope)), mb = terrainMesh(b, fb, sampleTerrain(b, slope));
-    const w = TERRAIN_N + 1;
-    for (let j = 0; j <= TERRAIN_N; j++) {
-      expect(ma.noise[j * w + TERRAIN_N]).toBe(mb.noise[j * w]);
-      expect(ma.height[j * w + TERRAIN_N]).toBe(mb.height[j * w]);
-    }
-    expect(new Set(ma.noise).size).toBeGreaterThan(20);  // it varies
-  });
 
-  it("points normals up, tilted with the slope", () => {
-    const m = terrainMesh(a, buildCell(a, [], []).frame, sampleTerrain(a, slope));
-    const c = 4 * ((TERRAIN_N / 2) * (TERRAIN_N + 1) + TERRAIN_N / 2);
-    const [nx, , nz] = [m.normals[c]!, m.normals[c + 1]!, m.normals[c + 2]!];
-    expect(nz).toBeGreaterThan(120);
-    expect(nx).toBeLessThan(-5);  // rising eastward: the normal leans west
-  });
 });
 
 describe("drapeCell", () => {

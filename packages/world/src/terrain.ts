@@ -26,9 +26,6 @@ import type { Buildings } from "./buildings.ts";
 
 /** Lattice subdivisions per cell edge: ~17 m spacing at level 13. */
 export const TERRAIN_N = 64;
-/** Mesh levels of detail: lattice steps. */
-export const TERRAIN_LOD_STEPS = [1, 2, 4, 8] as const;
-const SKIRT_DEPTH = 50;  // m
 
 /** Ground height in meters above the ellipsoid at a point. */
 export type HeightFn = (lat: number, lon: number) => number;
@@ -47,14 +44,14 @@ export function sampleTerrain(cell: CellId, height: HeightFn, n = TERRAIN_N): Ce
   return { n, heights };
 }
 
-/** Height at lattice coordinates (x, y) ∈ [0, n]², on the two triangles per square that terrainMesh draws. */
+/** Height at lattice coordinates (x, y) ∈ [0, n]², on the two triangles per square the ground is draped on. */
 function latticeHeight(t: CellTerrain, x: number, y: number): number {
   x = Math.min(t.n, Math.max(0, x));
   y = Math.min(t.n, Math.max(0, y));
   const i = Math.min(t.n - 1, Math.floor(x)), j = Math.min(t.n - 1, Math.floor(y));
   const u = x - i, v = y - j, w = t.n + 1, h = t.heights;
   const a = h[j * w + i]!, b = h[j * w + i + 1]!, c = h[(j + 1) * w + i]!, d = h[(j + 1) * w + i + 1]!;
-  // Each square is split along its (i, j)–(i + 1, j + 1) diagonal, as in terrainMesh.
+  // Each square is split along its (i, j)–(i + 1, j + 1) diagonal, as the ground generator drapes it (crates/cellgen terrain.rs).
   return u >= v ? a + u * (b - a) + v * (d - b) : a + u * (d - c) + v * (c - a);
 }
 
@@ -364,108 +361,4 @@ function drapeBuildings(b: Buildings, place: Place, groundAt: (x: number, y: num
     base[i] = z;
   }
   return { ...b, points, base };
-}
-
-// --- mesh ------------------------------------------------------------------------
-
-export interface TerrainMesh {
-  positions: Float32Array;  // x, y, z in the cell frame: the lattice, then the skirt
-  normals: Int8Array;       // x, y, z, 0 per vertex; ×127
-  height: Float32Array;     // m above the ellipsoid, per vertex (for elevation-based color)
-  noise: Uint8Array;        // smooth value noise 0..255 from lat/lon: breaks up color bands, same on both sides of an edge
-  indices: Uint32Array;     // every level of detail, back to back
-  lods: { start: number; count: number }[];  // per TERRAIN_LOD_STEPS entry, into indices
-}
-
-export function terrainMesh(cell: CellId, frame: Frame, t: CellTerrain): TerrainMesh {
-  const n = t.n, w = n + 1, ll = cellLattice(cell, n);
-  const edge: number[] = [];  // lattice indices around the border, in order
-  for (let i = 0; i < n; i++) edge.push(i);
-  for (let j = 0; j < n; j++) edge.push(j * w + n);
-  for (let i = n; i > 0; i--) edge.push(n * w + i);
-  for (let j = n; j > 0; j--) edge.push(j * w);
-  const count = w * w + edge.length;
-  const positions = new Float32Array(3 * count);
-  const height = new Float32Array(count);
-  const noise = new Uint8Array(count);
-  for (let k = 0; k < w * w; k++) {
-    const lat = ll[2 * k]!, lon = ll[2 * k + 1]!;
-    positions.set(ecefToLocal(frame, geodeticToEcef({ lat, lon, h: t.heights[k]! })), 3 * k);
-    height[k] = t.heights[k]!;
-    noise[k] = Math.round(255 * groundNoise(lat, lon));
-  }
-  edge.forEach((k, s) => {
-    const v = w * w + s;
-    positions[3 * v] = positions[3 * k]!;
-    positions[3 * v + 1] = positions[3 * k + 1]!;
-    positions[3 * v + 2] = positions[3 * k + 2]! - SKIRT_DEPTH;
-    height[v] = height[k]!;
-    noise[v] = noise[k]!;
-  });
-
-  // Normals from central differences on the lattice (one-sided at the border).
-  const normals = new Int8Array(4 * count);
-  const P = (i: number, j: number) => 3 * (Math.min(n, Math.max(0, j)) * w + Math.min(n, Math.max(0, i)));
-  let flip = false;
-  for (let j = 0; j <= n; j++) {
-    for (let i = 0; i <= n; i++) {
-      const a = P(i + 1, j), b = P(i - 1, j), c = P(i, j + 1), d = P(i, j - 1);
-      const sx = [positions[a]! - positions[b]!, positions[a + 1]! - positions[b + 1]!, positions[a + 2]! - positions[b + 2]!];
-      const tx = [positions[c]! - positions[d]!, positions[c + 1]! - positions[d + 1]!, positions[c + 2]! - positions[d + 2]!];
-      let nx = sx[1]! * tx[2]! - sx[2]! * tx[1]!, ny = sx[2]! * tx[0]! - sx[0]! * tx[2]!, nz = sx[0]! * tx[1]! - sx[1]! * tx[0]!;
-      if (i === 0 && j === 0) flip = nz < 0;  // (s, t) may run clockwise seen from above
-      if (flip) { nx = -nx; ny = -ny; nz = -nz; }
-      const len = Math.hypot(nx, ny, nz) || 1;
-      normals.set([Math.round((127 * nx) / len), Math.round((127 * ny) / len), Math.round((127 * nz) / len)], 4 * (j * w + i));
-    }
-  }
-  edge.forEach((k, s) => normals.set(normals.subarray(4 * k, 4 * k + 4), 4 * (w * w + s)));
-
-  // Index buffers per level of detail: the lattice at a step, and the skirt along the same border points.
-  const tri = (out: number[], a: number, b: number, c: number) => (flip ? out.push(a, c, b) : out.push(a, b, c));
-  const all: number[] = [];
-  const lods: { start: number; count: number }[] = [];
-  for (const step of TERRAIN_LOD_STEPS) {
-    const start = all.length;
-    for (let j = 0; j < n; j += step) {
-      for (let i = 0; i < n; i += step) {
-        const a = j * w + i, b = a + step, c = a + step * w, d = c + step;
-        tri(all, a, b, d);
-        tri(all, a, d, c);
-      }
-    }
-    // Skirt quads between consecutive border points at this step, facing outward.
-    for (let s = 0; s < edge.length; s += step) {
-      const s2 = (s + step) % edge.length;
-      const a = edge[s]!, b = edge[s2]!, a2 = w * w + s, b2 = w * w + s2;
-      tri(all, a, a2, b2);
-      tri(all, a, b2, b);
-    }
-    lods.push({ start, count: all.length - start });
-  }
-
-  return { positions, normals, height, noise, indices: Uint32Array.from(all), lods };
-}
-
-// --- noise -----------------------------------------------------------------------
-
-/** A hash of two integers to [0, 1). */
-function hash2(i: number, j: number): number {
-  let h = Math.imul(i | 0, 0x27d4eb2d) ^ Math.imul(j | 0, 0x165667b1);
-  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
-  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
-  return ((h ^ (h >>> 16)) >>> 0) / 2 ** 32;
-}
-
-/** Value noise on a lat/lon grid of `cell` degrees, smoothstepped between grid points. */
-function valueNoise(lat: number, lon: number, cell: number): number {
-  const x = lon / cell, y = lat / cell, i = Math.floor(x), j = Math.floor(y);
-  const s = (t: number) => t * t * (3 - 2 * t);
-  const u = s(x - i), v = s(y - j);
-  return (hash2(i, j) * (1 - u) + hash2(i + 1, j) * u) * (1 - v) + (hash2(i, j + 1) * (1 - u) + hash2(i + 1, j + 1) * u) * v;
-}
-
-/** Smooth noise in [0, 1] over the ground: ~1 km and ~250 m features. Pure function of the point. */
-export function groundNoise(lat: number, lon: number): number {
-  return 0.65 * valueNoise(lat, lon, 0.01) + 0.35 * valueNoise(lat, lon, 0.0025);
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildCell, CELL_LEVEL, CELL_TABLES, CELL_VERSION, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellGroundMesh, cellsWithin,
+  buildCell, CELL_LEVEL, CELL_TABLES, CELL_VERSION, cellCenter, cellEdgeNeighbors, cellFromArrow, cellFromLatLon, cellsWithin,
   cellToArrow, ecefToLocal, enuFrame, enuUnprojection, frameToFrame, geodeticToEcef, horizonDistance, packCellFiles, transformPoint,
   unpackCellFiles, type BuildingInput, type CellFiles, type RoadWayInput, type Vec3,
 } from "../src/index.ts";
@@ -113,22 +113,6 @@ describe("horizon and ground", () => {
     expect(horizonDistance(1.7, 200)).toBeCloseTo(4654 + 50_478, -2);
   });
 
-  it("curves the ground and meets the neighbor along the shared edge", () => {
-    const ga = cellGroundMesh(a, buildCell(a, [], []).frame, 4);
-    const fb = buildCell(b, [], []).frame;
-    const gb = cellGroundMesh(b, fb, 4);
-    const center = 3 * (2 * 5 + 2);
-    expect(Math.abs(ga.positions[center + 2]!)).toBeLessThan(0.01);
-    expect(ga.positions[2]).toBeLessThan(-0.01);  // a corner, below the tangent plane
-    const fa = buildCell(a, [], []).frame;
-    // a's right edge (i = 4) is b's left edge (i = 0), row by row.
-    for (let j = 0; j <= 4; j++) {
-      const p = (g: typeof ga, i: number): Vec3 => [g.positions[3 * (j * 5 + i)]!, g.positions[3 * (j * 5 + i) + 1]!, g.positions[3 * (j * 5 + i) + 2]!];
-      const pa = transformPoint(frameToFrame(fa, mid), p(ga, 4));
-      const pb = transformPoint(frameToFrame(fb, mid), p(gb, 0));
-      expect(Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2])).toBeLessThan(0.001);
-    }
-  });
 });
 
 describe("packCellFiles", () => {

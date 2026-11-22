@@ -17,8 +17,8 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, enuUnprojection, streetSigns, streetsTriangles, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
-  frameToFrame, unpackCellFiles, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
+  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, enuUnprojection, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, speed, viewProjection } from "./camera.ts";
@@ -30,12 +30,11 @@ import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, typ
 import { attachInput, isIdle } from "./input.ts";
 import { createSignLayer, type SignLayer } from "./sign-layer.ts";
 import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
-import { createTerrainLayer, type TerrainLayer } from "./terrain-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
-  AEROWAY, BUILDING_COLORS_RGB, STREETS, CLASS_COLORS_RGB, fogRange, MARKING_FADE, MARKINGS, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
+  AEROWAY, BUILDING_COLORS_RGB, GROUND, CLASS_COLORS_RGB, fogRange, SKY, SUN,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -72,13 +71,9 @@ const RADIUS_STEP = 500;
 const MAX_DT = 0.1;  // s; a stalled tab must not teleport the camera
 /** Downtown Denver, ~400 m above the ground (which is ~1,575 m above the ellipsoid there). */
 const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 1975, rot: fromYawPitch(0, -35 * Math.PI / 180) };
-/** Terrain level of detail (index into TERRAIN_LOD_STEPS) by distance to the cell's center, m. */
-const TERRAIN_LOD_DISTANCES = [4000, 8000, 16_000];
-/** Roads drawn this far toward the camera from the ground they lie on (m, plus 0.1% of distance). */
+/** Cars and planes drawn this far toward the camera from the ground they're on (m, plus 0.1% of distance). */
 const ROAD_BIAS = 0.3;
-/** Water a little less than roads, so a road over a stream wins. */
-const WATER_BIAS = 0.2;
-/** Airport surfaces between water and roads: a service road across an apron wins. */
+/** Airport surfaces nudged toward the camera from the ground they lie on (the ground doesn't know them yet). */
 const AEROWAY_BIAS = 0.25;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
 const CAR_DISTANCE = 1500;
@@ -118,15 +113,11 @@ function reach(points: ArrayLike<number>, stride: number): number {
 interface CellGpu {
   frame: CellFrame;
   missing: boolean;
-  radius: number;  // bounding sphere around (0, 0, centerZ) in the frame, m: terrain, roads, building tops
+  radius: number;  // bounding sphere around (0, 0, centerZ) in the frame, m: the ground, roads, building tops
   centerZ: number;
   model: Float32Array;  // this frame's cell → view transform, reused every frame
-  terrain: CellTerrain;
-  ground: TerrainLayer;
-  lods: { start: number; count: number }[];
-  roads?: FlatLayer;
-  water?: FlatLayer;
-  streets?: FlatLayer;
+  terrain: CellTerrain;  // heights, for cars and the camera
+  ground: SolidLayer;  // every point of the cell one kind of ground, draped on the terrain: from the Rust generator
   aeroways?: FlatLayer;
   lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
   traffic?: TrafficCell;  // this cell's roads in the traffic sim
@@ -157,7 +148,14 @@ async function start(): Promise<void> {
 
   async function loadCell(cell: CellId): Promise<CellGpu> {
     const token = cellToken(cell);
-    // Every table in one response from the cell server; a file per table when served as static files.
+    // The ground comes made from the Rust generator (/ground → `cellgen serve`): every point of the cell one kind,
+    // draped on the terrain, as GPU buffers. Nothing here builds ground; a cell without it fails.
+    const ground = Promise.all([getBlob(`/ground/${token}/ground.arrow`), getBlob(`/ground/${token}/ground_triangles.arrow`)])
+      .then(([v, t]) => {
+        if (!v || !t) throw new Error(`/ground/${token}: no ground`);
+        return groundFromArrow(v, t);
+      });
+    // Every other table in one response from the cell server; a file per table when served as static files.
     const packed = await getBlob(`/cells/${token}.cell`);
     const files = packed && unpackCellFiles(packed);
     const blobs = files ? CELL_TABLES.map((t) => files[t]) : await Promise.all(CELL_TABLES.map((t) => getBlob(`/cells/${token}/${t}.arrow`)));
@@ -167,18 +165,16 @@ async function start(): Promise<void> {
     const c = missing ? null : cellFromArrow(Object.fromEntries(CELL_TABLES.map((t, i) => [t, blobs[i]!])) as unknown as CellFiles);
     if (c && c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);
     const terrain = c?.terrain ?? flatTerrain();
-    const tm = terrainMesh(cell, frame, terrain);
-    const ground = createTerrainLayer(gl!, tm, TERRAIN_STYLE);
-    const groundReach = reach(tm.positions, 3);
+    const mesh = await ground;
+    const layer = createSolidLayer(gl!, mesh, GROUND);
     const model = new Float32Array(16);
-    // Vertical extent: terrain (with its skirts) and building tops.
+    // Vertical extent: the ground and building tops.
     let z0 = Infinity, z1 = -Infinity;
-    for (let i = 2; i < tm.positions.length; i += 3) { z0 = Math.min(z0, tm.positions[i]!); z1 = Math.max(z1, tm.positions[i]!); }
+    for (let i = 2; i < mesh.positions.length; i += 3) { z0 = Math.min(z0, mesh.positions[i]!); z1 = Math.max(z1, mesh.positions[i]!); }
     const sphere = (flat: number) => ({ centerZ: (z0 + z1) / 2, radius: Math.hypot(flat, (z1 - z0) / 2) });
-    if (!c) return { frame, missing: true, ...sphere(groundReach), model, terrain, ground, lods: tm.lods, counts: zero };
-    // The pavement (with grass and sidewalks) is the streets mesh when the cell has one; the road surface adds the markings.
-    const streets = streetsTriangles(c.streets), hasStreets = streets.material.length > 0;
-    const surface = roadSurfaceMesh(c.graph, { surface: !hasStreets });
+    const groundReach = reach(mesh.positions, 3);
+    const counts = { ...zero, surfaceTriangles: mesh.indices.length / 3 };
+    if (!c) return { frame, missing: true, ...sphere(groundReach), model, terrain, ground: layer, counts };
     const lines = roadLineMesh(c.graph);
     const tris = buildingMesh(c.buildings);
     // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
@@ -190,17 +186,7 @@ async function start(): Promise<void> {
       ...sphere(flat),
       model,
       terrain,
-      ground,
-      lods: tm.lods,
-      roads: createFlatLayer(gl!, surface, { mode: gl!.TRIANGLES, colors: SURFACE_COLORS, fade: MARKINGS, bias: ROAD_BIAS }),
-      streets: !hasStreets ? undefined : createFlatLayer(gl!, {
-        positions: streets.positions, dims: 3, material: streets.material,
-        indices: Uint32Array.from({ length: streets.material.length }, (_, i) => i),
-      }, { mode: gl!.TRIANGLES, colors: STREETS, bias: ROAD_BIAS }),
-      water: c.water.material.length === 0 ? undefined : createFlatLayer(gl!, {
-        positions: c.water.positions, dims: 3, material: c.water.material,
-        indices: Uint32Array.from({ length: c.water.material.length }, (_, i) => i),
-      }, { mode: gl!.TRIANGLES, colors: WATER, bias: WATER_BIAS }),
+      ground: layer,
       aeroways: c.aeroways.material.length === 0 ? undefined : createFlatLayer(gl!, {
         positions: c.aeroways.positions, dims: 3, material: c.aeroways.material,
         indices: Uint32Array.from({ length: c.aeroways.material.length }, (_, i) => i),
@@ -215,7 +201,7 @@ async function start(): Promise<void> {
         return cellFromLatLon(lat, lon, CELL_LEVEL) === cell;
       })),
       counts: {
-        nodes: c.graph.nodes.count, edges: c.graph.edges.count, surfaceTriangles: surface.indices.length / 3,
+        ...counts, nodes: c.graph.nodes.count, edges: c.graph.edges.count,
         buildings: c.buildings.count, buildingTriangles: tris.indices.length / 3,
       },
     };
@@ -225,7 +211,7 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 16,  // the cell server builds on a pool of workers
     dispose: (g) => {
-      [g.ground, g.water, g.aeroways, g.streets, g.roads, g.graph, g.buildings, g.signs].forEach((l) => l?.dispose());
+      [g.ground, g.aeroways, g.graph, g.buildings, g.signs].forEach((l) => l?.dispose());
       if (g.traffic) traffic.remove(g.traffic);
     },
     onChange: () => {
@@ -320,7 +306,6 @@ async function start(): Promise<void> {
       eye: local.pos,
       sky: SKY,
       fog: fogRange(status.radius),
-      fade: MARKING_FADE,
     };
     // Each cell's frame → the view frame, computed in f64, then cast (decision 20).
     // Frustum culling: a cell's frame origin lands at the model matrix's translation.
@@ -335,18 +320,9 @@ async function start(): Promise<void> {
       if (g.traffic) g.traffic.visible = seen;
     });
     status.cells.drawn = visible.length;
-    // Terrain first, at a level of detail by distance (skirts hide the cracks between levels), then
-    // roads nudged toward the camera, then buildings; everything depth-tested.
-    for (const g of visible) {
-      const d = Math.hypot(g.model[12]!, g.model[13]!, g.model[14]! + g.centerZ - camera.h);
-      let lod = 0;
-      while (lod < TERRAIN_LOD_DISTANCES.length && d > TERRAIN_LOD_DISTANCES[lod]!) lod++;
-      g.ground.draw(f, g.model, SUN, g.lods[lod]);
-    }
-    for (const g of visible) g.water?.draw(f, g.model);
+    // The ground first, then airport surfaces nudged toward the camera, then buildings; everything depth-tested.
+    for (const g of visible) g.ground.draw(f, g.model, SUN);
     for (const g of visible) g.aeroways?.draw(f, g.model);
-    for (const g of visible) g.streets?.draw(f, g.model);
-    for (const g of visible) g.roads?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
     let carTriangles = 0;

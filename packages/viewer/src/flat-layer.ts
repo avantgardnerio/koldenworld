@@ -1,18 +1,16 @@
-// A mesh on the ground with a material index per vertex: the road surface and
+// A mesh on the ground with a material index per vertex: airport surfaces and
 // the graph overlay. Positions are in a cell's frame, 2D (z = 0) or 3D; each
 // draw places the mesh with that cell's model matrix. Buffers are uploaded
 // once; each draw is one call. Layers hold GPU handles only, no game state.
 //
 // On terrain, ground layers are depth-tested like everything else, nudged
-// toward the camera (`bias` m, growing slightly with distance, a little more
-// for markings than asphalt) so they win against the ground they lie on but
-// still hide behind hills. With bias 0 they are painted in order instead.
+// toward the camera (`bias` m, growing slightly with distance) so they win
+// against the ground they lie on but still hide behind hills. With bias 0 they
+// are painted in order instead.
 //
 // Ground layers are coplanar, so they are painted in order (depth test
 // ALWAYS) while still writing depth, so that buildings drawn afterwards are
-// depth-tested against the ground and against each other. Fog blends toward the sky color by distance; "fade" materials (the
-// thin lane markings) blend into material 0 at a distance, before they would
-// shimmer at sub-pixel widths.
+// depth-tested against the ground and against each other. Fog blends toward the sky color by distance.
 
 export const MAX_MATERIALS = 16;
 
@@ -20,25 +18,22 @@ const VERTEX = `#version 300 es
 uniform mat4 u_view;
 uniform mat4 u_model;
 uniform vec3 u_colors[${MAX_MATERIALS}];
-uniform uint u_fadeMaterials;  // materials 1..u_fadeMaterials blend into material 0 at a distance (0: none)
 uniform vec3 u_eye;
 uniform float u_bias;
 in vec3 a_pos;  // z defaults to 0 for 2D positions
 in uint a_mat;
 out vec3 v_world;
 out vec3 v_color;
-out vec3 v_base;
 void main() {
   vec4 world = u_model * vec4(a_pos, 1.0);
   v_world = world.xyz;
   if (u_bias > 0.0) {
     vec3 toEye = u_eye - world.xyz;
     float d = length(toEye);
-    world.xyz += toEye / d * min(d * 0.5, u_bias + 0.001 * d + (a_mat > 0u ? 0.05 : 0.0));
+    world.xyz += toEye / d * min(d * 0.5, u_bias + 0.001 * d);
   }
   gl_Position = u_view * world;
   v_color = u_colors[a_mat];
-  v_base = a_mat > 0u && a_mat <= u_fadeMaterials ? u_colors[0] : v_color;
 }`;
 
 const FRAGMENT = `#version 300 es
@@ -46,15 +41,12 @@ precision highp float;
 uniform vec3 u_eye;
 uniform vec3 u_sky;
 uniform vec2 u_fog;   // start, end (m)
-uniform vec2 u_fade;  // start, end (m)
 in vec3 v_world;
 in vec3 v_color;
-in vec3 v_base;
 out vec4 color;
 void main() {
   float d = distance(v_world, u_eye);
-  vec3 c = mix(v_color, v_base, smoothstep(u_fade.x, u_fade.y, d));
-  color = vec4(mix(c, u_sky, smoothstep(u_fog.x, u_fog.y, d)), 1.0);
+  color = vec4(mix(v_color, u_sky, smoothstep(u_fog.x, u_fog.y, d)), 1.0);
 }`;
 
 export interface FlatMesh {
@@ -69,7 +61,6 @@ export interface Frame {
   eye: readonly [number, number, number];
   sky: Float32Array;
   fog: readonly [number, number];
-  fade: readonly [number, number];
 }
 
 export interface FlatLayer {
@@ -104,13 +95,13 @@ function program(gl: WebGL2RenderingContext): WebGLProgram {
 export function createFlatLayer(
   gl: WebGL2RenderingContext,
   mesh: FlatMesh,
-  opts: { mode: GLenum; colors: Float32Array; fade?: number; bias?: number },
+  opts: { mode: GLenum; colors: Float32Array; bias?: number },
 ): FlatLayer {
   if (opts.colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
   const p = program(gl);
   const u = (name: string) => gl.getUniformLocation(p, name);
-  const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uFadeMaterials = u("u_fadeMaterials");
-  const uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uFade = u("u_fade"), uBias = u("u_bias");
+  const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors");
+  const uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uBias = u("u_bias");
 
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
@@ -137,11 +128,9 @@ export function createFlatLayer(
       gl.uniformMatrix4fv(uView, false, f.view);
       gl.uniformMatrix4fv(uModel, false, model);
       gl.uniform3fv(uColors, opts.colors);
-      gl.uniform1ui(uFadeMaterials, opts.fade ?? 0);
       gl.uniform3f(uEye, f.eye[0], f.eye[1], f.eye[2]);
       gl.uniform3fv(uSky, f.sky);
       gl.uniform2f(uFog, f.fog[0], f.fog[1]);
-      gl.uniform2f(uFade, f.fade[0], f.fade[1]);
       gl.uniform1f(uBias, opts.bias ?? 0);
       gl.depthFunc(opts.bias ? gl.LEQUAL : gl.ALWAYS);
       gl.bindVertexArray(vao);
