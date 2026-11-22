@@ -70,7 +70,9 @@ function program(gl: WebGL2RenderingContext): WebGLProgram {
   return p;
 }
 
-export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh, colors: Float32Array): SolidLayer {
+export function createSolidLayer(
+  gl: WebGL2RenderingContext, mesh: Omit<BuildingMesh, "indices"> & { indices: Uint16Array | Uint32Array }, colors: Float32Array,
+): SolidLayer {
   if (colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
   const p = program(gl);
   const u = (name: string) => gl.getUniformLocation(p, name);
@@ -97,6 +99,7 @@ export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh,
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
   gl.bindVertexArray(null);
   const count = mesh.indices.length;
+  const indexType = mesh.indices instanceof Uint16Array ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
 
   return {
     draw(f, model, sun) {
@@ -112,7 +115,7 @@ export function createSolidLayer(gl: WebGL2RenderingContext, mesh: BuildingMesh,
       gl.depthFunc(gl.LEQUAL);
       gl.enable(gl.CULL_FACE);
       gl.bindVertexArray(vao);
-      gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, 0);
+      gl.drawElements(gl.TRIANGLES, count, indexType, 0);
       gl.bindVertexArray(null);
       gl.disable(gl.CULL_FACE);
     },

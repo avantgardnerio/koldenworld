@@ -2,17 +2,19 @@
 //! column is one contiguous buffer the viewer reads as a typed-array view):
 //!
 //!   ground.arrow (a row per vertex)            ground_triangles.arrow (a row per triangle)
-//!   position  fixed_size_list<float32, 3>       vertices  fixed_size_list<uint32, 3>
-//!   normal    fixed_size_list<float32, 3>
+//!   position  fixed_size_list<float32, 3>       vertices  fixed_size_list<uint16, 3> (under 65,536 vertices)
+//!   normal    fixed_size_list<int8, 4>                    fixed_size_list<uint32, 3> (otherwise)
 //!   material  uint8
 //!
-//! Positions and normals are in the cell's ENU frame (x east, y north, z up, from its center on the ellipsoid, as the
+//! Normals are × 127 with a zero fourth (as the GPU takes them: normalized bytes, four to a vertex). Positions and
+//! normals are in the cell's ENU frame (x east, y north, z up, from its center on the ellipsoid, as the
 //! TS cellFrame). Triangles are sorted by material; the schema metadata (values JSON-encoded) holds the cell's token,
 //! the frame's origin, the materials' names, and each material's range of triangles.
 
 use crate::mesh::Mesh;
 use arrow_array::{
-    ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, UInt8Array, UInt32Array,
+    ArrayRef, FixedSizeListArray, Float32Array, Int8Array, RecordBatch, UInt8Array, UInt16Array,
+    UInt32Array,
 };
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
@@ -62,17 +64,30 @@ pub fn encode(
         ),
     ]);
 
-    let vec3 = |name: &str, v: &[[f32; 3]]| -> (Field, ArrayRef) {
-        let item = Arc::new(Field::new("xyz", DataType::Float32, false));
-        let values = Float32Array::from(v.iter().flatten().copied().collect::<Vec<f32>>());
-        let array = FixedSizeListArray::new(item.clone(), 3, Arc::new(values), None);
+    let list = |name: &str, item: &str, values: ArrayRef, size: i32| -> (Field, ArrayRef) {
+        let item = Arc::new(Field::new(item, values.data_type().clone(), false));
+        let array = FixedSizeListArray::new(item.clone(), size, values, None);
         (
-            Field::new(name, DataType::FixedSizeList(item, 3), false),
+            Field::new(name, DataType::FixedSizeList(item, size), false),
             Arc::new(array),
         )
     };
-    let (position, positions) = vec3("position", &mesh.positions);
-    let (normal, normals) = vec3("normal", &mesh.normals);
+    let (position, positions) = list(
+        "position",
+        "xyz",
+        Arc::new(Float32Array::from_iter_values(
+            mesh.positions.iter().flatten().copied(),
+        )),
+        3,
+    );
+    let (normal, normals) = list(
+        "normal",
+        "xyz0",
+        Arc::new(Int8Array::from_iter_values(
+            mesh.normals.iter().flatten().copied(),
+        )),
+        4,
+    );
     let material: ArrayRef = Arc::new(UInt8Array::from(mesh.material.clone()));
     let ground = table(
         vec![
@@ -84,22 +99,15 @@ pub fn encode(
         metadata.clone(),
     )?;
 
-    let item = Arc::new(Field::new("v", DataType::UInt32, false));
-    let list = FixedSizeListArray::new(
-        item.clone(),
-        3,
-        Arc::new(UInt32Array::from(mesh.indices.clone())),
-        None,
-    );
-    let triangles = table(
-        vec![Field::new(
-            "vertices",
-            DataType::FixedSizeList(item, 3),
-            false,
-        )],
-        vec![Arc::new(list)],
-        metadata,
-    )?;
+    let indices: ArrayRef = if mesh.positions.len() <= 1 << 16 {
+        Arc::new(UInt16Array::from_iter_values(
+            mesh.indices.iter().map(|&i| i as u16),
+        ))
+    } else {
+        Arc::new(UInt32Array::from(mesh.indices.clone()))
+    };
+    let (vertices, vertex_lists) = list("vertices", "v", indices, 3);
+    let triangles = table(vec![vertices], vec![vertex_lists], metadata)?;
     Ok((ground, triangles))
 }
 

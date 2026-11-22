@@ -2,10 +2,11 @@
 // (asphalt, markings, grass, sidewalk, lot, water), draped on the terrain, as GPU-ready buffers.
 //
 //   ground.arrow (a row per vertex)            ground_triangles.arrow (a row per triangle)
-//   position  fixed_size_list<float32, 3>       vertices  fixed_size_list<uint32, 3>
-//   normal    fixed_size_list<float32, 3>
+//   position  fixed_size_list<float32, 3>       vertices  fixed_size_list<uint16, 3> (under 65,536 vertices)
+//   normal    fixed_size_list<int8, 4>                    fixed_size_list<uint32, 3> (otherwise)
 //   material  uint8
 //
+// Normals are × 127 with a zero fourth, as the GPU takes them (normalized bytes).
 // Positions and normals are in the cell's frame (cellFrame); triangles are counterclockwise from above and sorted by
 // material, with each material's range of triangles in the schema metadata.
 
@@ -16,7 +17,7 @@ export interface CellGround {
   normals: Int8Array;       // x, y, z, 0 per vertex; ×127 (as the building mesh)
   material: Uint8Array;     // index into materials
   shade: Uint8Array;        // no per-vertex variation: all 0
-  indices: Uint32Array;
+  indices: Uint16Array | Uint32Array;
   materials: string[];      // "asphalt", "yellow", "white", "grass", "sidewalk", "lot", "water"
   ranges: [material: number, first: number, count: number][];  // in triangles
 }
@@ -26,17 +27,16 @@ export function groundFromArrow(ground: Uint8Array, triangles: Uint8Array): Cell
   const t = readTable(triangles, "ground_triangles");
   const n = v.table.numRows, m = t.table.numRows;
   const positions = values(column(v.table, "position", "ground").children[0]!, 3 * n, Float32Array, "ground.position");
-  const normals = values(column(v.table, "normal", "ground").children[0]!, 3 * n, Float32Array, "ground.normal");
-  const packed = new Int8Array(4 * n);
-  for (let i = 0; i < n; i++) {
-    for (let k = 0; k < 3; k++) packed[4 * i + k] = Math.round(normals[3 * i + k]! * 127);
-  }
+  const vertices = column(t.table, "vertices", "ground_triangles").children[0]!;
+  const wide = vertices.values instanceof Uint32Array;
   return {
     positions,
-    normals: packed,
+    normals: values(column(v.table, "normal", "ground").children[0]!, 4 * n, Int8Array, "ground.normal"),
     material: values(column(v.table, "material", "ground"), n, Uint8Array, "ground.material"),
     shade: new Uint8Array(n),
-    indices: values(column(t.table, "vertices", "ground_triangles").children[0]!, 3 * m, Uint32Array, "ground_triangles.vertices"),
+    indices: wide
+      ? values(vertices, 3 * m, Uint32Array, "ground_triangles.vertices")
+      : values(vertices, 3 * m, Uint16Array, "ground_triangles.vertices"),
     materials: v.metadata.materials as string[],
     ranges: v.metadata.ranges as CellGround["ranges"],
   };

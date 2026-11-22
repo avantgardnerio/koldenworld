@@ -206,7 +206,15 @@ pub fn draw_mesh(
     pixmap.fill(tiny_skia::Color::WHITE);
     for t in m.indices.chunks(3) {
         let [a, b, c] = [t[0], t[1], t[2]].map(|i| i as usize);
-        let shade = 0.35 + 0.75 * glam::Vec3::from_array(m.normals[a]).dot(light).max(0.0);
+        let shade = 0.35
+            + 0.75
+                * (glam::Vec3::new(
+                    m.normals[a][0] as f32,
+                    m.normals[a][1] as f32,
+                    m.normals[a][2] as f32,
+                ) / 127.0)
+                    .dot(light)
+                    .max(0.0);
         let [r, g, bl] =
             colors[m.material[a] as usize].map(|c| (c as f32 * shade).min(255.0) as u8);
         let mut tri = tiny_skia::PathBuilder::new();

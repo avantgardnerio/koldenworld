@@ -1,17 +1,19 @@
-//! The draped ground as GPU buffers: positions and normals (f32, in the cell's ENU frame: x east, y north, z up, from
-//! its center on the ellipsoid, as the TS cellFrame), a material per vertex (the kind), and u32 indices, one range per
-//! kind. Each piece is triangulated with earcut, holes and all; every vertex of a piece lies in one flat terrain
-//! triangle, so its normal is that triangle's.
+//! The draped ground as GPU buffers: positions (f32, in the cell's ENU frame: x east, y north, z up, from its center
+//! on the ellipsoid, as the TS cellFrame), normals (i8 × 127, and a zero to make four bytes, as the GPU takes them), a
+//! material per vertex (the kind), and indices, one range per kind. Each piece is triangulated with earcut, holes and
+//! all; every vertex of a piece lies in one flat terrain triangle, so its normal is that triangle's. Vertices alike in
+//! all three (position, normal, material) are one vertex.
 
 use crate::geodesy::{self, Frame};
 use crate::s2;
 use crate::terrain::{Draped, Terrain};
 use glam::{DVec2, DVec3};
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
-    pub normals: Vec<[f32; 3]>,
+    pub normals: Vec<[i8; 4]>,
     pub material: Vec<u8>,
     pub indices: Vec<u32>,
     pub ranges: Vec<[u32; 3]>, // per kind present: kind, first index, index count
@@ -49,10 +51,12 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
         } else {
             (pb - pa).cross(pd - pa)
         };
-        nm.normalize().as_vec3().to_array()
+        let nm = nm.normalize() * 127.0;
+        [nm.x, nm.y, nm.z].map(|c| c.round() as i8)
     };
 
     let mut mesh = Mesh::default();
+    let mut welded: HashMap<([u32; 3], [i8; 3], u8), u32> = HashMap::new();
     let ring = |p: usize| d.start[p] as usize..d.start[p + 1] as usize;
     let mut p = 0;
     while p < d.kind.len() {
@@ -88,13 +92,20 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
                 mesh.failed += 1;
                 continue;
             };
-            let first = mesh.positions.len() as u32;
-            for &v in &verts {
-                mesh.positions
-                    .push(local(d.st[v], d.h[v]).as_vec3().to_array());
-                mesh.normals.push(nm);
-                mesh.material.push(kind);
-            }
+            let ids: Vec<u32> = verts
+                .iter()
+                .map(|&v| {
+                    let at = local(d.st[v], d.h[v]).as_vec3().to_array();
+                    *welded
+                        .entry((at.map(f32::to_bits), nm, kind))
+                        .or_insert_with(|| {
+                            mesh.positions.push(at);
+                            mesh.normals.push([nm[0], nm[1], nm[2], 0]);
+                            mesh.material.push(kind);
+                            (mesh.positions.len() - 1) as u32
+                        })
+                })
+                .collect();
             // Every triangle counterclockwise seen from above (the viewer culls back faces): (s, t) on an S2 face is
             // right-handed from outside the globe, so counterclockwise there is counterclockwise on the ground.
             for t in tris.chunks(3) {
@@ -105,7 +116,11 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
                 } else {
                     [t[0], t[2], t[1]]
                 };
-                mesh.indices.extend([a, b, c].map(|k| first + k as u32));
+                let [a, b, c] = [a, b, c].map(|k| ids[k]);
+                // Two corners at one point (earcut keeps a ring's repeated points): no triangle.
+                if a != b && b != c && a != c {
+                    mesh.indices.extend([a, b, c]);
+                }
             }
         }
         // Index ranges by kind: pieces come grouped by kind, so each kind is one run.
