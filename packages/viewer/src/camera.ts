@@ -25,7 +25,7 @@ export interface CameraInput {
 
 export const FOV_Y = (60 * Math.PI) / 180;
 export const NEAR = 0.5;
-export const FAR = 60_000;
+export const FAR = 200_000;
 export const MIN_ALTITUDE = 1;
 export const LOOK_RADIANS_PER_PX = 0.0025;
 const DEG = Math.PI / 180;
@@ -120,8 +120,8 @@ export function stepCamera(c: Camera, input: CameraInput, dt: number): Camera {
 
 // --- projection -------------------------------------------------------------
 
-/** World → clip, column-major 4×4. */
-export function viewProjection(c: Camera, aspect: number): Float32Array {
+/** World → clip, column-major 4×4. A farther `near` (from high up) keeps depth precise out at the far plane. */
+export function viewProjection(c: Camera, aspect: number, near = NEAR): Float32Array {
   const r = right(c), u = up(c), f = forward(c);
   const [px, py, pz] = c.pos;
   // View: eye x = right, eye y = up, eye -z = forward (GL convention).
@@ -135,8 +135,8 @@ export function viewProjection(c: Camera, aspect: number): Float32Array {
   const proj = [
     t / aspect, 0, 0, 0,
     0, t, 0, 0,
-    0, 0, (FAR + NEAR) / (NEAR - FAR), -1,
-    0, 0, (2 * FAR * NEAR) / (NEAR - FAR), 0,
+    0, 0, (FAR + near) / (near - FAR), -1,
+    0, 0, (2 * FAR * near) / (near - FAR), 0,
   ];
   const out = new Float32Array(16);
   for (let col = 0; col < 4; col++) {

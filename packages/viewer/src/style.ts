@@ -7,11 +7,12 @@ const palette = (hexes: string[]) => new Float32Array(hexes.flatMap(rgb));
 
 export const SKY = palette(["#a9c8e6"]);
 /**
- * vec3 per ground material from the Rust cell generator: asphalt, yellow, white, grass, sidewalk, lot, water, and the
- * airports' runway, taxiway, apron (concrete, the runway lightest).
+ * vec3 per ground material from the Rust cell generator: asphalt, yellow, white, grass, sidewalk, lot, water, the
+ * airports' runway, taxiway, apron (concrete, the runway lightest), and open ground's land cover: forest, rock, snow.
  */
 export const GROUND = palette([
   "#48484c", "#e8be28", "#f0f0ec", "#68964a", "#c4c2ba", "#7eaa5c", "#4078be", "#a4a6aa", "#7d8086", "#8f9196",
+  "#3e623a", "#867c6e", "#eef0f4",
 ]);
 
 /** vec3 per massing material from the Rust cell generator (a coarse tile's buildings): wall, roof. */

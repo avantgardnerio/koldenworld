@@ -20,13 +20,14 @@ pub struct Water {
     pub lonlat: Vec<[f64; 2]>, // the lines' points, then the rings'
 }
 
-/// Every waterway and water area intersecting a lon/lat box.
+/// Every waterway at least `min_width` m wide and every water area intersecting a lon/lat box.
 pub async fn load_water(
     db: &Client,
     west: f64,
     south: f64,
     east: f64,
     north: f64,
+    min_width: f64,
 ) -> Result<Water, Box<dyn std::error::Error + Send + Sync>> {
     let mut water = Water {
         line_start: vec![0],
@@ -36,8 +37,8 @@ pub async fn load_water(
     let lines = db
         .query(
             "SELECT width_m, ST_AsBinary(geom) FROM waterways
-         WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326)) ORDER BY osm_way_id",
-            &[&west, &south, &east, &north],
+         WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326)) AND width_m >= $5 ORDER BY osm_way_id",
+            &[&west, &south, &east, &north, &(min_width as f32)],
         )
         .await?;
     for row in &lines {

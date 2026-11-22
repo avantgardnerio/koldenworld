@@ -120,6 +120,15 @@ pub async fn load_road_ways(
 }
 
 impl RoadWays {
+    /// No ways at all.
+    pub fn empty() -> RoadWays {
+        RoadWays {
+            node_start: vec![0],
+            names: vec![String::new()],
+            ..Default::default()
+        }
+    }
+
     /// The ways with only the points marked in `keep` (one per point; keep each way's ends).
     pub fn keep_points(&self, keep: &[bool]) -> RoadWays {
         let mut out = self.keep(|_| true);

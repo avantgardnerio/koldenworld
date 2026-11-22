@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fromYawPitch, viewProjection, type Camera } from "../src/camera.ts";
+import { FAR, fromYawPitch, viewProjection, type Camera } from "../src/camera.ts";
 import { frustumPlanes, sphereVisible } from "../src/frustum.ts";
 
 const DEG = Math.PI / 180;
@@ -21,7 +21,7 @@ describe("frustum culling", () => {
 
   it("keeps a sphere around the camera, and drops one past the far plane", () => {
     expect(sphereVisible(planes, 0, -500, 10, 600)).toBe(true);
-    expect(sphereVisible(planes, 0, 70_000, 10, 100)).toBe(false);
+    expect(sphereVisible(planes, 0, FAR + 10_000, 10, 100)).toBe(false);
   });
 
   it("follows the camera's yaw", () => {

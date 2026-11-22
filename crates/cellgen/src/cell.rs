@@ -20,10 +20,18 @@ use std::path::Path;
 use std::time::Instant;
 
 /// The kinds of ground, in material order.
-pub const KINDS: [&str; 10] = [
-    "asphalt", "yellow", "white", "grass", "sidewalk", "lot", "water", "runway", "taxiway", "apron",
+pub const KINDS: [&str; 13] = [
+    "asphalt", "yellow", "white", "grass", "sidewalk", "lot", "water", "runway", "taxiway",
+    "apron", "forest", "rock", "snow",
 ];
-const COLORS: [[u8; 3]; 10] = [
+/// Where open ground (lot) becomes forest, rock or snow (landcover.rs): kinds of their own, in KINDS order.
+const COVERS: mesh::Covers = mesh::Covers {
+    lot: 5,
+    forest: 10,
+    rock: 11,
+    snow: 12,
+};
+const COLORS: [[u8; 3]; 13] = [
     [72, 72, 76],
     [232, 190, 40],
     [240, 240, 236],
@@ -34,6 +42,9 @@ const COLORS: [[u8; 3]; 10] = [
     [164, 166, 170],
     [125, 128, 134],
     [143, 145, 150],
+    [62, 98, 58],
+    [134, 124, 110],
+    [238, 240, 244],
 ];
 /// How closely round water ends and bends follow their arcs, m, at full detail.
 const ARC_TOLERANCE: f64 = 0.05;
@@ -58,19 +69,29 @@ pub struct Options {
     pub terrain: usize,
     pub markings: bool,
     pub sidewalks: bool,
+    /// Roads and airports at all (the far tier has neither: too thin to see).
+    pub roads: bool,
+    pub airports: bool,
+    /// Waterways narrower than this, m, left out (water areas always in).
+    pub min_waterway: f64,
 }
 
 /// The coarse tier: tiles at this level (about 9 km across), drawn where fine cells aren't loaded.
 pub const COARSE_LEVEL: u32 = 10;
+/// The far tier: tiles at this level (about 70 km across), drawn where coarse tiles aren't: terrain, land cover, lakes
+/// and big rivers.
+pub const FAR_LEVEL: u32 = 7;
 
 impl Options {
-    /// What a cell at `level` draws: everything at the cells' level (13), and at the coarse tier (and above) the
-    /// residential streets and up (not service roads), simplified to 2 m, on a 32-square lattice, without markings or sidewalks.
+    /// What a cell at `level` draws: everything at the cells' level (13); at the coarse tier the residential streets
+    /// and up (not service roads), simplified to 2 m, on a 32-square lattice, without markings or sidewalks; at the far
+    /// tier (and above) no roads or airports, water simplified to 20 m (waterways 15 m wide and up), on a 128-square
+    /// lattice.
     pub fn for_level(level: u32) -> Options {
         if level > COARSE_LEVEL {
             return Options::default();
         }
-        Options {
+        let coarse = Options {
             min_class: ROAD_CLASSES
                 .iter()
                 .position(|c| *c == "residential")
@@ -79,6 +100,18 @@ impl Options {
             terrain: 32,
             markings: false,
             sidewalks: false,
+            ..Options::default()
+        };
+        if level > FAR_LEVEL {
+            return coarse;
+        }
+        Options {
+            simplify: 20.0,
+            terrain: 128,
+            roads: false,
+            airports: false,
+            min_waterway: 15.0,
+            ..coarse
         }
     }
 }
@@ -91,6 +124,9 @@ impl Default for Options {
             terrain: TERRAIN_N,
             markings: true,
             sidewalks: true,
+            roads: true,
+            airports: true,
+            min_waterway: 0.0,
         }
     }
 }
@@ -173,24 +209,35 @@ impl Inputs {
     /// From Postgres (road_ways, waterways, water_areas; buildings, for a coarse tile) and the elevation data under
     /// `data` (data/dem), all at once: each query on its own connection from `pool`, the elevation files on a
     /// blocking thread.
-    pub async fn load(pool: &Pool, data: &Path, c: &Cell) -> Result<Inputs, LoadError> {
+    pub async fn load(
+        pool: &Pool,
+        data: &Path,
+        c: &Cell,
+        options: &Options,
+    ) -> Result<Inputs, LoadError> {
         let [west, south, east, north] = c.load_box();
         let dem = data.join("dem");
         let (ways, water, aeroways, buildings, heights) = tokio::try_join!(
             async {
+                if !options.roads {
+                    return Ok(RoadWays::empty());
+                }
                 let db = pool.get().await?;
                 ways::load_road_ways(&db, west, south, east, north).await
             },
             async {
                 let db = pool.get().await?;
-                water::load_water(&db, west, south, east, north).await
+                water::load_water(&db, west, south, east, north, options.min_waterway).await
             },
             async {
+                if !options.airports {
+                    return Ok(aeroways::Aeroways::empty());
+                }
                 let db = pool.get().await?;
                 aeroways::load(&db, [west, south, east, north]).await
             },
             async {
-                if c.level > COARSE_LEVEL {
+                if c.level != COARSE_LEVEL {
                     return Ok(None);
                 }
                 let db = pool.get().await?;
@@ -225,7 +272,7 @@ impl Inputs {
             water: water::Water::empty(),
             aeroways: aeroways::Aeroways::empty(),
             heights: Heights::Flat(height),
-            buildings: (c.level <= COARSE_LEVEL).then(buildings::Buildings::default),
+            buildings: (c.level == COARSE_LEVEL).then(buildings::Buildings::default),
         }
     }
 }
@@ -274,6 +321,9 @@ pub fn build(
     } = inputs;
     if let Some(min) = options.min_class {
         ways = ways.keep(|w| ways.class[w] <= min);
+    }
+    if !options.roads {
+        ways = ways.keep(|_| false);
     }
     if !options.sidewalks {
         ways.sidewalks.fill(0);
@@ -497,7 +547,7 @@ pub fn build(
     let lost = (0..kinds.len())
         .map(|k| (clip::area(kinds[k]) - terrain.area(&draped, k as u8, &metric)).abs())
         .fold(0.0, f64::max);
-    let mesh = mesh::build(&draped, &terrain, face, cell);
+    let mesh = mesh::build(&draped, &terrain, face, cell, &COVERS);
     let (flat, cell_m2) = mesh_check(&mesh, &terrain, face, cell);
     log.push(format!(
         "terrain and mesh in {:.0?}: {} heights ({} without data), {} pieces (area lost at most {lost:.3} m² a kind), \

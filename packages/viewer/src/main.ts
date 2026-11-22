@@ -5,14 +5,16 @@
 //   graph overlay (toggle with G); radius: fixed load radius instead of the
 //   horizon; planes=0: no live air traffic. The URL describes the whole view.
 //
-// Two tiers of ground from the Rust generator (/ground/<token>/…): coarse
-// tiles (S2 level 10, ~9 km: major roads, water, coarse terrain) out to the
-// horizon (up to MAX_RADIUS), with their buildings as massing (blocks and
+// Three tiers of ground from the Rust generator (/ground/<token>/…): far tiles
+// (S2 level 7, ~70 km: terrain, land cover, lakes) out to the horizon (up to
+// MAX_RADIUS), coarse tiles (level 10, ~9 km: streets, water, airports, coarse
+// terrain) out to COARSE_DISTANCE, with their buildings as massing (blocks and
 // towers), and fine cells (level 13, ~1.1 km: everything)
 // within FINE_DISTANCE of the camera, with their roads, buildings and terrain
 // from the cell server (/cells/<token>…; a cell with none, 404, is bare
-// ground). Only what's in view loads: coarse tiles first, then fine cells,
-// each nearest first. Fine cells cover the coarse ground under them (stencil),
+// ground). Only what's in view loads: far tiles first, then coarse tiles, then
+// fine cells, each nearest first. Each tier covers the coarser ground under it
+// (stencil),
 // and hide the massing in them (each massing shape knows its fine cell), so a
 // coarse tile shows wherever its fine cells haven't loaded.
 //
@@ -28,7 +30,7 @@ import {
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
-import { fromYawPitch, MIN_ALTITUDE, speed, viewProjection } from "./camera.ts";
+import { fromYawPitch, MIN_ALTITUDE, NEAR, speed, viewProjection } from "./camera.ts";
 import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
 import { createContrailLayer } from "./contrail-layer.ts";
 import { createCarModels, createCarRenderer, type CarModels, type CarRenderer } from "./car-layer.ts";
@@ -69,14 +71,20 @@ declare global {
   interface Window { viewer: ViewerStatus }
 }
 
-/** Beyond this, the horizon needs a coarser tier, which doesn't exist yet. */
-const MAX_RADIUS = 25_000;
-/** The coarse tier's S2 level (as cellgen's COARSE_LEVEL): ground only, drawn where fine cells aren't. */
+/** Nothing loads beyond this, m: the far tier out to well past the Front Range seen from Denver. */
+const MAX_RADIUS = 150_000;
+/** The coarse tier's S2 level (as cellgen's COARSE_LEVEL): ground and massing, drawn where fine cells aren't. */
 const COARSE_LEVEL = 10;
+/** Coarse tiles load within this distance (m) of the camera; the far tier beyond. */
+const COARSE_DISTANCE = 25_000;
+/** The far tier's S2 level (as cellgen's FAR_LEVEL): terrain, land cover and lakes, drawn where coarse tiles aren't. */
+const FAR_LEVEL = 7;
+/** How high, m above the ground under the camera, the horizon is worth loading for: Colorado's mountains. */
+const MOUNTAINS = 3000;
 /** Fine cells load within this straight-line distance (m) of the camera, so none load from high up. */
 const FINE_DISTANCE = 3000;
 /** Room for the terrain's relief around a cell's bounding sphere when deciding if it's in view, m. */
-const RELIEF = 1000;
+const RELIEF = 3000;
 /** Cells stay loaded out to this multiple of the load radius, so the edge doesn't thrash. */
 const KEEP_FACTOR = 1.3;
 /** The load radius moves in steps of this (m), so climbing doesn't recompute the wanted cells every frame. */
@@ -101,9 +109,9 @@ const status: ViewerStatus = (window.viewer = {
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
 
-/** What can be seen from this height above the ground, out to MAX_RADIUS. */
+/** What can be seen from this height above the ground (mountains included), out to MAX_RADIUS. */
 const loadRadius = (h: number) =>
-  fixedRadius ?? Math.min(MAX_RADIUS, Math.ceil(horizonDistance(h) / RADIUS_STEP) * RADIUS_STEP);
+  fixedRadius ?? Math.min(MAX_RADIUS, Math.ceil(horizonDistance(h, MOUNTAINS) / RADIUS_STEP) * RADIUS_STEP);
 
 /** Platform adapter (architecture.md): in the browser, blobs come over HTTP and the HTTP cache. null: no such file. */
 async function getBlob(path: string): Promise<Uint8Array | null> {
@@ -142,7 +150,8 @@ function reach(points: ArrayLike<number>, stride: number): number {
 
 interface CellGpu {
   frame: CellFrame;
-  coarse: boolean;  // a coarse tile: ground and massing
+  coarse: boolean;  // a coarse or far tile: ground (and a coarse tile's massing)
+  far?: boolean;    // a far tile: drawn where coarse tiles aren't
   massing?: SolidLayer;  // a coarse tile's buildings, merged; a shape hides where its fine cell is loaded
   children?: CellId[];   // a coarse tile's 64 fine cells, by the index its massing knows them by
   hidden?: [number, number];  // which of them are loaded this frame (bits), reused
@@ -191,15 +200,19 @@ async function start(): Promise<void> {
     const frame = cellFrame(cell);
     const zero = { nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0 };
     if (cellLevel(cell) !== CELL_LEVEL) {
-      const [v, t] = await Promise.all([getBlob(`/ground/${token}/buildings.arrow`), getBlob(`/ground/${token}/buildings_triangles.arrow`)]);
+      // Coarse tiles have massing; far tiles are ground only.
+      const coarseTile = cellLevel(cell) === COARSE_LEVEL;
+      const [v, t] = coarseTile
+        ? await Promise.all([getBlob(`/ground/${token}/buildings.arrow`), getBlob(`/ground/${token}/buildings_triangles.arrow`)])
+        : [null, null];
       const mesh = await ground, massing = v && t ? groundFromArrow(v, t) : undefined;
       // The ground's reach, up to the tallest roof.
       const sphere = bounds(mesh.positions, reach(mesh.positions, 3), massing?.positions);
       return {
-        frame, coarse: true, missing: false, model: new Float32Array(16), terrain: flatTerrain(),
+        frame, coarse: true, far: !coarseTile, missing: false, model: new Float32Array(16), terrain: flatTerrain(),
         ground: createSolidLayer(gl!, mesh, GROUND), ...sphere,
         massing: massing && createSolidLayer(gl!, massing, MASSING),
-        children: fineChildren(cell), hidden: [0, 0],
+        children: coarseTile ? fineChildren(cell) : undefined, hidden: [0, 0],
         counts: { ...zero, surfaceTriangles: mesh.indices.length / 3, buildingTriangles: massing ? massing.indices.length / 3 : 0 },
       };
     }
@@ -324,16 +337,22 @@ async function start(): Promise<void> {
       const [x, y, z] = ecefToLocal(vf, geodeticToEcef({ lat: o.lat, lon: o.lon, h: ground }));
       return sphereVisible(planes, x, y, z, o.reach + RELIEF);
     };
-    const coarse = cellsWithin(camera.lat, camera.lon, radius * KEEP_FACTOR, COARSE_LEVEL);
+    const coarseRadius = Math.min(radius, COARSE_DISTANCE);
+    const far = cellsWithin(camera.lat, camera.lon, radius * KEEP_FACTOR, FAR_LEVEL);
+    const coarse = cellsWithin(camera.lat, camera.lon, coarseRadius * KEEP_FACTOR, COARSE_LEVEL);
     // Fine cells by straight-line distance: from high up, none.
     const near = above < fine * KEEP_FACTOR
       ? cellsWithin(camera.lat, camera.lon, Math.sqrt((fine * KEEP_FACTOR) ** 2 - above ** 2), CELL_LEVEL)
           .map((c) => ({ cell: c.cell, distance: Math.hypot(c.distance, above) }))
       : [];
-    const wanted = [...coarse.filter((c) => c.distance <= radius), ...near.filter((c) => c.distance <= fine)]
+    const wanted = [
+      ...far.filter((c) => c.distance <= radius),
+      ...coarse.filter((c) => c.distance <= coarseRadius),
+      ...near.filter((c) => c.distance <= fine),
+    ]
       .map((c) => c.cell)
       .filter(inView);
-    streamer.update(wanted, new Set([...coarse, ...near].map((c) => c.cell)));
+    streamer.update(wanted, new Set([...far, ...coarse, ...near].map((c) => c.cell)));
     updateStatus();
   };
 
@@ -379,7 +398,9 @@ async function start(): Promise<void> {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
     const local = localCamera(camera);
     const f = {
-      view: viewProjection(local, aspect()),
+      // The near plane moves out with height above the ground (0.5 m on the street, 15 m from 1.5 km up), so the depth
+      // buffer still separates ridges 100 km away.
+      view: viewProjection(local, aspect(), Math.max(NEAR, Math.min(50, (camera.h - roughGroundAt(camera.lat, camera.lon)) / 100))),
       eye: local.pos,
       sky: SKY,
       fog: fogRange(status.radius),
@@ -399,15 +420,16 @@ async function start(): Promise<void> {
     });
     status.cells.drawn = visible.length;
     // The ground first (airports are part of it), then buildings; everything depth-tested.
-    // Fine ground marks the stencil; coarse ground draws only where it isn't marked, so a coarse tile shows only
-    // where its fine cells haven't loaded.
+    // Finest first: fine ground marks the stencil; coarse ground draws only where it isn't marked, and marks too; far
+    // ground draws only where neither did. Each tier shows only where the finer ones haven't loaded.
     gl.enable(gl.STENCIL_TEST);
     gl.stencilFunc(gl.ALWAYS, 1, 0xff);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
     for (const g of visible) if (!g.coarse) g.ground.draw(f, g.model, SUN);
     gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
+    for (const g of visible) if (g.coarse && !g.far) g.ground.draw(f, g.model, SUN);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-    for (const g of visible) if (g.coarse) g.ground.draw(f, g.model, SUN);
+    for (const g of visible) if (g.far) g.ground.draw(f, g.model, SUN);
     gl.disable(gl.STENCIL_TEST);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     // Coarse tiles' massing, less the shapes in fine cells that have their own buildings.

@@ -77,8 +77,9 @@ const cellgen = path.join(repo, "crates/cellgen");
 async function writeGround(dataDir: string, height = 0) {
   const waysFile = path.join(dataDir, "ways.json");
   await writeFile(waysFile, JSON.stringify(ways));
-  // Fine cells around the fixture, and coarse tiles (level 10) out past the load radius.
-  const cells = [...cellsWithin(O.lat, O.lon, 2000), ...cellsWithin(O.lat, O.lon, 3000, 10)].map((c) => cellToken(c.cell));
+  // Fine cells around the fixture, and coarse (level 10) and far (level 7) tiles out past the load radius.
+  const cells = [...cellsWithin(O.lat, O.lon, 2000), ...cellsWithin(O.lat, O.lon, 3000, 10), ...cellsWithin(O.lat, O.lon, 3000, 7)]
+    .map((c) => cellToken(c.cell));
   execFileSync(path.join(cellgen, "target/release/cellgen"),
     ["cell", ...cells, "--ways", waysFile, "--height", String(height), "--out", path.join(dataDir, "ground")], { stdio: "ignore" });
 }

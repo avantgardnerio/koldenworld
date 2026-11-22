@@ -67,10 +67,10 @@ async fn table(
         )
             .into_response();
     };
-    if table.starts_with("buildings") && c.level > cell::COARSE_LEVEL {
+    if table.starts_with("buildings") && c.level != cell::COARSE_LEVEL {
         return (
             StatusCode::NOT_FOUND,
-            "fine cells' buildings come from the TS cell server\n",
+            "only coarse tiles have massing (fine cells' buildings come from the TS cell server)\n",
         )
             .into_response();
     }
@@ -109,11 +109,11 @@ async fn table(
 /// Builds a cell and writes its tables (each to a temporary name, then renamed, so a reader never sees half a file).
 async fn build(app: Arc<App>, c: Cell) -> Result<(), cell::LoadError> {
     let started = std::time::Instant::now();
-    let inputs = cell::Inputs::load(&app.pool, &app.data, &c).await?;
+    let options = cell::Options::for_level(c.level);
+    let inputs = cell::Inputs::load(&app.pool, &app.data, &c, &options).await?;
     let loaded = started.elapsed();
     tokio::task::spawn_blocking(move || -> Result<(), cell::LoadError> {
-        let built = cell::build(inputs, &c, &cell::Options::for_level(c.level), None)
-            .map_err(|e| e.to_string())?;
+        let built = cell::build(inputs, &c, &options, None).map_err(|e| e.to_string())?;
         let dir = app.cache.join(&c.token);
         std::fs::create_dir_all(&dir)?;
         let mut tables = vec![

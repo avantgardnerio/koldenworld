@@ -10,6 +10,7 @@ mod geodesy;
 mod geom;
 mod graph;
 mod ground_arrow;
+mod landcover;
 mod markings;
 mod mesh;
 mod polygon;
@@ -98,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let inputs = match (&fixture, &pool, data.as_deref()) {
                     (Some(ways), _, _) => cell::Inputs::fixture(ways, height, c),
                     (None, Some(pool), Some(data)) => runtime
-                        .block_on(cell::Inputs::load(pool, data, c))
+                        .block_on(cell::Inputs::load(pool, data, c, &options(c)))
                         .map_err(|e| e.to_string())?,
                     _ => unreachable!(),
                 };

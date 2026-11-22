@@ -2,9 +2,11 @@
 //! on the ellipsoid, as the TS cellFrame), normals (i8 × 127, and a zero to make four bytes, as the GPU takes them), a
 //! material per vertex (the kind), and indices, one range per kind. Each piece is triangulated with earcut, holes and
 //! all; every vertex of a piece lies in one flat terrain triangle, so its normal is that triangle's. Vertices alike in
-//! all three (position, normal, material) are one vertex.
+//! all three (position, normal, material) are one vertex. Open ground (lots) takes its material from its triangle's land
+//! cover (grass, forest, rock, snow), so a lot's pieces can be any of four materials.
 
 use crate::geodesy::{self, Frame};
+use crate::landcover::{self, Cover};
 use crate::s2;
 use crate::terrain::{Draped, Terrain};
 use glam::{DVec2, DVec3};
@@ -21,8 +23,16 @@ pub struct Mesh {
     pub failed: usize,  // pieces earcut couldn't triangulate
 }
 
+/// The materials open ground becomes: the lot kind (grass) and the kinds for forest, rock and snow.
+pub struct Covers {
+    pub lot: u8,
+    pub forest: u8,
+    pub rock: u8,
+    pub snow: u8,
+}
+
 /// The draped ground triangulated, in the ENU frame at the cell's center. `face` and `cell` place (s, t).
-pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
+pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4], covers: &Covers) -> Mesh {
     let (clat, clon) =
         s2::st_to_lat_lon(face, [(cell[0] + cell[2]) / 2.0, (cell[1] + cell[3]) / 2.0]);
     let frame = Frame::at(clat, clon, 0.0);
@@ -42,21 +52,43 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
             local(st, terrain.heights[k])
         })
         .collect();
-    let normal = |tri: u32| {
+    // A triangle's corners (lattice indices): below the diagonal (a, b, d), above it (a, d, c).
+    let corners = |tri: u32| {
         let (square, upper) = ((tri / 2) as usize, tri % 2 == 1);
         let (i, j) = (square % n, square / n);
-        let at = |a: usize, b: usize| lattice[b * side + a];
-        let (pa, pb, pc, pd) = (at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1));
-        let nm = if upper {
-            (pd - pa).cross(pc - pa)
-        } else {
-            (pb - pa).cross(pd - pa)
-        };
-        let nm = nm.normalize() * 127.0;
+        let at = |a: usize, b: usize| b * side + a;
+        let (a, b, c, dd) = (at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1));
+        if upper { [a, dd, c] } else { [a, b, dd] }
+    };
+    let unit_normal = |tri: u32| {
+        let [a, b, c] = corners(tri).map(|k| lattice[k]);
+        (b - a).cross(c - a).normalize()
+    };
+    let normal = |tri: u32| {
+        let nm = unit_normal(tri) * 127.0;
         [nm.x, nm.y, nm.z].map(|c| c.round() as i8)
+    };
+    // What a piece of `kind` in triangle `tri` is drawn as: open ground by its triangle's cover.
+    let material = |kind: u8, tri: u32| {
+        if kind != covers.lot {
+            return kind;
+        }
+        let h = corners(tri)
+            .iter()
+            .map(|&k| terrain.heights[k])
+            .sum::<f64>()
+            / 3.0;
+        match landcover::cover(h, unit_normal(tri).z) {
+            Cover::Grass => covers.lot,
+            Cover::Forest => covers.forest,
+            Cover::Rock => covers.rock,
+            Cover::Snow => covers.snow,
+        }
     };
 
     let mut mesh = Mesh::default();
+    // Triangles by material, so each material is one range.
+    let mut buckets: Vec<Vec<u32>> = Vec::new();
     let mut welded: HashMap<([u32; 3], [i8; 3], u8), u32> = HashMap::new();
     let ring = |p: usize| d.start[p] as usize..d.start[p + 1] as usize;
     let mut p = 0;
@@ -68,6 +100,10 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
             .collect();
         p += group.len();
         let nm = normal(tri);
+        let mat = material(kind, tri);
+        if buckets.len() <= mat as usize {
+            buckets.resize(mat as usize + 1, Vec::new());
+        }
         for &o in group.iter().filter(|&&q| d.outer[q] as usize == q) {
             let mine: Vec<usize> = group
                 .iter()
@@ -98,11 +134,11 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
                 .map(|&v| {
                     let at = local(d.st[v], d.h[v]).as_vec3().to_array();
                     *welded
-                        .entry((at.map(f32::to_bits), nm, kind))
+                        .entry((at.map(f32::to_bits), nm, mat))
                         .or_insert_with(|| {
                             mesh.positions.push(at);
                             mesh.normals.push([nm[0], nm[1], nm[2], 0]);
-                            mesh.material.push(kind);
+                            mesh.material.push(mat);
                             (mesh.positions.len() - 1) as u32
                         })
                 })
@@ -120,18 +156,16 @@ pub fn build(d: &Draped, terrain: &Terrain, face: u32, cell: [f64; 4]) -> Mesh {
                 let [a, b, c] = [a, b, c].map(|k| ids[k]);
                 // Two corners at one point (earcut keeps a ring's repeated points): no triangle.
                 if a != b && b != c && a != c {
-                    mesh.indices.extend([a, b, c]);
+                    buckets[mat as usize].extend([a, b, c]);
                 }
             }
         }
-        // Index ranges by kind: pieces come grouped by kind, so each kind is one run.
-        match mesh.ranges.last_mut() {
-            Some(r) if r[0] == kind as u32 => r[2] = mesh.indices.len() as u32 - r[1],
-            _ => {
-                let start = mesh.ranges.last().map_or(0, |r| r[1] + r[2]);
-                mesh.ranges
-                    .push([kind as u32, start, mesh.indices.len() as u32 - start]);
-            }
+    }
+    for (mat, indices) in buckets.into_iter().enumerate() {
+        if !indices.is_empty() {
+            mesh.ranges
+                .push([mat as u32, mesh.indices.len() as u32, indices.len() as u32]);
+            mesh.indices.extend(indices);
         }
     }
     mesh
