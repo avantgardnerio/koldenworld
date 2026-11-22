@@ -206,9 +206,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .chain(&pavement.junctions)
         .collect();
     let fills = [
-        (lot_polygons, [214, 205, 178]),          // lots: dry earth
-        (pavement_polygons, [72, 72, 76]),        // asphalt
-        (all(&grass.pieces), [104, 150, 72]),     // grass
+        (lot_polygons, [126, 170, 92]), // lots: lawn, a shade lighter than the grass strip
+        (pavement_polygons, [72, 72, 76]), // asphalt
+        (all(&grass.pieces), [104, 150, 72]), // grass
         (all(&sidewalk.pieces), [196, 194, 186]), // concrete
     ];
     draw::draw_png(&fills, &frame, path)?;
