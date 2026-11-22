@@ -11,6 +11,9 @@
 //    where a band folds over itself, the fold counts), minus inside the loops
 //    it was pushed from (only where they wind positively: an inside-out fold
 //    isn't cut away). It only does real work where a band folds.
+//
+// All in 2D: bridges and tunnels are polygons like any other here (each
+// street keeps its layer for when heights come in).
 
 import type { Graph, Point } from "./graph.ts";
 import { slabs, type SlabResult } from "./slabs.ts";
@@ -40,7 +43,7 @@ export function push(loops: Point[][], d: number): Point[][] {
 /** The pavement, then a band per width, each pushed out from the last. */
 export function layers(g: Graph, widths: number[]): Layers {
   const { streets, junctions } = splitStreets(g);
-  const pavement = slabs([...streets, ...junctions].map((p) => [p]), (w) => w.some((v) => v !== 0));
+  const pavement = slabs([...streets, ...junctions.map((j) => j.ring)].map((p) => [p]), (w) => w.some((v) => v !== 0));
   const bands: Layers["bands"] = [];
   let inner = pavement.loops;
   for (const width of widths) {

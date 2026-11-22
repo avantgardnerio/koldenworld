@@ -10,7 +10,8 @@ export interface WayInput {
   coords: [lon: number, lat: number][];
   cls: string;
   lanes: number;
-  structure?: string;
+  structure?: string;     // "bridge", "tunnel", or on the ground
+  layer?: number | null;  // OSM's layer=*, when tagged
   name?: string | null;
 }
 
@@ -20,6 +21,7 @@ export interface Street {
   pts: Point[];  // a to b, both ends included
   hw: number;    // half width, m
   way: string;
+  layer: number; // 0 on the ground; above it for bridges, below for tunnels
 }
 
 export interface Graph {
@@ -38,6 +40,13 @@ const PROFILE: Record<string, [number, number]> = {
 export function halfWidth(cls: string, lanes: number): number {
   const [lane, shoulder] = PROFILE[cls] ?? [3.0, 0.5];
   return (lanes * lane) / 2 + shoulder;
+}
+
+/** A way's level: OSM's layer when tagged on a bridge or tunnel, else 1 for a bridge, −1 for a tunnel, 0 on the ground. */
+export function layerOf(w: WayInput): number {
+  if (w.structure === "bridge") return w.layer && w.layer > 0 ? w.layer : 1;
+  if (w.structure === "tunnel") return w.layer && w.layer < 0 ? w.layer : -1;
+  return 0;
 }
 
 /** Ways cut at every node another way shares, in meters around (lat0, lon0), y north. */
@@ -63,7 +72,7 @@ export function buildGraph(ways: WayInput[], lat0: number, lon0: number): Graph 
       if (pts.length >= 2) {
         streets.push({
           a: node(w.nodes[start]!, w.coords[start]!), b: node(w.nodes[i]!, w.coords[i]!), pts,
-          hw: halfWidth(w.cls, w.lanes), way: w.id,
+          hw: halfWidth(w.cls, w.lanes), way: w.id, layer: layerOf(w),
         });
       }
       start = i;

@@ -41,6 +41,13 @@ export interface SlabResult {
   tied: [Point, Point, Point, Point][];  // distinct pairs of pieces that tied: each piece's two ends
 }
 
+/** A grid cell about four times the typical line's length, for the crossing search. */
+function gridSize(lines: { i: number; j: number }[], P: Point[]): number {
+  if (lines.length === 0) return 1;
+  const lengths = lines.map((l) => Math.hypot(P[l.j]!.x - P[l.i]!.x, P[l.j]!.y - P[l.i]!.y)).sort((a, b) => a - b);
+  return Math.max(1, 4 * lengths[Math.floor(lengths.length / 2)]!);
+}
+
 const orient = (a: Point, b: Point, c: Point) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 const between = (a: Point, b: Point, p: Point) =>
   Math.min(a.x, b.x) <= p.x && p.x <= Math.max(a.x, b.x) && Math.min(a.y, b.y) <= p.y && p.y <= Math.max(a.y, b.y);
@@ -83,9 +90,37 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
   });
   const unique = [...lines.values()];
 
-  // 1. Crossings and touches, by exact orientation signs.
-  for (let m = 0; m < unique.length; m++) {
-    for (let n = m + 1; n < unique.length; n++) {
+  // 1. Crossings and touches, by exact orientation signs, between lines whose boxes share a grid cell
+  // (each pair once: in the first cell, in grid order, that both boxes cover).
+  const cell = gridSize(unique, P), grid = new Map<string, number[]>();
+  const cells = (l: Line) => {
+    const a = P[l.i]!, b = P[l.j]!, out: [number, number][] = [];
+    for (let gx = Math.floor(Math.min(a.x, b.x) / cell); gx <= Math.floor(Math.max(a.x, b.x) / cell); gx++) {
+      for (let gy = Math.floor(Math.min(a.y, b.y) / cell); gy <= Math.floor(Math.max(a.y, b.y) / cell); gy++) out.push([gx, gy]);
+    }
+    return out;
+  };
+  unique.forEach((l, m) => {
+    for (const [gx, gy] of cells(l)) {
+      const k = `${gx},${gy}`;
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k)!.push(m);
+    }
+  });
+  const pairs: [number, number][] = [];
+  for (const [k, members] of grid) {
+    const [gx, gy] = k.split(",").map(Number) as [number, number];
+    for (let x = 0; x < members.length; x++) {
+      for (let y = x + 1; y < members.length; y++) {
+        const m = members[x]!, n = members[y]!;
+        // Only in the first cell both cover, so each pair is tested once.
+        const first = cells(unique[m]!).find(([ax, ay]) => cells(unique[n]!).some(([bx, by]) => ax === bx && ay === by))!;
+        if (first[0] === gx && first[1] === gy) pairs.push([m, n]);
+      }
+    }
+  }
+  for (const [m, n] of pairs) {
+    {
       const e = unique[m]!, f = unique[n]!;
       const a = P[e.i]!, b = P[e.j]!, c = P[f.i]!, d = P[f.j]!;
       if (Math.max(a.x, b.x) < Math.min(c.x, d.x) || Math.max(c.x, d.x) < Math.min(a.x, b.x)) continue;
@@ -131,8 +166,12 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
   }
   const list = [...pieces.values()].filter((p) => [...p.turns.values()].some((d) => d !== 0));
 
-  // 2–4. Slabs. A piece's x at a slab line is its own endpoint's when it ends there.
+  // 2–4. Slabs, swept bottom to top with the pieces spanning each. A piece's x at a slab line is its
+  // own endpoint's when it ends there.
   const ys = [...new Set(list.flatMap((p) => [P[p.lo]!.y, P[p.hi]!.y]))].sort((p, q) => p - q);
+  const slabOf = new Map(ys.map((y, k) => [y, k]));
+  const rising = list.filter((p) => P[p.lo]!.y !== P[p.hi]!.y).sort((p, q) => P[p.lo]!.y - P[q.lo]!.y);
+  let next = 0, active: Piece[] = [];
   const xAt = (p: Piece, y: number) => {
     const a = P[p.lo]!, b = P[p.hi]!;
     if (y === a.y) return a.x;
@@ -145,8 +184,9 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
   const picked: { x0: number; x1: number; top0: number; top1: number }[][] = [];
   for (let k = 0; k + 1 < ys.length; k++) {
     const y0 = ys[k]!, y1 = ys[k + 1]!, ym = (y0 + y1) / 2;
-    const span = list.filter((p) => P[p.lo]!.y <= y0 && P[p.hi]!.y >= y1 && P[p.lo]!.y !== P[p.hi]!.y)
-      .map((p) => ({ p, x0: xAt(p, y0), x1: xAt(p, y1), xm: xAt(p, ym) }))
+    while (next < rising.length && P[rising[next]!.lo]!.y <= y0) active.push(rising[next++]!);
+    active = active.filter((p) => P[p.hi]!.y >= y1);
+    const span = active.map((p) => ({ p, x0: xAt(p, y0), x1: xAt(p, y1), xm: xAt(p, ym) }))
       .sort((s, t) => s.xm - t.xm);
     for (let i = 0; i + 1 < span.length; i++) {
       if (span[i]!.xm !== span[i + 1]!.xm) continue;
@@ -183,7 +223,7 @@ export function slabs(polys: Point[][][], inside: (w: Int32Array) => boolean): S
   for (const p of list) {
     const a = P[p.lo]!, b = P[p.hi]!;
     if (a.y !== b.y) continue;
-    const k = ys.indexOf(a.y), xm = (a.x + b.x) / 2;
+    const k = slabOf.get(a.y)!, xm = (a.x + b.x) / 2;
     const above = covered(k, xm, false), below = k > 0 && covered(k - 1, xm, true);
     if (above && !below) outline.push([p.lo, p.hi]);       // result above: east keeps it on the left
     else if (below && !above) outline.push([p.hi, p.lo]);  // result below: west

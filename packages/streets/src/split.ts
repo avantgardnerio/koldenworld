@@ -12,7 +12,9 @@ const MITER = 4;  // a copy in a very sharp gap stops at this many half widths o
 
 export interface StreetPolygons {
   streets: Point[][];    // per street: its left side a to b, then its right side back
-  junctions: Point[][];  // per node of 3 or more streets: its copies in order around it
+  junctions: { node: number; ring: Point[] }[];  // per node of 3 or more streets: its copies in order around it
+  /** Each street end's two copies (counterclockwise and clockwise of it) and its direction, by `${street}a` / `${street}b`. */
+  ends: Map<string, { ccw: Point; cw: Point; dir: number; node: number }>;
 }
 
 export function splitStreets(g: Graph): StreetPolygons {
@@ -24,13 +26,13 @@ export function splitStreets(g: Graph): StreetPolygons {
       ends.get(n)!.push({ dir: Math.atan2(q.y - p.y, q.x - p.x), street: si, end });
     }
   });
-  const beside = new Map<string, { ccw: Point; cw: Point }>(), junctions: Point[][] = [];
+  const beside: StreetPolygons["ends"] = new Map(), junctions: StreetPolygons["junctions"] = [];
   const copy = (n: number, angle: number, d: number): Point =>
     ({ x: g.nodes[n]!.x + Math.cos(angle) * d, y: g.nodes[n]!.y + Math.sin(angle) * d });
   for (const [n, list] of ends) {
     if (list.length === 1) {
       const { dir, street, end } = list[0]!, hw = g.streets[street]!.hw;
-      beside.set(`${street}${end}`, { ccw: copy(n, dir + Math.PI / 2, hw), cw: copy(n, dir - Math.PI / 2, hw) });
+      beside.set(`${street}${end}`, { ccw: copy(n, dir + Math.PI / 2, hw), cw: copy(n, dir - Math.PI / 2, hw), dir, node: n });
       continue;
     }
     list.sort((p, q) => p.dir - q.dir);
@@ -40,8 +42,8 @@ export function splitStreets(g: Graph): StreetPolygons {
       return copy(n, e.dir + half, Math.min(hw / Math.sin(half), MITER * hw));
     });
     // An end's copy counterclockwise of it is the gap after it; clockwise, the gap before.
-    list.forEach((e, i) => beside.set(`${e.street}${e.end}`, { ccw: gap[i]!, cw: gap[(i - 1 + list.length) % list.length]! }));
-    if (list.length >= 3) junctions.push(gap);
+    list.forEach((e, i) => beside.set(`${e.street}${e.end}`, { ccw: gap[i]!, cw: gap[(i - 1 + list.length) % list.length]!, dir: e.dir, node: n }));
+    if (list.length >= 3) junctions.push({ node: n, ring: gap });
   }
   // Looking along a street from a to b, its left is counterclockwise of its direction at a, and
   // clockwise of the reverse direction at b. Each side runs from its corner at a to its corner at b,
@@ -52,7 +54,7 @@ export function splitStreets(g: Graph): StreetPolygons {
     const left = offsets(s.pts, s.hw, A.ccw, B.cw), right = offsets(s.pts, -s.hw, A.cw, B.ccw);
     return [A.ccw, ...left, B.cw, B.ccw, ...right.reverse(), A.cw];
   });
-  return { streets, junctions };
+  return { streets, junctions, ends: beside };
 }
 
 /**
