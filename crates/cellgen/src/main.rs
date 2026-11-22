@@ -3,6 +3,7 @@ mod faces;
 mod graph;
 mod polygon;
 mod s2;
+mod shrink;
 mod ways;
 
 use postgres::{Client, NoTls};
@@ -82,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The polygons of the raw graph: its faces. Blocks are counterclockwise (positive area), each connected
     // piece's outside clockwise; a piece with no loop at all has one face of zero area.
     let faces = faces::trace_faces(&graph);
-    let mut polygons: Vec<polygon::Polygon> = (0..faces.count())
+    let polygons: Vec<polygon::Polygon> = (0..faces.count())
         .map(|f| faces.polygon(f, &graph, &ways))
         .collect();
     let metric = s2::cell_metric(face, cell);
@@ -120,40 +121,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         2 * pieces
     );
 
-    // Riding the rubber band on the largest block: once around, then a vertex inserted and removed again.
-    let largest = (0..polygons.len())
-        .max_by(|&a, &b| {
-            polygons[a]
-                .signed_area()
-                .total_cmp(&polygons[b].signed_area())
-        })
-        .ok_or("no polygons")?;
-    let p = &mut polygons[largest];
-    let before = (p.len(), p.signed_area());
-    let mut v = p.first().ok_or("empty polygon")?;
-    let (mut steps, mut sourced) = (0, 0);
-    loop {
-        sourced += (v.source() != polygon::MADE) as usize;
-        steps += 1;
-        v.next();
-        if v.index() == 0 {
-            break;
-        }
-    }
-    let (a, b) = (v.pos(), v.next_pos());
-    let made = v.insert_after([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], polygon::MADE);
-    let grown = p.len();
-    p.cursor(made).remove();
+    // Every block shrunk by half a road (4 m, until widths come from lanes), its self-crossings cut away.
+    let mut stats = shrink::ShrinkStats::default();
+    let shrunk: Vec<polygon::Polygon> = polygons
+        .iter()
+        .filter(|p| p.signed_area() > 0.0)
+        .filter_map(|p| p.shrink(4.0, metric, &mut stats))
+        .collect();
+    let area = |ps: &mut dyn Iterator<Item = &polygon::Polygon>| -> f64 {
+        ps.map(|p| p.signed_area().max(0.0)).sum::<f64>() * m2_per_st2 / 1e6
+    };
     println!(
-        "largest block: {} vertices, {steps} steps once around ({sourced} from OSM); {grown} with a midpoint \
-         inserted, {} after removing it; area unchanged: {}",
-        before.0,
-        p.len(),
-        p.signed_area() == before.1
+        "shrunk by 4 m: {} blocks left of {}; {stats:?}; block area {:.3} km² → {:.3} km²",
+        shrunk.len(),
+        blocks.len(),
+        area(&mut polygons.iter()),
+        area(&mut shrunk.iter())
     );
 
     let path = "target/five-points.png";
-    draw::draw_png(&ways, &graph, &polygons, view, cell, 4096, path)?;
+    draw::draw_png(&ways, &graph, &shrunk, view, cell, 4096, path)?;
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
         cell[0], cell[2], cell[1], cell[3]

@@ -57,6 +57,7 @@ impl Polygon {
     }
 
     /// A cursor on the ring's first vertex, or None if it's empty.
+    #[allow(dead_code)] // the shrink refactor uses it
     pub fn first(&mut self) -> Option<Cursor<'_>> {
         let at = self.head;
         (at != NONE).then_some(Cursor { poly: self, at })
@@ -65,6 +66,30 @@ impl Polygon {
     /// A cursor on a vertex by index (from Cursor::index; still in the ring).
     pub fn cursor(&mut self, at: u32) -> Cursor<'_> {
         Cursor { poly: self, at }
+    }
+
+    /// The first vertex's index, or None if the ring is empty. With next_of and pos_of, for reading the ring
+    /// anywhere while a cursor isn't held (two places at once, e.g. scanning ahead of a vertex).
+    pub fn first_index(&self) -> Option<u32> {
+        (self.head != NONE).then_some(self.head)
+    }
+
+    pub fn next_of(&self, v: u32) -> u32 {
+        self.next[v as usize]
+    }
+
+    pub fn pos_of(&self, v: u32) -> [f64; 2] {
+        self.st[v as usize]
+    }
+
+    /// Every vertex's position and source, once around from the first.
+    pub fn vertices(&self) -> impl Iterator<Item = ([f64; 2], u32)> + '_ {
+        let mut at = self.head;
+        (0..self.len).map(move |_| {
+            let v = (self.st[at as usize], self.source[at as usize]);
+            at = self.next[at as usize];
+            v
+        })
     }
 
     /// Every vertex's position, once around from the first.
@@ -97,6 +122,7 @@ impl Cursor<'_> {
         self.at
     }
 
+    #[allow(dead_code)] // the shrink refactor uses it
     pub fn pos(&self) -> [f64; 2] {
         self.poly.st[self.at as usize]
     }
@@ -107,11 +133,13 @@ impl Cursor<'_> {
     }
 
     /// The OSM point it came from, or MADE.
+    #[allow(dead_code)] // the shrink refactor uses it
     pub fn source(&self) -> u32 {
         self.poly.source[self.at as usize]
     }
 
     /// The next vertex's position, without moving.
+    #[allow(dead_code)] // the shrink refactor uses it
     pub fn next_pos(&self) -> [f64; 2] {
         self.poly.st[self.poly.next[self.at as usize] as usize]
     }
@@ -123,6 +151,7 @@ impl Cursor<'_> {
     }
 
     /// Move to the next vertex (after the last comes the first).
+    #[allow(dead_code)] // the shrink refactor uses it
     pub fn next(&mut self) {
         self.at = self.poly.next[self.at as usize];
     }
