@@ -51,12 +51,17 @@ pub fn draw_png(
     };
     let identity = tiny_skia::Transform::identity();
 
+    // Each set as one path, filled nonzero: a clockwise ring inside a counterclockwise one is a hole.
     for (polys, [r, g, b]) in fills {
         paint.set_color_rgba8(*r, *g, *b, 255);
+        let mut all = tiny_skia::PathBuilder::new();
         for poly in polys {
             if let Some(p) = path_of(&mut poly.positions().map(|p| p.to_array()), true) {
-                pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, identity, None);
+                all.push_path(&p);
             }
+        }
+        if let Some(p) = all.finish() {
+            pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, identity, None);
         }
     }
 

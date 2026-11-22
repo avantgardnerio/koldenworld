@@ -1,4 +1,5 @@
 mod bands;
+mod clip;
 mod draw;
 mod faces;
 mod geom;
@@ -212,9 +213,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (all(&sidewalk.pieces), [196, 194, 186]), // concrete
     ];
     draw::draw_png(&fills, &frame, path)?;
+    // One block by Clipper2, next to ours: the cul-de-sac block with the worst tangle.
+    let probe = glam::DVec2::from_array(s2::face_st(face, 39.759794, -104.970880));
+    let block = polygons
+        .iter()
+        .filter(|p| p.signed_area() > 0.0)
+        .find(|p| contains(p, probe))
+        .ok_or("no block at the probe")?;
+    let ground = clip::block_ground(block, &metric, 4.0, 1.5, 1.8);
+    let [b, pav, gr, sw, lot] = ground.areas;
+    println!(
+        "clipper block: {b:.1} m² = pavement {pav:.1} + grass {gr:.1} + sidewalk {sw:.1} + lot {lot:.1} \
+         (sum {:.1}, off by {:.4} m²); ids known on {} of {} vertices",
+        pav + gr + sw + lot,
+        b - (pav + gr + sw + lot),
+        ground.known[0],
+        ground.known[1]
+    );
+    let (lo, hi) = block
+        .positions()
+        .fold((glam::DVec2::MAX, glam::DVec2::MIN), |(lo, hi), p| {
+            (lo.min(p), hi.max(p))
+        });
+    let half = (hi - lo).max_element() * 0.6;
+    let mid = (lo + hi) / 2.0;
+    let zoom = draw::View {
+        view: [mid.x - half, mid.y - half, mid.x + half, mid.y + half],
+        cell,
+        size: 1600,
+    };
+    draw::draw_png(&fills, &zoom, "target/block-ours.png")?;
+    let theirs = [
+        (all(&ground.lot), [126, 170, 92]),
+        (all(&ground.pavement), [72, 72, 76]),
+        (all(&ground.grass), [104, 150, 72]),
+        (all(&ground.sidewalk), [196, 194, 186]),
+    ];
+    draw::draw_png(&theirs, &zoom, "target/block-clipper.png")?;
+
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
         cell[0], cell[2], cell[1], cell[3]
     );
     Ok(())
+}
+
+/// Whether a point is inside a polygon (even-odd; for picking a block, not for geometry).
+fn contains(p: &polygon::Polygon, q: glam::DVec2) -> bool {
+    let ring: Vec<glam::DVec2> = p.positions().collect();
+    let mut inside = false;
+    for i in 0..ring.len() {
+        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+        if (a.y > q.y) != (b.y > q.y) && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x {
+            inside = !inside;
+        }
+    }
+    inside
 }
