@@ -1,22 +1,31 @@
 //! Debug pictures: what we built, top-down in (s, t), as a PNG.
 
 use crate::graph::RoadGraph;
+use crate::pavement::Pavement;
 use crate::polygon::Polygon;
 use crate::ways::RoadWays;
 
-/// The graph's faces (as polygons) in (s, t) on the cell's face: each block (counterclockwise face) filled in its own pale color,
-/// outsides (clockwise faces) left white; edges in dark grey; nodes as dots by degree (dead end red, 2 grey, 3–4
-/// blue, 5+ magenta); and the cell's square in red. `view` (s0, t0, s1, t1) fills a `size` px square, s to the right
+/// What a picture shows: `view` (s0, t0, s1, t1) fills a `size` px square; `cell` (s0, t0, s1, t1) is outlined.
+#[derive(Clone, Copy)]
+pub struct View {
+    pub view: [f64; 4],
+    pub cell: [f64; 4],
+    pub size: u32,
+}
+
+/// What we built, in (s, t) on the cell's face: each grass island filled in its own pale color; pavement strips
+/// in grey and junctions darker; nodes as dots by degree (dead end red, 2 grey, 3–4
+/// blue, 5+ magenta); and the cell's square in red, framed by `frame`, s to the right
 /// and t up.
 pub fn draw_png(
     ways: &RoadWays,
     graph: &RoadGraph,
-    polygons: &[Polygon],
-    view: [f64; 4],
-    cell: [f64; 4],
-    size: u32,
+    grass: &[&Polygon],
+    pavement: &Pavement,
+    frame: &View,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let View { view, cell, size } = *frame;
     let mut pixmap = tiny_skia::Pixmap::new(size, size).ok_or("bad image size")?;
     pixmap.fill(tiny_skia::Color::WHITE);
     let to_px = |[s, t]: [f64; 2]| {
@@ -50,7 +59,7 @@ pub fn draw_png(
     };
     let identity = tiny_skia::Transform::identity();
 
-    for (f, poly) in polygons.iter().enumerate() {
+    for (f, poly) in grass.iter().enumerate() {
         if poly.len() < 3 || poly.signed_area() <= 0.0 {
             continue;
         }
@@ -60,13 +69,16 @@ pub fn draw_png(
         }
     }
 
-    paint.set_color_rgba8(70, 70, 70, 255);
-    for e in 0..graph.edge_count() {
-        let points = &ways.st[graph.edge_first[e] as usize..=graph.edge_last[e] as usize];
-        if let Some(p) = path_of(&mut points.iter().copied(), false) {
-            pixmap.stroke_path(&p, &paint, &stroke, identity, None);
+    // Pavement: strips mid grey, junctions darker, so the tiling shows.
+    for (polys, grey) in [(&pavement.strips, 125), (&pavement.junctions, 85)] {
+        paint.set_color_rgba8(grey, grey, grey, 255);
+        for poly in polys {
+            if let Some(p) = path_of(&mut poly.positions().map(|p| p.to_array()), true) {
+                pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, identity, None);
+            }
         }
     }
+
     paint.set_color_rgba8(220, 40, 40, 255);
     let [s0, t0, s1, t1] = cell;
     if let Some(p) = path_of(

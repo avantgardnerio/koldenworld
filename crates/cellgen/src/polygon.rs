@@ -169,7 +169,8 @@ impl Cursor<'_> {
 
     /// Splits the ring where this vertex's side out crosses w's side out, at x, into its two loops. The loop ahead
     /// (x, then this vertex's next … w) comes back as a new polygon; the loop behind (x, then w's next … this vertex)
-    /// stays, with x made after this vertex. The cursor stays here.
+    /// stays, with x made after this vertex. In each loop x takes its two neighbors' source if they share one, else
+    /// it's MADE. The cursor stays here.
     pub fn split_off(&mut self, w: u32, x: DVec2) -> Polygon {
         let p = &*self.poly;
         let wn = p.next[w as usize];
@@ -178,14 +179,16 @@ impl Cursor<'_> {
             .take_while(|&v| v != wn)
             .map(|v| (p.pos[v as usize], p.source[v as usize]))
             .collect();
+        let x_ahead = shared(p.source[w as usize], ahead[0].1);
+        let x_behind = shared(self.source(), p.source[wn as usize]);
         let here = self.at;
-        let made = self.insert_after(x, MADE);
+        let made = self.insert_after(x, x_behind);
         self.at = self.poly.next[made as usize];
         while self.at != wn {
             self.remove();
         }
         self.at = here;
-        Polygon::from_points(std::iter::once((x, MADE)).chain(ahead))
+        Polygon::from_points(std::iter::once((x, x_ahead)).chain(ahead))
     }
 
     /// Move to the next vertex (after the last comes the first).
@@ -244,4 +247,9 @@ impl Cursor<'_> {
             b: p.pos[p.next[v as usize] as usize],
         }
     }
+}
+
+/// The source of a vertex made between two others: theirs if they share one, else MADE.
+fn shared(a: u32, b: u32) -> u32 {
+    if a == b { a } else { MADE }
 }

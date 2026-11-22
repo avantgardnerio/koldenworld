@@ -2,6 +2,7 @@ mod draw;
 mod faces;
 mod geom;
 mod graph;
+mod pavement;
 mod polygon;
 mod s2;
 mod shrink;
@@ -124,11 +125,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Every block shrunk by half a road (4 m, until widths come from lanes), its self-crossings cut away.
     let mut stats = shrink::ShrinkStats::default();
-    let shrunk: Vec<polygon::Polygon> = polygons
+    let islands: Vec<Vec<polygon::Polygon>> = polygons
         .iter()
-        .filter(|p| p.signed_area() > 0.0)
-        .flat_map(|p| p.shrink(4.0, &metric, &mut stats))
+        .map(|p| {
+            if p.signed_area() > 0.0 {
+                p.shrink(4.0, &metric, &mut stats)
+            } else {
+                Vec::new()
+            }
+        })
         .collect();
+    let shrunk: Vec<&polygon::Polygon> = islands.iter().flatten().collect();
     let area = |ps: &mut dyn Iterator<Item = &polygon::Polygon>| -> f64 {
         ps.map(|p| p.signed_area().max(0.0)).sum::<f64>() * m2_per_st2 / 1e6
     };
@@ -137,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shrunk.len(),
         blocks.len(),
         area(&mut polygons.iter()),
-        area(&mut shrunk.iter())
+        area(&mut shrunk.iter().copied())
     );
 
     let mut sizes: Vec<f64> = shrunk
@@ -154,8 +161,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     );
 
+    // The roads in the void: strips along edges and junctions at nodes, from the islands' corners.
+    let pavement = pavement::pave(&graph, &faces, &islands);
+    println!(
+        "pavement: {} strips ({} missing), {} junctions ({} missing); {:.3} km²; failed strip sides: {:?}",
+        pavement.strips.len(),
+        pavement.missing_strips,
+        pavement.junctions.len(),
+        pavement.missing_junctions,
+        area(&mut pavement.strips.iter().chain(&pavement.junctions)),
+        pavement.why
+    );
+
     let path = "target/five-points.png";
-    draw::draw_png(&ways, &graph, &shrunk, view, cell, 4096, path)?;
+    let frame = draw::View {
+        view,
+        cell,
+        size: 4096,
+    };
+    draw::draw_png(&ways, &graph, &shrunk, &pavement, &frame, path)?;
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
         cell[0], cell[2], cell[1], cell[3]
