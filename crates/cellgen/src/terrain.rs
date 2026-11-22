@@ -45,6 +45,23 @@ impl Terrain {
         }
     }
 
+    /// The ground's height at (s, t), on the lattice's triangles (as the mesh draws it); clamped to the cell.
+    pub fn height_at(&self, st: DVec2) -> f64 {
+        let n = self.n;
+        let g =
+            ((st - self.origin) / self.size * n as f64).clamp(DVec2::ZERO, DVec2::splat(n as f64));
+        let (i, j) = ((g.x as usize).min(n - 1), (g.y as usize).min(n - 1));
+        let (u, v) = (g.x - i as f64, g.y - j as f64);
+        let at = |a: usize, b: usize| self.heights[b * (n + 1) + a];
+        let (ha, hb, hc, hd) = (at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1));
+        // Split on the diagonal (i, j)–(i + 1, j + 1): below it (a, b, d), above it (a, d, c).
+        if u >= v {
+            ha + u * (hb - ha) + v * (hd - hb)
+        } else {
+            ha + v * (hc - ha) + u * (hd - hc)
+        }
+    }
+
     /// Every kind's ground (Clipper paths in metres around the cell) cut to the terrain triangles and draped.
     pub fn cut(&self, kinds: &[&Paths64], metric: &Metric) -> Draped {
         let n = self.n as i64;

@@ -7,12 +7,14 @@
 //
 // Two tiers of ground from the Rust generator (/ground/<token>/…): coarse
 // tiles (S2 level 10, ~9 km: major roads, water, coarse terrain) out to the
-// horizon (up to MAX_RADIUS), and fine cells (level 13, ~1.1 km: everything)
+// horizon (up to MAX_RADIUS), with their buildings as massing (blocks and
+// towers), and fine cells (level 13, ~1.1 km: everything)
 // within FINE_DISTANCE of the camera, with their roads, buildings and terrain
 // from the cell server (/cells/<token>…; a cell with none, 404, is bare
 // ground). Only what's in view loads: coarse tiles first, then fine cells,
 // each nearest first. Fine cells cover the coarse ground under them (stencil),
-// so a coarse tile shows wherever its fine cells haven't loaded.
+// and hide the massing in them (each massing shape knows its fine cell), so a
+// coarse tile shows wherever its fine cells haven't loaded.
 //
 // Frames are rendered only while something changes: a held key or mouse
 // movement starts the loop, and it stops (and writes the pose to the URL) once
@@ -39,7 +41,7 @@ import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
-  AEROWAY, BUILDING_COLORS_RGB, GROUND, CLASS_COLORS_RGB, fogRange, SKY, SUN,
+  AEROWAY, BUILDING_COLORS_RGB, GROUND, CLASS_COLORS_RGB, fogRange, MASSING, SKY, SUN,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -114,11 +116,23 @@ async function getBlob(path: string): Promise<Uint8Array | null> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-/** A bounding sphere around (0, 0, centerZ) for positions (x, y, z interleaved) reaching `flat` m sideways. */
-function bounds(positions: Float32Array, flat: number): { centerZ: number; radius: number } {
+/** A bounding sphere around (0, 0, centerZ) for positions (x, y, z interleaved) reaching `flat` m sideways, and the heights of `more`. */
+function bounds(positions: Float32Array, flat: number, more?: Float32Array): { centerZ: number; radius: number } {
   let z0 = Infinity, z1 = -Infinity;
-  for (let i = 2; i < positions.length; i += 3) { z0 = Math.min(z0, positions[i]!); z1 = Math.max(z1, positions[i]!); }
+  for (const ps of [positions, more ?? positions]) {
+    for (let i = 2; i < ps.length; i += 3) { z0 = Math.min(z0, ps[i]!); z1 = Math.max(z1, ps[i]!); }
+  }
   return { centerZ: (z0 + z1) / 2, radius: Math.hypot(flat, (z1 - z0) / 2) };
+}
+
+/**
+ * A coarse tile's 64 fine cells (three levels down), by the index its massing knows them by: the three levels'
+ * Hilbert positions, the bits just below the tile's own.
+ */
+function fineChildren(tile: CellId): CellId[] {
+  const lsb = (level: number) => 1n << BigInt(2 * (30 - level));
+  const prefix = tile ^ lsb(COARSE_LEVEL), shift = BigInt(2 * (30 - CELL_LEVEL) + 1);
+  return Array.from({ length: 64 }, (_, i) => prefix | (BigInt(i) << shift) | lsb(CELL_LEVEL));
 }
 
 /** Farthest horizontal distance of interleaved points from the origin. */
@@ -130,7 +144,10 @@ function reach(points: ArrayLike<number>, stride: number): number {
 
 interface CellGpu {
   frame: CellFrame;
-  coarse: boolean;  // a coarse tile: ground only
+  coarse: boolean;  // a coarse tile: ground and massing
+  massing?: SolidLayer;  // a coarse tile's buildings, merged; a shape hides where its fine cell is loaded
+  children?: CellId[];   // a coarse tile's 64 fine cells, by the index its massing knows them by
+  hidden?: [number, number];  // which of them are loaded this frame (bits), reused
   missing: boolean;
   radius: number;  // bounding sphere around (0, 0, centerZ) in the frame, m: the ground, roads, building tops
   centerZ: number;
@@ -177,11 +194,16 @@ async function start(): Promise<void> {
     const frame = cellFrame(cell);
     const zero = { nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0 };
     if (cellLevel(cell) !== CELL_LEVEL) {
-      const mesh = await ground;
+      const [v, t] = await Promise.all([getBlob(`/ground/${token}/buildings.arrow`), getBlob(`/ground/${token}/buildings_triangles.arrow`)]);
+      const mesh = await ground, massing = v && t ? groundFromArrow(v, t) : undefined;
+      // The ground's reach, up to the tallest roof.
+      const sphere = bounds(mesh.positions, reach(mesh.positions, 3), massing?.positions);
       return {
         frame, coarse: true, missing: false, model: new Float32Array(16), terrain: flatTerrain(),
-        ground: createSolidLayer(gl!, mesh, GROUND), ...bounds(mesh.positions, reach(mesh.positions, 3)),
-        counts: { ...zero, surfaceTriangles: mesh.indices.length / 3 },
+        ground: createSolidLayer(gl!, mesh, GROUND), ...sphere,
+        massing: massing && createSolidLayer(gl!, massing, MASSING),
+        children: fineChildren(cell), hidden: [0, 0],
+        counts: { ...zero, surfaceTriangles: mesh.indices.length / 3, buildingTriangles: massing ? massing.indices.length / 3 : 0 },
       };
     }
     // Every other table in one response from the cell server; a file per table when served as static files.
@@ -239,7 +261,7 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 16,  // the cell server builds on a pool of workers
     dispose: (g) => {
-      [g.ground, g.aeroways, g.graph, g.buildings, g.signs].forEach((l) => l?.dispose());
+      [g.ground, g.aeroways, g.graph, g.buildings, g.massing, g.signs].forEach((l) => l?.dispose());
       if (g.traffic) traffic.remove(g.traffic);
     },
     onChange: () => {
@@ -396,6 +418,17 @@ async function start(): Promise<void> {
     gl.disable(gl.STENCIL_TEST);
     for (const g of visible) g.aeroways?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
+    // Coarse tiles' massing, less the shapes in fine cells that have their own buildings.
+    for (const g of visible) {
+      const { massing, children, hidden } = g;
+      if (!massing || !children || !hidden) continue;
+      hidden[0] = hidden[1] = 0;
+      children.forEach((child, i) => {
+        const fine = streamer.get(child);
+        if (fine && !fine.missing) hidden[i >> 5] = (hidden[i >> 5]! | (1 << (i & 31))) >>> 0;
+      });
+      massing.draw(f, g.model, SUN, hidden);
+    }
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
     let carTriangles = 0;
     if (carRenderer && showCars) {

@@ -2,10 +2,13 @@
 //! Douglas–Peucker to within a tolerance, in metres, before anything is built from them. A way's ends and every node
 //! it shares with a way (or with itself) stay, so the graph's junctions are the same; only the points between them go.
 
+use crate::buildings::Buildings;
+use crate::clip::UNITS;
 use crate::geom::Metric;
 use crate::s2;
 use crate::water::Water;
 use crate::ways::RoadWays;
+use clipper2_rust::Path64;
 use glam::DVec2;
 use std::collections::HashMap;
 
@@ -51,6 +54,62 @@ pub fn simplify_water(water: &Water, face: u32, metric: &Metric, tolerance: f64)
         }
     }
     water.keep_points(&keep)
+}
+
+/// The buildings with only the points needed to stay within `tolerance` m of each ring (its first and last, the
+/// same point, kept).
+pub fn simplify_buildings(b: &Buildings, face: u32, metric: &Metric, tolerance: f64) -> Buildings {
+    let metres = |i: usize| {
+        let [lon, lat] = b.lonlat[i];
+        metric.metres(DVec2::from_array(s2::face_st(face, lat, lon)))
+    };
+    let mut keep = vec![false; b.lonlat.len()];
+    for r in b.ring_start.windows(2) {
+        let (first, last) = (r[0] as usize, r[1] as usize - 1);
+        if last > first {
+            keep[first] = true;
+            keep[last] = true;
+            // A closed ring: split at its farthest point from the first, so both halves have a real chord.
+            let far = (first..=last)
+                .max_by(|&x, &y| {
+                    metres(x)
+                        .distance(metres(first))
+                        .total_cmp(&metres(y).distance(metres(first)))
+                })
+                .unwrap_or(first);
+            keep[far] = true;
+            douglas_peucker(first, far, &metres, tolerance, &mut keep);
+            douglas_peucker(far, last, &metres, tolerance, &mut keep);
+        }
+    }
+    b.keep_points(&keep)
+}
+
+/// A closed ring (Clipper path in metres × UNITS, not repeating its first point) with only the points needed to stay
+/// within `tolerance` m; None if fewer than three are left.
+pub fn simplify_ring(ring: &Path64, tolerance: f64) -> Option<Path64> {
+    let n = ring.len();
+    if n < 3 {
+        return None;
+    }
+    let metres = |i: usize| {
+        let p = ring[i % n];
+        DVec2::new(p.x as f64, p.y as f64) / UNITS
+    };
+    let far = (0..n)
+        .max_by(|&x, &y| {
+            metres(x)
+                .distance(metres(0))
+                .total_cmp(&metres(y).distance(metres(0)))
+        })
+        .unwrap_or(0);
+    let mut keep = vec![false; n + 1];
+    keep[0] = true;
+    keep[far] = true;
+    douglas_peucker(0, far, &metres, tolerance, &mut keep);
+    douglas_peucker(far, n, &metres, tolerance, &mut keep);
+    let out: Path64 = (0..n).filter(|&i| keep[i]).map(|i| ring[i]).collect();
+    (out.len() >= 3).then_some(out)
 }
 
 /// Marks the points between `first` and `last` (exclusive) that the line needs to stay within `tolerance`.

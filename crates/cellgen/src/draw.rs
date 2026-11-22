@@ -245,3 +245,46 @@ pub fn draw_mesh(
     pixmap.save_png(path)?;
     Ok(())
 }
+
+/// Massing from above, by height: low (under 8 m), mid (to 15 m), tall (to 40 m), towers; the cell's square around.
+pub fn draw_massing(
+    m: &crate::buildings::Massing,
+    c: &crate::cell::Cell,
+    metric: &crate::geom::Metric,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bands: [(f64, [u8; 3]); 4] = [
+        (8.0, [226, 210, 182]),
+        (15.0, [196, 160, 124]),
+        (crate::buildings::TOWER, [150, 104, 84]),
+        (f64::MAX, [60, 64, 88]),
+    ];
+    let polys = crate::clip::from_paths(&m.paths, metric);
+    let mut fills: Vec<(Vec<&Polygon>, [u8; 3])> =
+        bands.iter().map(|&(_, c)| (Vec::new(), c)).collect();
+    for (k, p) in polys.iter().enumerate() {
+        let band = if m.tower[k].is_some() {
+            3
+        } else {
+            bands
+                .iter()
+                .position(|&(top, _)| m.height[k] < top)
+                .unwrap_or(2)
+                .min(2)
+        };
+        fills[band].0.push(p);
+    }
+    let cell = c.square;
+    let margin = 0.02 * (cell[2] - cell[0]);
+    let view = View {
+        view: [
+            cell[0] - margin,
+            cell[1] - margin,
+            cell[2] + margin,
+            cell[3] + margin,
+        ],
+        cell,
+        size: 4096,
+    };
+    draw_png(&fills, &view, path)
+}

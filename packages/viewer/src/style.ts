@@ -9,6 +9,9 @@ export const SKY = palette(["#a9c8e6"]);
 /** vec3 per ground material from the Rust cell generator: asphalt, yellow, white, grass, sidewalk, lot, water. */
 export const GROUND = palette(["#48484c", "#e8be28", "#f0f0ec", "#68964a", "#c4c2ba", "#7eaa5c", "#4078be"]);
 
+/** vec3 per massing material from the Rust cell generator (a coarse tile's buildings): wall, roof. */
+export const MASSING = palette(["#d2c6b2", "#8e7e6e"]);
+
 /** vec3 per AerowayMaterial: apron, taxiway, runway (concrete, the runway lightest). */
 export const AEROWAY = palette(["#8f9196", "#7d8086", "#a4a6aa"]);
 

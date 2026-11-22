@@ -1,3 +1,4 @@
+mod buildings;
 mod cell;
 mod clip;
 mod crossings;
@@ -27,6 +28,8 @@ const USAGE: &str = "usage:
       build cells (at any level; level 10 and coarser draw less, as cell::Options::for_level; the flags override it):
       <out>/<token>/ (default out: data/rust-cells), pictures in target/. With --ways, from those ways
       (JSON, as the TS RoadWayInput) instead of the database: no water, terrain flat at --height (default 0)
+  cellgen buildings <token> [--gap <m>] [--simplify <m>] [--outline <m>]
+                                                a tile's buildings merged into massing: target/buildings.png
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
 The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
@@ -103,12 +106,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::create_dir_all(&dir)?;
                 std::fs::write(dir.join("ground.arrow"), &built.ground)?;
                 std::fs::write(dir.join("ground_triangles.arrow"), &built.triangles)?;
+                if let Some((v, t)) = &built.buildings {
+                    std::fs::write(dir.join("buildings.arrow"), v)?;
+                    std::fs::write(dir.join("buildings_triangles.arrow"), t)?;
+                }
                 println!("cell {} built in {:.0?}", c.token, started.elapsed());
                 for line in &built.log {
                     println!("  {line}");
                 }
                 println!("wrote {}", dir.display());
             }
+            Ok(())
+        }
+        Some("buildings") => {
+            let what = args.get(1).ok_or(USAGE)?;
+            let c = cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?;
+            let started = std::time::Instant::now();
+            let mut db = postgres::Client::connect(&db, postgres::NoTls)?;
+            let box_ = s2::lat_lon_bounds(c.face, c.square, 0.0);
+            let b = buildings::load(&mut db, box_, |lon, lat| c.owns(lon, lat))?;
+            let loaded = started.elapsed();
+            let metric = s2::cell_metric(c.face, c.square);
+            let gap: f64 = flag("--gap")
+                .and_then(|i| args.get(i + 1))
+                .map_or(Ok(buildings::GAP), |g| g.parse())?;
+            let tolerance: f64 = flag("--simplify")
+                .and_then(|i| args.get(i + 1))
+                .map_or(Ok(buildings::SIMPLIFY), |g| g.parse())?;
+            let b = simplify::simplify_buildings(&b, c.face, &metric, tolerance);
+            let outline: f64 = flag("--outline")
+                .and_then(|i| args.get(i + 1))
+                .map_or(Ok(buildings::OUTLINE), |g| g.parse())?;
+            let m = buildings::massing(&b, c.face, &metric, gap, outline);
+            let towers = m.tower.iter().filter(|t| t.is_some()).count();
+            let vertices =
+                |paths: &[&clipper2_rust::Path64]| paths.iter().map(|p| p.len()).sum::<usize>();
+            let low: Vec<_> = m
+                .paths
+                .iter()
+                .zip(&m.tower)
+                .filter(|(_, t)| t.is_none())
+                .map(|(p, _)| p)
+                .collect();
+            let outers = low.iter().filter(|p| clipper2_rust::area(p) > 0.0).count();
+            println!(
+                "{} buildings ({} footprint points) loaded in {loaded:.0?}; massing in {:.0?}: {outers} shapes \
+                 ({} rings, {} points) and {towers} tower rings",
+                b.osm_id.len(),
+                b.lonlat.len(),
+                started.elapsed() - loaded,
+                low.len(),
+                vertices(&low),
+            );
+            draw::draw_massing(&m, &c, &metric, "target/buildings.png")?;
+            println!("wrote target/buildings.png");
             Ok(())
         }
         Some("serve") => {

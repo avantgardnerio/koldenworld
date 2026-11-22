@@ -10,8 +10,8 @@
 
 use crate::ways::{ROAD_CLASSES, RoadWays};
 use crate::{
-    clip, crossings, draw, elevation, faces, geodesy, geom, graph, ground_arrow, markings, mesh,
-    polygon, s2, simplify, terrain, water, ways, widths,
+    buildings, clip, crossings, draw, elevation, faces, geodesy, geom, graph, ground_arrow,
+    markings, mesh, polygon, s2, simplify, terrain, water, ways, widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
 use glam::DVec2;
@@ -62,7 +62,7 @@ pub const COARSE_LEVEL: u32 = 10;
 
 impl Options {
     /// What a cell at `level` draws: everything at the cells' level (13), and at the coarse tier (and above) the
-    /// secondary roads and up, simplified to 2 m, on a 32-square lattice, without markings or sidewalks.
+    /// residential streets and up (not service roads), simplified to 2 m, on a 32-square lattice, without markings or sidewalks.
     pub fn for_level(level: u32) -> Options {
         if level > COARSE_LEVEL {
             return Options::default();
@@ -70,7 +70,7 @@ impl Options {
         Options {
             min_class: ROAD_CLASSES
                 .iter()
-                .position(|c| *c == "secondary")
+                .position(|c| *c == "residential")
                 .map(|i| i as u8),
             simplify: 2.0,
             terrain: 32,
@@ -96,6 +96,7 @@ impl Default for Options {
 pub struct Built {
     pub ground: Vec<u8>,
     pub triangles: Vec<u8>,
+    pub buildings: Option<(Vec<u8>, Vec<u8>)>, // coarse tiles: the massing, as buildings.arrow and buildings_triangles.arrow
     pub log: Vec<String>,
 }
 
@@ -127,6 +128,14 @@ impl Cell {
             square,
             token: token.to_string(),
         })
+    }
+
+    /// Whether the cell holds a point (as the TS cellFromLatLon at its level).
+    pub fn owns(&self, lon: f64, lat: f64) -> bool {
+        let (face, st) = s2::lat_lon_to_face_st(lat, lon);
+        face == self.face
+            && s2::cell_id(face, st, self.level)
+                == s2::cell_id(self.face, self.center(), self.level)
     }
 
     fn center(&self) -> [f64; 2] {
@@ -185,15 +194,25 @@ pub fn build(
     let view = [cell[0] - m, cell[1] - m, cell[2] + m, cell[3] + m];
     let [west, south, east, north] = s2::lat_lon_bounds(face, view, 0.001);
     let bbox = [west, south, east, north];
-    let (mut ways, water, heights) = match source {
+    // Coarse tiles draw their buildings as massing (the fine cells' come from the TS cell server).
+    let coarse = c.level <= COARSE_LEVEL;
+    let (mut ways, water, heights, owned) = match source {
         Source::Postgres { db, data } => (
             ways::load_road_ways(db, west, south, east, north)?,
             water::load_water(db, west, south, east, north)?,
             Heights::Dem(elevation::Elevation::region(&data.join("dem"), bbox)?),
+            if coarse {
+                Some(buildings::load(db, bbox, |lon, lat| c.owns(lon, lat))?)
+            } else {
+                None
+            },
         ),
-        Source::Fixture { ways, height } => {
-            (ways.clone(), water::Water::empty(), Heights::Flat(height))
-        }
+        Source::Fixture { ways, height } => (
+            ways.clone(),
+            water::Water::empty(),
+            Heights::Flat(height),
+            coarse.then(buildings::Buildings::default),
+        ),
     };
     if let Some(min) = options.min_class {
         ways = ways.keep(|w| ways.class[w] <= min);
@@ -425,6 +444,32 @@ pub fn build(
     let center = s2::st_to_lat_lon(face, c.center());
     let (ground, triangles) = ground_arrow::encode(&mesh, &KINDS, &c.token, center)?;
 
+    // 6. Coarse tiles: the buildings as massing.
+    let buildings = match &owned {
+        Some(b) => {
+            let started = Instant::now();
+            let simple = simplify::simplify_buildings(b, face, &metric, buildings::SIMPLIFY);
+            let m = buildings::massing(&simple, face, &metric, buildings::GAP, buildings::OUTLINE);
+            let prisms = buildings::extrude(&m, &terrain, &metric, face, cell, c.level);
+            log.push(format!(
+                "buildings in {:.0?}: {} buildings, {} massing rings, {} vertices, {} triangles ({} roofs failed)",
+                started.elapsed(),
+                b.osm_id.len(),
+                m.paths.len(),
+                prisms.positions.len(),
+                prisms.indices.len() / 3,
+                prisms.failed
+            ));
+            Some(ground_arrow::encode(
+                &prisms,
+                &["wall", "roof"],
+                &c.token,
+                center,
+            )?)
+        }
+        None => None,
+    };
+
     if let Some(dir) = pictures {
         std::fs::create_dir_all(dir)?;
         let polys: Vec<Vec<polygon::Polygon>> =
@@ -473,6 +518,7 @@ pub fn build(
     Ok(Built {
         ground,
         triangles,
+        buildings,
         log,
     })
 }

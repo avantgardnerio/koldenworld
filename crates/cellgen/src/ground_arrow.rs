@@ -5,6 +5,7 @@
 //!   position  fixed_size_list<float32, 3>       vertices  fixed_size_list<uint16, 3> (under 65,536 vertices)
 //!   normal    fixed_size_list<int8, 4>                    fixed_size_list<uint32, 3> (otherwise)
 //!   material  uint8
+//!   child     uint8 (buildings only: which of the tile's 64 fine cells a vertex's shape is in)
 //!
 //! Normals are × 127 with a zero fourth (as the GPU takes them: normalized bytes, four to a vertex). Positions and
 //! normals are in the cell's ENU frame (x east, y north, z up, from its center on the ellipsoid, as the
@@ -89,15 +90,17 @@ pub fn encode(
         4,
     );
     let material: ArrayRef = Arc::new(UInt8Array::from(mesh.material.clone()));
-    let ground = table(
-        vec![
-            position,
-            normal,
-            Field::new("material", DataType::UInt8, false),
-        ],
-        vec![positions, normals, material],
-        metadata.clone(),
-    )?;
+    let mut fields = vec![
+        position,
+        normal,
+        Field::new("material", DataType::UInt8, false),
+    ];
+    let mut columns = vec![positions, normals, material];
+    if !mesh.child.is_empty() {
+        fields.push(Field::new("child", DataType::UInt8, false));
+        columns.push(Arc::new(UInt8Array::from(mesh.child.clone())));
+    }
+    let ground = table(fields, columns, metadata.clone())?;
 
     let indices: ArrayRef = if mesh.positions.len() <= 1 << 16 {
         Arc::new(UInt16Array::from_iter_values(

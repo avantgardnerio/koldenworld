@@ -11,7 +11,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-const TABLES: [&str; 2] = ["ground.arrow", "ground_triangles.arrow"];
+/// Every cell's tables, and a coarse tile's buildings.
+const TABLES: [&str; 4] = [
+    "ground.arrow",
+    "ground_triangles.arrow",
+    "buildings.arrow",
+    "buildings_triangles.arrow",
+];
 
 struct App {
     data: PathBuf,                                                 // data/ (dem/ under it)
@@ -56,6 +62,13 @@ async fn table(
         )
             .into_response();
     };
+    if table.starts_with("buildings") && c.level > cell::COARSE_LEVEL {
+        return (
+            StatusCode::NOT_FOUND,
+            "fine cells' buildings come from the TS cell server\n",
+        )
+            .into_response();
+    }
     let file = app.cache.join(&token).join(&table);
     if !file.exists() {
         // One build per cell: whoever gets its lock first builds, the rest find the files.
@@ -112,7 +125,15 @@ fn build(app: &App, c: &Cell) -> Result<(), Box<dyn std::error::Error + Send + S
     .map_err(|e| e.to_string())?;
     let dir = app.cache.join(&c.token);
     std::fs::create_dir_all(&dir)?;
-    for (name, bytes) in TABLES.iter().zip([&built.ground, &built.triangles]) {
+    let mut tables = vec![
+        ("ground.arrow", &built.ground),
+        ("ground_triangles.arrow", &built.triangles),
+    ];
+    if let Some((v, t)) = &built.buildings {
+        tables.push(("buildings.arrow", v));
+        tables.push(("buildings_triangles.arrow", t));
+    }
+    for (name, bytes) in tables {
         let tmp = dir.join(format!("{name}.tmp"));
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, dir.join(name))?;
