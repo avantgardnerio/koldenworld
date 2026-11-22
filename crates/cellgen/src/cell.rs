@@ -33,7 +33,7 @@ const COLORS: [[u8; 3]; 7] = [
     [64, 120, 190],
 ];
 /// Terrain lattice squares across a cell (TERRAIN_N in the TS).
-const TERRAIN_N: usize = 64;
+pub const TERRAIN_N: usize = 64;
 
 /// A cell: its cube face, its (s, t) square, its token.
 pub struct Cell {
@@ -48,6 +48,8 @@ pub struct Options {
     pub min_class: Option<u8>,
     /// Road lines thinned to within this many metres before building (Douglas–Peucker); 0: every point.
     pub simplify: f64,
+    /// Terrain lattice squares across the cell: TERRAIN_N, or fewer for a coarser ground.
+    pub terrain: usize,
     pub markings: bool,
     pub sidewalks: bool,
 }
@@ -57,6 +59,7 @@ impl Default for Options {
         Options {
             min_class: None,
             simplify: 0.0,
+            terrain: TERRAIN_N,
             markings: true,
             sidewalks: true,
         }
@@ -351,7 +354,7 @@ pub fn build(
 
     // 5. Terrain heights on the lattice, the ground draped on its triangles, and the buffers.
     let started = Instant::now();
-    let n = TERRAIN_N;
+    let n = options.terrain;
     let lattice: Vec<f64> = (0..=n)
         .flat_map(|b| (0..=n).map(move |a| (a, b)))
         .map(|(a, b)| {

@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage:
   cellgen cell <token | lat,lon>... [--pictures] [--ways <file.json> [--height <m>]] [--out <dir>]
-               [--min-class <class>] [--simplify <m>] [--no-markings] [--no-sidewalks]
+               [--min-class <class>] [--simplify <m>] [--terrain <n>] [--no-markings] [--no-sidewalks]
       build cells: <out>/<token>/ (default out: data/rust-cells), pictures in target/. With --ways, from those ways
       (JSON, as the TS RoadWayInput) instead of the database: no water, terrain flat at --height (default 0)
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
@@ -69,6 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .transpose()?,
                 simplify: value("--simplify")?.map_or(Ok(0.0), |m| m.parse())?,
+                terrain: value("--terrain")?.map_or(Ok(cell::TERRAIN_N), |n| n.parse())?,
                 markings: flag("--no-markings").is_none(),
                 sidewalks: flag("--no-sidewalks").is_none(),
             };
