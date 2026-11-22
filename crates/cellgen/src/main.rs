@@ -5,6 +5,7 @@ mod faces;
 mod geodesy;
 mod geom;
 mod graph;
+mod ground_arrow;
 mod markings;
 mod mesh;
 mod polygon;
@@ -453,6 +454,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         flat - cell_enu
     );
     draw::draw_mesh(&mesh, &colors, 4096, "target/mesh.png")?;
+    // The mesh as Arrow, for the viewer: target/cells/<token>/ground.arrow and ground_triangles.arrow.
+    let token = s2::token(s2::cell_id(
+        face,
+        [(cell[0] + cell[2]) / 2.0, (cell[1] + cell[3]) / 2.0],
+        s2::CELL_LEVEL,
+    ));
+    let dir = std::path::PathBuf::from(format!("target/cells/{token}"));
+    let center = s2::st_to_lat_lon(face, [(cell[0] + cell[2]) / 2.0, (cell[1] + cell[3]) / 2.0]);
+    let names = [
+        "asphalt", "yellow", "white", "grass", "sidewalk", "lot", "water",
+    ];
+    ground_arrow::write(&mesh, &names, &token, center, &dir)?;
+    let sizes: Vec<String> = ["ground.arrow", "ground_triangles.arrow"]
+        .iter()
+        .map(|f| {
+            format!(
+                "{f} {:.2} MB",
+                std::fs::metadata(dir.join(f)).map(|m| m.len()).unwrap_or(0) as f64 / 1e6
+            )
+        })
+        .collect();
+    println!("wrote {}: {}", dir.display(), sizes.join(", "));
 
     // Close up: the busiest marked junction in the cell (most marked roads meeting), 70 m across.
     let marked = |e: usize| widths::profile(ways.class[graph.edge_way[e] as usize]).2;

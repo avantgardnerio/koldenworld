@@ -54,6 +54,32 @@ pub fn cell_metric(face: u32, [s0, t0, s1, t1]: [f64; 4]) -> Metric {
     Metric::new(DVec2::from_array(c), to_m)
 }
 
+/// The id of the cell at a level containing a point (s, t) on a face (as s2.ts cellFromLatLon): 3 face bits, two bits per
+/// level along a Hilbert curve, then a 1.
+pub fn cell_id(face: u32, [s, t]: [f64; 2], level: u32) -> u64 {
+    const SWAP: usize = 1;
+    const POS_TO_ORIENTATION: [usize; 4] = [SWAP, 0, 0, 2 | SWAP];
+    const IJ_TO_POS: [[u64; 4]; 4] = [[0, 1, 3, 2], [0, 3, 1, 2], [2, 3, 1, 0], [2, 1, 3, 0]];
+    let max = (1u64 << 30) as f64;
+    let leaf = |x: f64| (max * x).floor().clamp(0.0, max - 1.0) as u64;
+    let (i, j) = (leaf(s), leaf(t));
+    let mut orient = face as usize & SWAP;
+    let mut bits = 0u64;
+    for k in (0..30).rev() {
+        let pos = IJ_TO_POS[orient][(((i >> k) & 1) << 1 | ((j >> k) & 1)) as usize];
+        bits = (bits << 2) | pos;
+        orient ^= POS_TO_ORIENTATION[pos as usize];
+    }
+    let id = ((face as u64) << 61) | (bits << 1) | 1;
+    let lsb = 1u64 << (2 * (30 - level));
+    (id & lsb.wrapping_neg()) | lsb
+}
+
+/// A cell id as its token: hex with trailing zeros dropped.
+pub fn token(id: u64) -> String {
+    format!("{id:016x}").trim_end_matches('0').to_string()
+}
+
 /// A lon/lat box (west, south, east, north) around an (s, t) rectangle on a face: its corners, padded by `pad`
 /// degrees (its edges bow a little in lon/lat).
 pub fn lat_lon_bounds(face: u32, [s0, t0, s1, t1]: [f64; 4], pad: f64) -> [f64; 4] {
