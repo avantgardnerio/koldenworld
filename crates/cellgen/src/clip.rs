@@ -9,7 +9,7 @@ use crate::geom::Metric;
 use crate::polygon::{MADE, Polygon};
 use clipper2_rust::{
     EndType, FillRule, JoinType, Path64, Paths64, Point64, area_paths, difference_64,
-    inflate_paths_64, intersect_64,
+    inflate_paths_64, intersect_64, union_subjects_64,
 };
 use glam::DVec2;
 
@@ -34,12 +34,16 @@ pub fn block_ground(
     grass: f64,
     sidewalk: f64,
 ) -> BlockGround {
-    let b = to_paths(block, metric);
-    let shrink = |p: &Paths64, d: f64| {
-        let inner = inflate_paths_64(p, -d * MM, JoinType::Miter, EndType::Polygon, MITER, 0.0);
-        intersect_64(&inner, p, FillRule::NonZero)
+    // The block's region as Clipper sees it, nonzero: a face whose boundary crosses itself (a road over another with
+    // no shared node: a bridge) counts the overlap once, and the parts below add up to it. Dead-end spikes have no
+    // area, so the region drops them; the kerb is offset from the raw ring, spikes and all, so they carve their slots.
+    let raw = to_paths(block, metric);
+    let b = union_subjects_64(&raw, FillRule::NonZero);
+    let offset_in = |p: &Paths64, d: f64| {
+        inflate_paths_64(p, -d * MM, JoinType::Miter, EndType::Polygon, MITER, 0.0)
     };
-    let k = shrink(&b, kerb);
+    let shrink = |p: &Paths64, d: f64| intersect_64(&offset_in(p, d), p, FillRule::NonZero);
+    let k = intersect_64(&offset_in(&raw, kerb), &b, FillRule::NonZero);
     let g = shrink(&k, grass);
     let s = shrink(&g, sidewalk);
     let parts = [

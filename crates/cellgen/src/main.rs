@@ -212,61 +212,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (all(&grass.pieces), [104, 150, 72]), // grass
         (all(&sidewalk.pieces), [196, 194, 186]), // concrete
     ];
-    draw::draw_png(&fills, &frame, path)?;
-    // One block by Clipper2, next to ours: the cul-de-sac block with the worst tangle.
-    let probe = glam::DVec2::from_array(s2::face_st(face, 39.759794, -104.970880));
-    let block = polygons
+    draw::draw_png(&fills, &frame, "target/five-points-ours.png")?;
+    // Every block by Clipper2: nested offsets, the ground their differences.
+    let started = std::time::Instant::now();
+    let grounds: Vec<clip::BlockGround> = polygons
         .iter()
         .filter(|p| p.signed_area() > 0.0)
-        .find(|p| contains(p, probe))
-        .ok_or("no block at the probe")?;
-    let ground = clip::block_ground(block, &metric, 4.0, 1.5, 1.8);
-    let [b, pav, gr, sw, lot] = ground.areas;
+        .map(|p| clip::block_ground(p, &metric, 4.0, 1.5, 1.8))
+        .collect();
+    let took = started.elapsed();
+    let mut sums = [0.0; 5];
+    let mut known = [0; 2];
+    for g in &grounds {
+        for (s, a) in sums.iter_mut().zip(g.areas) {
+            *s += a;
+        }
+        known[0] += g.known[0];
+        known[1] += g.known[1];
+    }
+    let [b, pav, gr, sw, lot] = sums.map(|a| a / 1e6);
     println!(
-        "clipper block: {b:.1} m² = pavement {pav:.1} + grass {gr:.1} + sidewalk {sw:.1} + lot {lot:.1} \
-         (sum {:.1}, off by {:.4} m²); ids known on {} of {} vertices",
-        pav + gr + sw + lot,
-        b - (pav + gr + sw + lot),
-        ground.known[0],
-        ground.known[1]
+        "clipper, {} blocks in {took:.0?}: {b:.4} km² = pavement {pav:.4} + grass {gr:.4} + sidewalk {sw:.4} + lot \
+         {lot:.4} (off by {:.2} m²); ids known on {} of {} vertices",
+        grounds.len(),
+        (b - (pav + gr + sw + lot)) * 1e6,
+        known[0],
+        known[1]
     );
-    let (lo, hi) = block
-        .positions()
-        .fold((glam::DVec2::MAX, glam::DVec2::MIN), |(lo, hi), p| {
-            (lo.min(p), hi.max(p))
-        });
-    let half = (hi - lo).max_element() * 0.6;
-    let mid = (lo + hi) / 2.0;
-    let zoom = draw::View {
-        view: [mid.x - half, mid.y - half, mid.x + half, mid.y + half],
-        cell,
-        size: 1600,
+    // The check: every block's ground adds up to the block (to a hundredth of a square metre).
+    let mut off: Vec<(f64, f64, usize)> = grounds
+        .iter()
+        .map(|g| {
+            let [b, pav, gr, sw, lot] = g.areas;
+            (b - (pav + gr + sw + lot), b, g.lot.len())
+        })
+        .filter(|o| o.0.abs() > 0.01)
+        .collect();
+    off.sort_by(|a, b| b.0.abs().total_cmp(&a.0.abs()));
+    println!(
+        "  blocks whose ground doesn't add up: {}; worst (off m², block m², lot pieces): {:?}",
+        off.len(),
+        &off[..off.len().min(6)]
+    );
+
+    let kind = |pick: fn(&clip::BlockGround) -> &Vec<polygon::Polygon>| -> Vec<&polygon::Polygon> {
+        grounds.iter().flat_map(|g| pick(g).iter()).collect()
     };
-    draw::draw_png(&fills, &zoom, "target/block-ours.png")?;
-    let theirs = [
-        (all(&ground.lot), [126, 170, 92]),
-        (all(&ground.pavement), [72, 72, 76]),
-        (all(&ground.grass), [104, 150, 72]),
-        (all(&ground.sidewalk), [196, 194, 186]),
+    let clipped = [
+        (kind(|g| &g.lot), [126, 170, 92]),
+        (kind(|g| &g.pavement), [72, 72, 76]),
+        (kind(|g| &g.grass), [104, 150, 72]),
+        (kind(|g| &g.sidewalk), [196, 194, 186]),
     ];
-    draw::draw_png(&theirs, &zoom, "target/block-clipper.png")?;
+    draw::draw_png(&clipped, &frame, path)?;
 
     println!(
         "face {face}, cell s {:.6}..{:.6}, t {:.6}..{:.6}; wrote {path}",
         cell[0], cell[2], cell[1], cell[3]
     );
     Ok(())
-}
-
-/// Whether a point is inside a polygon (even-odd; for picking a block, not for geometry).
-fn contains(p: &polygon::Polygon, q: glam::DVec2) -> bool {
-    let ring: Vec<glam::DVec2> = p.positions().collect();
-    let mut inside = false;
-    for i in 0..ring.len() {
-        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-        if (a.y > q.y) != (b.y > q.y) && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x {
-            inside = !inside;
-        }
-    }
-    inside
 }
