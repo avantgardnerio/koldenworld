@@ -62,6 +62,34 @@ pub fn load_water(
 }
 
 impl Water {
+    /// The water with only the points marked in `keep` (one per point).
+    pub fn keep_points(&self, keep: &[bool]) -> Water {
+        let mut out = Water {
+            line_start: vec![0],
+            width: self.width.clone(),
+            ring_start: vec![],
+            lonlat: Vec::new(),
+        };
+        for r in self.line_start.windows(2) {
+            out.lonlat.extend(
+                (r[0]..r[1])
+                    .filter(|&i| keep[i as usize])
+                    .map(|i| self.lonlat[i as usize]),
+            );
+            out.line_start.push(out.lonlat.len() as u32);
+        }
+        out.ring_start.push(out.lonlat.len() as u32);
+        for r in self.ring_start.windows(2) {
+            out.lonlat.extend(
+                (r[0]..r[1])
+                    .filter(|&i| keep[i as usize])
+                    .map(|i| self.lonlat[i as usize]),
+            );
+            out.ring_start.push(out.lonlat.len() as u32);
+        }
+        out
+    }
+
     /// No water at all.
     pub fn empty() -> Water {
         Water {
@@ -72,8 +100,8 @@ impl Water {
     }
 
     /// All the water as Clipper paths around the cell: lines buffered half their width either side (round ends, so
-    /// segments join smoothly), and the areas, unioned.
-    pub fn paths(&self, face: u32, metric: &Metric) -> Paths64 {
+    /// segments join smoothly; arcs within `arc_tolerance` m), and the areas, unioned.
+    pub fn paths(&self, face: u32, metric: &Metric, arc_tolerance: f64) -> Paths64 {
         let at = |k: usize| {
             let [lon, lat] = self.lonlat[k];
             point(
@@ -92,7 +120,7 @@ impl Water {
                 JoinType::Round,
                 EndType::Round,
                 4.0,
-                0.0,
+                arc_tolerance * UNITS,
             ));
         }
         for r in 0..self.ring_start.len().saturating_sub(1) {

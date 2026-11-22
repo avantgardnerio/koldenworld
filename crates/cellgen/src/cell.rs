@@ -32,6 +32,8 @@ const COLORS: [[u8; 3]; 7] = [
     [126, 170, 92],
     [64, 120, 190],
 ];
+/// How closely round water ends and bends follow their arcs, m, at full detail.
+const ARC_TOLERANCE: f64 = 0.05;
 /// Terrain lattice squares across a cell (TERRAIN_N in the TS).
 pub const TERRAIN_N: usize = 64;
 
@@ -183,6 +185,11 @@ pub fn build(
     if options.simplify > 0.0 {
         ways = simplify::simplify(&ways, &metric, options.simplify);
     }
+    let water = if options.simplify > 0.0 {
+        simplify::simplify_water(&water, face, &metric, options.simplify)
+    } else {
+        water
+    };
     let (ways, crossed) = crossings::split(&ways);
     let mut graph = graph::build_graph(&ways);
     let angles = graph::sort_ends_by_angle(&mut graph, &ways);
@@ -329,7 +336,11 @@ pub fn build(
         nonzero,
     );
     let water = difference_64(
-        &intersect_64(&water.paths(face, &metric), &square, nonzero),
+        &intersect_64(
+            &water.paths(face, &metric, options.simplify.max(ARC_TOLERANCE)),
+            &square,
+            nonzero,
+        ),
         &road,
         nonzero,
     );

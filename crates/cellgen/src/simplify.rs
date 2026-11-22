@@ -1,8 +1,10 @@
-//! Simplified road lines, for coarser tiers: each way's points thinned by Douglas–Peucker to within a tolerance, in
-//! metres, before anything is built from them. A way's ends and every node it shares with a way (or with itself)
-//! stay, so the graph's junctions are the same; only the points between them go.
+//! Simplified lines, for coarser tiers: each way's and each water line's and ring's points thinned by
+//! Douglas–Peucker to within a tolerance, in metres, before anything is built from them. A way's ends and every node
+//! it shares with a way (or with itself) stay, so the graph's junctions are the same; only the points between them go.
 
 use crate::geom::Metric;
+use crate::s2;
+use crate::water::Water;
 use crate::ways::RoadWays;
 use glam::DVec2;
 use std::collections::HashMap;
@@ -29,6 +31,26 @@ pub fn simplify(ways: &RoadWays, metric: &Metric, tolerance: f64) -> RoadWays {
         keep[a] = true;
     }
     ways.keep_points(&keep)
+}
+
+/// The water with only the points needed to stay within `tolerance` m of each line and ring (their ends kept).
+pub fn simplify_water(water: &Water, face: u32, metric: &Metric, tolerance: f64) -> Water {
+    let metres = |i: usize| {
+        let [lon, lat] = water.lonlat[i];
+        metric.metres(DVec2::from_array(s2::face_st(face, lat, lon)))
+    };
+    let mut keep = vec![false; water.lonlat.len()];
+    for runs in [&water.line_start, &water.ring_start] {
+        for r in runs.windows(2) {
+            let (a, b) = (r[0] as usize, r[1] as usize);
+            if b > a {
+                keep[a] = true;
+                keep[b - 1] = true;
+                douglas_peucker(a, b - 1, &metres, tolerance, &mut keep);
+            }
+        }
+    }
+    water.keep_points(&keep)
 }
 
 /// Marks the points between `first` and `last` (exclusive) that the line needs to stay within `tolerance`.
