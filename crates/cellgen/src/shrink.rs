@@ -1,8 +1,15 @@
-//! Shrinking a polygon: every side pulled in by a distance, then its self-crossings cut away. Works on the ring in
-//! metres, riding it with a cursor.
+//! Shrinking a polygon: every side pulled in by a distance, then the ring split at its self-crossings into loops,
+//! each judged by its own sign once it has no crossings of its own. A positive loop is an island, kept (a block
+//! pinched in two keeps both); a negative loop is a part the shrink turned inside out (an overshot corner, a
+//! collapsed spike, an island with no room left), dropped. Works in metres, riding the ring with a cursor.
+//!
+//! Known flaw: where several short sides overshoot past each other in a tangle (a sharp corner), moving vertices
+//! along bisectors gives a ring whose winding no longer matches "at least d from every side", and small triangles
+//! closer than d to a road survive as islands (about 11 around Five Points, under 1 m² each). No rule on the loops
+//! can fix that; it needs offsetting each side separately and a boolean union.
 
-use crate::geom::{self, Crossing, Metric};
-use crate::polygon::{Cursor, MADE, Polygon};
+use crate::geom::{Crossing, Metric};
+use crate::polygon::{Cursor, Polygon};
 use glam::DVec2;
 
 /// A vertex in a very sharp corner stops at this many distances in.
@@ -12,25 +19,27 @@ const MITER: f64 = 4.0;
 #[derive(Debug, Default)]
 pub struct ShrinkStats {
     pub tips: usize,      // dead-end tips given square end caps
-    pub crossings: usize, // self-crossings cut away
-    pub pinches: usize,   // crossings whose two loops were both positive: the smaller was dropped
-    pub touches: usize,   // sides touching or collinear (exact zero signs), left alone
-    pub vanished: usize,  // polygons with nothing left
+    pub crossings: usize, // self-crossings the ring was split at
+    pub inverted: usize, // loops dropped: clockwise (turned inside out), or too few vertices to enclose anything
+    pub splits: usize,   // polygons that became two or more islands
+    pub touches: usize,  // sides touching or collinear (exact zero signs), left alone
+    pub vanished: usize, // polygons with nothing left
 }
 
 impl Polygon {
-    /// This polygon with every side pulled in by `d` metres and its self-crossings cut away, or None if nothing is
-    /// left.
-    pub fn shrink(&self, d: f64, metric: &Metric, stats: &mut ShrinkStats) -> Option<Polygon> {
+    /// This polygon with every side pulled in by `d` metres: the islands left, each a clean counterclockwise ring
+    /// (none if nothing is left, several if it pinched apart).
+    pub fn shrink(&self, d: f64, metric: &Metric, stats: &mut ShrinkStats) -> Vec<Polygon> {
         let mut band = self.in_metres(metric);
         band.drop_repeats();
         band.move_in(d, stats);
-        band.cut_self_crossings(stats);
-        if !band.is_solid() {
-            stats.vanished += 1;
-            return None;
+        let islands = band.into_islands(stats);
+        match islands.len() {
+            0 => stats.vanished += 1,
+            1 => {}
+            _ => stats.splits += 1,
         }
-        Some(band.in_st(metric))
+        islands.iter().map(|p| p.in_st(metric)).collect()
     }
 
     /// Every vertex moved so both its sides land `d` further in; where the ring doubles back (a dead end's tip) the
@@ -60,22 +69,34 @@ impl Polygon {
         }
     }
 
-    /// Rides the ring cutting away self-crossings until a whole lap finds none.
-    fn cut_self_crossings(&mut self, stats: &mut ShrinkStats) {
-        let Some(mut v) = self.first() else { return };
-        let mut clean = 0;
-        while v.ring_len() >= 3 && clean < v.ring_len() {
-            match v.first_crossing_ahead(stats) {
-                Some((w, x)) => {
-                    v.cut_loop(w, x, stats);
-                    clean = 0;
+    /// Splits the ring at self-crossings until no loop has any, then keeps the positive loops.
+    fn into_islands(self, stats: &mut ShrinkStats) -> Vec<Polygon> {
+        let (mut work, mut islands) = (vec![self], Vec::new());
+        while let Some(mut ring) = work.pop() {
+            match ring.split_at_first_crossing(stats) {
+                Some(other) => {
+                    stats.crossings += 1;
+                    work.push(ring);
+                    work.push(other);
                 }
-                None => {
-                    v.next();
-                    clean += 1;
-                }
+                None if ring.is_solid() => islands.push(ring),
+                None => stats.inverted += 1,
             }
         }
+        islands
+    }
+
+    /// Rides the ring to the first side that properly crosses a side ahead of it, and splits the loop ahead off
+    /// there; None if the ring doesn't cross itself.
+    fn split_at_first_crossing(&mut self, stats: &mut ShrinkStats) -> Option<Polygon> {
+        let mut v = self.first()?;
+        for _ in 0..v.ring_len() {
+            if let Some((w, x)) = v.first_crossing_ahead(stats) {
+                return Some(v.split_off(w, x));
+            }
+            v.next();
+        }
+        None
     }
 }
 
@@ -110,34 +131,5 @@ impl Cursor<'_> {
             }
         }
         None
-    }
-
-    /// This vertex's side out crosses w's at x, closing two loops: ahead (x, then this vertex's next … w) and behind
-    /// (x, then w's next … this vertex). Makes a vertex at x and deletes the inverted loop back to it (both
-    /// positive: a pinch, the smaller goes). The cursor ends on a vertex still in the ring, before x.
-    fn cut_loop(&mut self, w: u32, x: DVec2, stats: &mut ShrinkStats) {
-        let here = self.index();
-        let ahead = geom::signed_area(std::iter::once(x).chain(self.positions_ahead(w)));
-        self.jump(w);
-        let behind = geom::signed_area(std::iter::once(x).chain(self.positions_ahead(here)));
-        if ahead > 0.0 && behind > 0.0 {
-            stats.pinches += 1;
-        }
-        stats.crossings += 1;
-        // Make the crossing after the side that stays, then delete from it round to the other side's far end.
-        let keep = if ahead < behind { here } else { w };
-        self.jump(keep);
-        let x = self.insert_after(x, MADE);
-        self.jump(x);
-        self.next();
-        let stop = if keep == here {
-            self.next_after(w)
-        } else {
-            self.next_after(here)
-        };
-        while self.index() != stop {
-            self.remove();
-        }
-        self.jump(keep);
     }
 }

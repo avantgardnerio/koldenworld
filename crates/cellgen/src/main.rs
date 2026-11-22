@@ -127,17 +127,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shrunk: Vec<polygon::Polygon> = polygons
         .iter()
         .filter(|p| p.signed_area() > 0.0)
-        .filter_map(|p| p.shrink(4.0, &metric, &mut stats))
+        .flat_map(|p| p.shrink(4.0, &metric, &mut stats))
         .collect();
     let area = |ps: &mut dyn Iterator<Item = &polygon::Polygon>| -> f64 {
         ps.map(|p| p.signed_area().max(0.0)).sum::<f64>() * m2_per_st2 / 1e6
     };
     println!(
-        "shrunk by 4 m: {} blocks left of {}; {stats:?}; block area {:.3} km² → {:.3} km²",
+        "shrunk by 4 m: {} islands from {} blocks; {stats:?}; block area {:.3} km² → {:.3} km²",
         shrunk.len(),
         blocks.len(),
         area(&mut polygons.iter()),
         area(&mut shrunk.iter())
+    );
+
+    let mut sizes: Vec<f64> = shrunk
+        .iter()
+        .map(|p| p.signed_area() * m2_per_st2)
+        .collect();
+    sizes.sort_by(f64::total_cmp);
+    println!(
+        "smallest islands: {:?} m²",
+        sizes
+            .iter()
+            .take(5)
+            .map(|a| format!("{a:.2e}"))
+            .collect::<Vec<_>>()
     );
 
     let path = "target/five-points.png";

@@ -118,11 +118,6 @@ impl Polygon {
 }
 
 impl Cursor<'_> {
-    /// The vertex's index: stable until it's removed, for jump.
-    pub fn index(&self) -> u32 {
-        self.at
-    }
-
     /// The ring's vertex count.
     pub fn ring_len(&self) -> usize {
         self.poly.len
@@ -172,35 +167,30 @@ impl Cursor<'_> {
         p.run(start, count).map(|w| (w, self.side_from(w)))
     }
 
-    /// Positions from this vertex's next, through `to`, in ring order.
-    pub fn positions_ahead(&self, to: u32) -> impl Iterator<Item = DVec2> + '_ {
+    /// Splits the ring where this vertex's side out crosses w's side out, at x, into its two loops. The loop ahead
+    /// (x, then this vertex's next … w) comes back as a new polygon; the loop behind (x, then w's next … this vertex)
+    /// stays, with x made after this vertex. The cursor stays here.
+    pub fn split_off(&mut self, w: u32, x: DVec2) -> Polygon {
         let p = &*self.poly;
-        let mut at = p.next[self.at as usize];
-        let mut done = false;
-        std::iter::from_fn(move || {
-            if done {
-                return None;
-            }
-            done = at == to;
-            let pos = p.pos[at as usize];
-            at = p.next[at as usize];
-            Some(pos)
-        })
-    }
-
-    /// The index of the vertex after `v` (for marking where a run ends before cutting it).
-    pub fn next_after(&self, v: u32) -> u32 {
-        self.poly.next[v as usize]
+        let wn = p.next[w as usize];
+        let ahead: Vec<(DVec2, u32)> = p
+            .run(p.next[self.at as usize], usize::MAX)
+            .take_while(|&v| v != wn)
+            .map(|v| (p.pos[v as usize], p.source[v as usize]))
+            .collect();
+        let here = self.at;
+        let made = self.insert_after(x, MADE);
+        self.at = self.poly.next[made as usize];
+        while self.at != wn {
+            self.remove();
+        }
+        self.at = here;
+        Polygon::from_points(std::iter::once((x, MADE)).chain(ahead))
     }
 
     /// Move to the next vertex (after the last comes the first).
     pub fn next(&mut self) {
         self.at = self.poly.next[self.at as usize];
-    }
-
-    /// Move to a vertex by index (still in the ring).
-    pub fn jump(&mut self, at: u32) {
-        self.at = at;
     }
 
     /// Insert a vertex after this one; the cursor stays here. Returns the new vertex's index.
