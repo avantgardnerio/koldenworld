@@ -17,7 +17,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, streetsTriangles, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, enuUnprojection, streetSigns, streetsTriangles, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
@@ -28,6 +28,7 @@ import { createCarModels, createCarRenderer, type CarModels, type CarRenderer } 
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
+import { createSignLayer, type SignLayer } from "./sign-layer.ts";
 import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
 import { createTerrainLayer, type TerrainLayer } from "./terrain-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
@@ -131,6 +132,7 @@ interface CellGpu {
   traffic?: TrafficCell;  // this cell's roads in the traffic sim
   graph?: FlatLayer;
   buildings?: SolidLayer;
+  signs?: SignLayer;
   counts: { nodes: number; edges: number; surfaceTriangles: number; buildings: number; buildingTriangles: number };
 }
 
@@ -204,6 +206,11 @@ async function start(): Promise<void> {
       traffic: c.graph.edges.count === 0 ? undefined
         : traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model),
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB),
+      // Street name signs at the intersections this cell owns.
+      signs: createSignLayer(gl!, streetSigns(c.graph, (x, y) => {
+        const [lon, lat] = enuUnprojection(frame)(x, y);
+        return cellFromLatLon(lat, lon, CELL_LEVEL) === cell;
+      })),
       counts: {
         nodes: c.graph.nodes.count, edges: c.graph.edges.count, surfaceTriangles: surface.indices.length / 3,
         buildings: c.buildings.count, buildingTriangles: tris.indices.length / 3,
@@ -215,7 +222,7 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 8,
     dispose: (g) => {
-      [g.ground, g.water, g.aeroways, g.streets, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose());
+      [g.ground, g.water, g.aeroways, g.streets, g.roads, g.graph, g.buildings, g.signs].forEach((l) => l?.dispose());
       if (g.traffic) traffic.remove(g.traffic);
     },
     onChange: () => {
@@ -338,6 +345,7 @@ async function start(): Promise<void> {
     for (const g of visible) g.streets?.draw(f, g.model);
     for (const g of visible) g.roads?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
+    for (const g of visible) g.signs?.draw(f, g.model, SUN);
     let carTriangles = 0;
     if (carRenderer && showCars) {
       // Horizontal distance to the cell's anchor (which sits at the ellipsoid, not at the ground or the camera).
