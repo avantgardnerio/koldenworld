@@ -55,7 +55,7 @@ pub fn draw_png(
             continue;
         }
         paint.set_color_rgba8(pale(f, 0), pale(f, 1), pale(f, 2), 255);
-        if let Some(p) = path_of(&mut poly.positions(), true) {
+        if let Some(p) = path_of(&mut poly.positions().map(|p| p.to_array()), true) {
             pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, identity, None);
         }
     }

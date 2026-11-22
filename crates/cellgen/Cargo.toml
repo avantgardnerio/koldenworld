@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+glam = "0.34.3"
 postgres = "0.19.14"
 robust = "1.2.0"
 tiny-skia = "0.12.0"

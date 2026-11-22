@@ -2,6 +2,9 @@
 //! is its largest axis, (u, v) in [-1, 1] is where it meets that face (gnomonic), and (s, t) in [0, 1] stretches
 //! (u, v) quadratically to even out cell sizes. Lat/lon are taken as spherical coordinates, as S2 does.
 
+use crate::geom::Metric;
+use glam::{DMat2, DVec2};
+
 /// Level of our cells: 2^13 cells across each cube face, about 1.1 km.
 pub const CELL_LEVEL: u32 = 13;
 const DEG: f64 = std::f64::consts::PI / 180.0;
@@ -33,7 +36,7 @@ pub fn cell_square([s, t]: [f64; 2], level: u32) -> [f64; 4] {
 /// Metres per unit of s and t across a cell, east and north: the columns of the 2×2 matrix taking a small (s, t)
 /// step to metres on the ground, measured across the cell (central differences between its edges' midpoints).
 /// Over a level-13 cell the true local scale varies by about 1 part in 10,000, so one matrix serves the cell.
-pub fn cell_metric(face: u32, [s0, t0, s1, t1]: [f64; 4]) -> [[f64; 2]; 2] {
+pub fn cell_metric(face: u32, [s0, t0, s1, t1]: [f64; 4]) -> Metric {
     let c = [(s0 + s1) / 2.0, (t0 + t1) / 2.0];
     let (lat0, lon0) = st_to_lat_lon(face, c);
     // WGS84 radii of curvature at the cell's latitude: meridian (north) and prime vertical (east).
@@ -50,10 +53,11 @@ pub fn cell_metric(face: u32, [s0, t0, s1, t1]: [f64; 4]) -> [[f64; 2]; 2] {
     let (e0, e1) = (metres([s0, c[1]]), metres([s1, c[1]]));
     let (n0, n1) = (metres([c[0], t0]), metres([c[0], t1]));
     let (ds, dt) = (s1 - s0, t1 - t0);
-    [
-        [(e1[0] - e0[0]) / ds, (e1[1] - e0[1]) / ds],
-        [(n1[0] - n0[0]) / dt, (n1[1] - n0[1]) / dt],
-    ]
+    let to_m = DMat2::from_cols(
+        DVec2::new(e1[0] - e0[0], e1[1] - e0[1]) / ds,
+        DVec2::new(n1[0] - n0[0], n1[1] - n0[1]) / dt,
+    );
+    Metric::new(DVec2::from_array(c), to_m)
 }
 
 /// A lon/lat box (west, south, east, north) around an (s, t) rectangle on a face: its corners, padded by `pad`

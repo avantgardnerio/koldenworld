@@ -8,6 +8,7 @@
 use crate::graph::RoadGraph;
 use crate::polygon::Polygon;
 use crate::ways::RoadWays;
+use glam::DVec2;
 
 /// Faces as indices: face f is the darts face_darts[face_start[f]..face_start[f + 1]], in order (CSR).
 #[derive(Default)]
@@ -38,7 +39,11 @@ impl Faces {
                 points.extend((first + 1..=last).rev());
             }
         }
-        Polygon::from_points(points.into_iter().map(|k| (ways.st[k as usize], k)))
+        Polygon::from_points(
+            points
+                .into_iter()
+                .map(|k| (DVec2::from_array(ways.st[k as usize]), k)),
+        )
     }
 }
 

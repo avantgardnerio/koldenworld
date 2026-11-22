@@ -1,5 +1,6 @@
 mod draw;
 mod faces;
+mod geom;
 mod graph;
 mod polygon;
 mod s2;
@@ -87,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|f| faces.polygon(f, &graph, &ways))
         .collect();
     let metric = s2::cell_metric(face, cell);
-    let m2_per_st2 = (metric[0][0] * metric[1][1] - metric[1][0] * metric[0][1]).abs();
+    let m2_per_st2 = metric.area_scale();
     let mut blocks: Vec<f64> = Vec::new();
     let (mut outsides, mut flat) = (0, 0);
     for p in &polygons {
@@ -126,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shrunk: Vec<polygon::Polygon> = polygons
         .iter()
         .filter(|p| p.signed_area() > 0.0)
-        .filter_map(|p| p.shrink(4.0, metric, &mut stats))
+        .filter_map(|p| p.shrink(4.0, &metric, &mut stats))
         .collect();
     let area = |ps: &mut dyn Iterator<Item = &polygon::Polygon>| -> f64 {
         ps.map(|p| p.signed_area().max(0.0)).sum::<f64>() * m2_per_st2 / 1e6
