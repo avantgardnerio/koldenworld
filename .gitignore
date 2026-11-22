@@ -2,4 +2,6 @@ node_modules/
 # downloaded and generated data (OSM extracts, census files); re-fetch with `npm run cli -- fetch-osm`
 data/
 *.tsbuildinfo
+# Rust build output
+target/
 .env

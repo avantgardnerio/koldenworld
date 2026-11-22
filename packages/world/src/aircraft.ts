@@ -378,7 +378,7 @@ export interface AircraftReport {
 
 const FT = 0.3048, KT = 1852 / 3600, FPM = FT / 60;
 
-/** readsb-style aircraft JSON (adsb.lol, airplanes.live, a local readsb) → reports; skips what isn't a positioned aircraft. */
+/** readsb-style aircraft JSON (adsb.fi, adsb.lol, airplanes.live, a local readsb) → reports; skips what isn't a positioned aircraft. */
 export function parseAircraft(json: { ac?: Record<string, unknown>[] }): AircraftReport[] {
   const ac = json.ac ?? [];
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);

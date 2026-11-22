@@ -1,13 +1,16 @@
 // Live aircraft for the viewer (decision 31): GET /aircraft?lat=&lon=&nm=
-// answers with readsb-style JSON from adsb.lol (open data, ODbL; no key
-// today). The source has a daily quota (500 a day, HTTP 429 past it), so it
-// sees one request per gap however many tabs ask or wherever they are: at
-// least MIN_GAP_MS, widened to spread the quota it reports is left over the
-// rest of its window, and nothing at all while it has asked us to back off.
-// In between, a request gets the freshest answer for a nearby circle, up to
-// STALE_MS (or two gaps) old; the viewer extrapolates positions anyway. The viewer parses it (parseAircraft in @game/world).
+// answers with readsb-style JSON from adsb.fi's open data API (no key;
+// personal, non-commercial use, credited with a link in the viewer). Sources
+// rate-limit (adsb.fi: 1 request/s, errors count; adsb.lol: 500 a day), so
+// the source sees one request per gap however many tabs ask or wherever they
+// are: at least MIN_GAP_MS, widened to spread any quota it reports is left
+// over the rest of its window, and nothing at all while it has asked us to
+// back off. In between, a request gets the freshest answer for a nearby
+// circle, up to STALE_MS (or two gaps) old; the viewer extrapolates positions
+// anyway. The viewer parses it (parseAircraft in @game/world).
 
-const SOURCE = process.env.AIRCRAFT_SOURCE ?? "https://api.adsb.lol/v2/point";
+/** The source's circle query; AIRCRAFT_SOURCE overrides it (e.g. https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}). */
+const SOURCE = process.env.AIRCRAFT_SOURCE ?? "https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{nm}";
 const AIRCRAFT_TTL_MS = 5000;     // an answer this fresh is reused as is
 const MIN_GAP_MS = 5000;          // between any two requests to the source
 const STALE_MS = 120_000;         // the oldest answer served while waiting or blocked
@@ -48,8 +51,9 @@ export class AircraftService {
 
   private async fetch(key: string, lat: number, lon: number, r: number): Promise<string> {
     try {
-      const res = await fetch(`${SOURCE}/${lat}/${lon}/${r}`, { headers: { "User-Agent": "game-viewer (personal project)" } });
-      // adsb.lol's limit is a daily quota (x-ratelimit-limit: 500;w=86400): spread what is left over the window.
+      const url = SOURCE.replace("{lat}", String(lat)).replace("{lon}", String(lon)).replace("{nm}", String(r));
+      const res = await fetch(url, { headers: { "User-Agent": "game-viewer (personal project)" } });
+      // A daily quota (adsb.lol's x-ratelimit-limit: 500;w=86400): spread what is left over the window.
       const remaining = Number(res.headers.get("x-ratelimit-remaining")), reset = Number(res.headers.get("x-ratelimit-reset"));
       if (res.headers.has("x-ratelimit-reset") && Number.isFinite(remaining) && reset > 0) {
         this.gap = Math.max(MIN_GAP_MS, reset * 1000 / Math.max(1, remaining));
