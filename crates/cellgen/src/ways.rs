@@ -119,6 +119,56 @@ pub fn load_road_ways(
     Ok(ways)
 }
 
+impl RoadWays {
+    /// The ways with only the points marked in `keep` (one per point; keep each way's ends).
+    pub fn keep_points(&self, keep: &[bool]) -> RoadWays {
+        let mut out = self.keep(|_| true);
+        let has_st = !self.st.is_empty();
+        out.node_id.clear();
+        out.lonlat.clear();
+        out.st.clear();
+        out.node_start = vec![0];
+        for w in 0..self.osm_id.len() {
+            for i in
+                (self.node_start[w] as usize..self.node_start[w + 1] as usize).filter(|&i| keep[i])
+            {
+                out.node_id.push(self.node_id[i]);
+                out.lonlat.push(self.lonlat[i]);
+                if has_st {
+                    out.st.push(self.st[i]);
+                }
+            }
+            out.node_start.push(out.node_id.len() as u32);
+        }
+        out
+    }
+
+    /// The ways for which `keep(way)` holds, in order (names kept whole).
+    pub fn keep(&self, keep: impl Fn(usize) -> bool) -> RoadWays {
+        let mut out = RoadWays {
+            node_start: vec![0],
+            names: self.names.clone(),
+            ..Default::default()
+        };
+        for w in (0..self.osm_id.len()).filter(|&w| keep(w)) {
+            let nodes = self.node_start[w] as usize..self.node_start[w + 1] as usize;
+            out.osm_id.push(self.osm_id[w]);
+            out.class.push(self.class[w]);
+            out.name.push(self.name[w]);
+            out.node_id.extend_from_slice(&self.node_id[nodes.clone()]);
+            out.lonlat.extend_from_slice(&self.lonlat[nodes.clone()]);
+            if !self.st.is_empty() {
+                out.st.extend_from_slice(&self.st[nodes]);
+            }
+            out.node_start.push(out.node_id.len() as u32);
+            out.lanes_fwd.push(self.lanes_fwd[w]);
+            out.lanes_back.push(self.lanes_back[w]);
+            out.sidewalks.push(self.sidewalks[w]);
+        }
+        out
+    }
+}
+
 /// Road ways from JSON: an array of the TS RoadWayInput (osmWayId, nodeIds, points as [lon, lat], class, name,
 /// lanesFwd, lanesBack, speedLimitMps, and optionally sidewalks: bits, default none). For fixtures and tests.
 pub fn from_json(text: &str) -> Result<RoadWays, Box<dyn std::error::Error>> {

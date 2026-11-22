@@ -1,5 +1,6 @@
 mod cell;
 mod clip;
+mod crossings;
 mod draw;
 mod elevation;
 mod faces;
@@ -12,6 +13,7 @@ mod mesh;
 mod polygon;
 mod s2;
 mod serve;
+mod simplify;
 mod terrain;
 mod water;
 mod ways;
@@ -21,6 +23,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage:
   cellgen cell <token | lat,lon>... [--pictures] [--ways <file.json> [--height <m>]] [--out <dir>]
+               [--min-class <class>] [--simplify <m>] [--no-markings] [--no-sidewalks]
       build cells: <out>/<token>/ (default out: data/rust-cells), pictures in target/. With --ways, from those ways
       (JSON, as the TS RoadWayInput) instead of the database: no water, terrain flat at --height (default 0)
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
@@ -55,6 +58,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|f| ways::from_json(&std::fs::read_to_string(f)?))
                 .transpose()?;
             let height: f64 = value("--height")?.map_or(Ok(0.0), |h| h.parse())?;
+            let options = cell::Options {
+                min_class: value("--min-class")?
+                    .map(|c| {
+                        ways::ROAD_CLASSES
+                            .iter()
+                            .position(|k| k == c)
+                            .map(|i| i as u8)
+                            .ok_or_else(|| format!("unknown road class {c}"))
+                    })
+                    .transpose()?,
+                simplify: value("--simplify")?.map_or(Ok(0.0), |m| m.parse())?,
+                markings: flag("--no-markings").is_none(),
+                sidewalks: flag("--no-sidewalks").is_none(),
+            };
             let (mut client, data) = match fixture {
                 Some(_) => (None, None),
                 None => (
@@ -73,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (None, Some(db), Some(data)) => cell::Source::Postgres { db, data },
                     _ => unreachable!(),
                 };
-                let built = cell::build(source, c, pictures.as_deref())?;
+                let built = cell::build(source, c, &options, pictures.as_deref())?;
                 let dir = out.join(&c.token);
                 std::fs::create_dir_all(&dir)?;
                 std::fs::write(dir.join("ground.arrow"), &built.ground)?;

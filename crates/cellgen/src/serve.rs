@@ -106,6 +106,7 @@ fn build(app: &App, c: &Cell) -> Result<(), Box<dyn std::error::Error + Send + S
             data: &app.data,
         },
         c,
+        &cell::Options::default(),
         None,
     )
     .map_err(|e| e.to_string())?;

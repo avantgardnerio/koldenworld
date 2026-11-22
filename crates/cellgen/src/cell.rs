@@ -10,8 +10,8 @@
 
 use crate::ways::RoadWays;
 use crate::{
-    clip, draw, elevation, faces, geodesy, geom, graph, ground_arrow, markings, mesh, polygon, s2,
-    terrain, water, ways, widths,
+    clip, crossings, draw, elevation, faces, geodesy, geom, graph, ground_arrow, markings, mesh,
+    polygon, s2, simplify, terrain, water, ways, widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
 use glam::DVec2;
@@ -42,6 +42,27 @@ pub struct Cell {
     pub token: String,
 }
 
+/// What a build draws: everything (the default), or less, for coarser tiers.
+pub struct Options {
+    /// Roads of this class and above (an index into ROAD_CLASSES, most important first); None: every road.
+    pub min_class: Option<u8>,
+    /// Road lines thinned to within this many metres before building (Douglas–Peucker); 0: every point.
+    pub simplify: f64,
+    pub markings: bool,
+    pub sidewalks: bool,
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            min_class: None,
+            simplify: 0.0,
+            markings: true,
+            sidewalks: true,
+        }
+    }
+}
+
 /// A built cell: its ground tables as Arrow bytes, and a line per stage.
 pub struct Built {
     pub ground: Vec<u8>,
@@ -61,15 +82,16 @@ impl Cell {
         }
     }
 
-    /// A level-13 cell by token, or None if it isn't one.
+    /// A cell by token, at any level, or None if it isn't one.
     pub fn from_token(token: &str) -> Option<Cell> {
         let (face, square) = s2::cell_from_token(token)?;
-        let level = s2::cell_id(
+        let level = (-(square[2] - square[0]).log2()).round() as u32;
+        let id = s2::cell_id(
             face,
             [(square[0] + square[2]) / 2.0, (square[1] + square[3]) / 2.0],
-            s2::CELL_LEVEL,
+            level,
         );
-        (s2::token(level) == token).then(|| Cell {
+        (s2::token(id) == token).then(|| Cell {
             face,
             square,
             token: token.to_string(),
@@ -119,6 +141,7 @@ impl Heights {
 pub fn build(
     source: Source,
     c: &Cell,
+    options: &Options,
     pictures: Option<&Path>,
 ) -> Result<Built, Box<dyn std::error::Error>> {
     let (face, cell) = (c.face, c.square);
@@ -141,29 +164,44 @@ pub fn build(
             (ways.clone(), water::Water::empty(), Heights::Flat(height))
         }
     };
+    if let Some(min) = options.min_class {
+        ways = ways.keep(|w| ways.class[w] <= min);
+    }
+    if !options.sidewalks {
+        ways.sidewalks.fill(0);
+    }
     ways.st = ways
         .lonlat
         .iter()
         .map(|&[lon, lat]| s2::face_st(face, lat, lon))
         .collect();
+    let metric = s2::cell_metric(face, cell);
+    let points = ways.node_id.len();
+    if options.simplify > 0.0 {
+        ways = simplify::simplify(&ways, &metric, options.simplify);
+    }
+    let (ways, crossed) = crossings::split(&ways);
     let mut graph = graph::build_graph(&ways);
     let angles = graph::sort_ends_by_angle(&mut graph, &ways);
     let faces = faces::trace_faces(&graph);
     let polygons: Vec<polygon::Polygon> = (0..faces.count())
         .map(|f| faces.polygon(f, &graph, &ways))
         .collect();
-    let metric = s2::cell_metric(face, cell);
     // Euler's formula, V − E + F = 2 per connected piece, holds where the roads are a planar map (a road over another
     // with no shared node, a bridge, breaks it; harmless in 2D).
     let euler = graph.node_count() as i64 - graph.edge_count() as i64 + faces.count() as i64;
     log.push(format!(
-        "graph in {:.0?}: {} ways, {} nodes, {} edges, {} faces; Euler {euler} for {} pieces; {angles:?}",
+        "graph in {:.0?}: {} ways, {} nodes, {} edges, {} faces; Euler {euler} for {} pieces; {angles:?}; \
+         {points} points, {} after simplifying; {} crossings split, {} touching left",
         started.elapsed(),
         ways.osm_id.len(),
         graph.node_count(),
         graph.edge_count(),
         faces.count(),
-        graph.component_count()
+        graph.component_count(),
+        ways.node_id.len() - crossed.split * 2,
+        crossed.split,
+        crossed.touching
     ));
 
     // 2. Regions: every block, with the road pieces inside it (their outside faces) as holes, and the cell around the
@@ -249,23 +287,28 @@ pub fn build(
     let half_width: Vec<f64> = (0..graph.edge_count())
         .map(|e| dart_widths[2 * e][0].max(dart_widths[2 * e + 1][0]))
         .collect();
-    let zones = markings::junction_zones(&graph, &ways, &metric, &half_width, near);
-    let lines = markings::lines(&graph, &ways, &metric, near);
-    let markable = difference_64(&pavement, &zones, nonzero);
-    let yellow = intersect_64(
-        &union_subjects_64(&lines.yellow, nonzero),
-        &markable,
-        nonzero,
-    );
-    let white = difference_64(
-        &intersect_64(
-            &union_subjects_64(&lines.white, nonzero),
+    let (yellow, white) = if options.markings {
+        let zones = markings::junction_zones(&graph, &ways, &metric, &half_width, near);
+        let lines = markings::lines(&graph, &ways, &metric, near);
+        let markable = difference_64(&pavement, &zones, nonzero);
+        let yellow = intersect_64(
+            &union_subjects_64(&lines.yellow, nonzero),
             &markable,
             nonzero,
-        ),
-        &yellow,
-        nonzero,
-    );
+        );
+        let white = difference_64(
+            &intersect_64(
+                &union_subjects_64(&lines.white, nonzero),
+                &markable,
+                nonzero,
+            ),
+            &yellow,
+            nonzero,
+        );
+        (yellow, white)
+    } else {
+        (Paths64::new(), Paths64::new())
+    };
     let asphalt = difference_64(
         &pavement,
         &union_subjects_64(&[yellow.clone(), white.clone()].concat(), nonzero),

@@ -8,6 +8,7 @@
 //! still to be cut to the pavement.
 
 use crate::clip::{UNITS, point};
+use crate::crossings;
 use crate::geom::Metric;
 use crate::graph::RoadGraph;
 use crate::polygon::MADE;
@@ -105,7 +106,11 @@ pub fn junction_zones(
     near: impl Fn(DVec2) -> bool,
 ) -> Paths64 {
     let mut zones = Paths64::new();
-    for n in (0..g.node_count()).filter(|&n| g.degree(n) >= 3) {
+    // Junctions: three or more ends, and a node OSM has (a road crossing over another meets it at none).
+    let junction = |n: usize| {
+        g.degree(n) >= 3 && !crossings::is_crossing(ways.node_id[g.node_point[n] as usize])
+    };
+    for n in (0..g.node_count()).filter(|&n| junction(n)) {
         if !near(metric.metres(DVec2::from_array(ways.st[g.node_point[n] as usize]))) {
             continue;
         }
