@@ -1,9 +1,9 @@
 // Viewer entry: stream the S2 cells around the camera and fly over them.
 //
-// URL: /?[graph=1][&radius=<m>]#lat,lon,alt,yaw,pitch
+// URL: /?[graph=1][&radius=<m>][&planes=0]#lat,lon,alt,yaw,pitch
 //   hash: the camera (without it, a default view of Denver); graph=1: the road
 //   graph overlay (toggle with G); radius: fixed load radius instead of the
-//   horizon. The URL describes the whole view.
+//   horizon; planes=0: no live air traffic. The URL describes the whole view.
 //
 // Cells come from /cells/<token>/<table>.arrow (the cell server, through the
 // dev server's proxy). Every cell within the horizon is loaded, nearest first,
@@ -17,11 +17,12 @@
 // what was drawn without decoding screenshots.
 
 import {
-  buildingMesh, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, horizonDistance, roadLineMesh, roadSurfaceMesh, terrainHeightAt, terrainMesh,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, speed, viewProjection } from "./camera.ts";
+import { AirTraffic, emptyAircraftInstances } from "./air-traffic.ts";
 import { createCarModels, createCarRenderer, type CarModels, type CarRenderer } from "./car-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
@@ -32,7 +33,7 @@ import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
-  BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, MARKING_FADE, MARKINGS, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
+  AEROWAY, BUILDING_COLORS_RGB, CLASS_COLORS_RGB, fogRange, MARKING_FADE, MARKINGS, SKY, SUN, SURFACE_COLORS, TERRAIN_STYLE, WATER,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -49,6 +50,7 @@ export interface ViewerStatus {
   cars: number;           // cars in the simulation
   carTriangles: number;   // drawn last frame
   simTime: number;        // s of traffic simulated
+  aircraft: number;       // live aircraft known (drawn wherever they are)
   graphOverlay: boolean;
   frames: number;
   /** Render now and read the RGB at a CSS pixel (origin top left). */
@@ -74,6 +76,8 @@ const TERRAIN_LOD_DISTANCES = [4000, 8000, 16_000];
 const ROAD_BIAS = 0.3;
 /** Water a little less than roads, so a road over a stream wins. */
 const WATER_BIAS = 0.2;
+/** Airport surfaces between water and roads: a service road across an apron wins. */
+const AEROWAY_BIAS = 0.25;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
 const CAR_DISTANCE = 1500;
 
@@ -82,9 +86,10 @@ const fixedRadius = params.has("radius") ? Number(params.get("radius")) : undefi
 const showCars = params.get("cars") !== "0";
 /** traffic=0: cars stand where they start (tests that look at exact pixels). */
 const moving = showCars && params.get("traffic") !== "0";
+const showPlanes = params.get("planes") !== "0";
 const status: ViewerStatus = (window.viewer = {
   state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0, drawn: 0 }, radius: 0,
-  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0, simTime: 0,
+  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0, simTime: 0, aircraft: 0,
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
 
@@ -119,6 +124,7 @@ interface CellGpu {
   lods: { start: number; count: number }[];
   roads?: FlatLayer;
   water?: FlatLayer;
+  aeroways?: FlatLayer;
   lines?: FlatMesh;     // the graph overlay's mesh, uploaded on first use
   traffic?: TrafficCell;  // this cell's roads in the traffic sim
   graph?: FlatLayer;
@@ -182,6 +188,10 @@ async function start(): Promise<void> {
         positions: c.water.positions, dims: 3, material: c.water.material,
         indices: Uint32Array.from({ length: c.water.material.length }, (_, i) => i),
       }, { mode: gl!.TRIANGLES, colors: WATER, bias: WATER_BIAS }),
+      aeroways: c.aeroways.material.length === 0 ? undefined : createFlatLayer(gl!, {
+        positions: c.aeroways.positions, dims: 3, material: c.aeroways.material,
+        indices: Uint32Array.from({ length: c.aeroways.material.length }, (_, i) => i),
+      }, { mode: gl!.TRIANGLES, colors: AEROWAY, bias: AEROWAY_BIAS }),
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       traffic: c.graph.edges.count === 0 ? undefined
         : traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model),
@@ -197,7 +207,7 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 8,
     dispose: (g) => {
-      [g.ground, g.water, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose());
+      [g.ground, g.water, g.aeroways, g.roads, g.graph, g.buildings].forEach((l) => l?.dispose());
       if (g.traffic) traffic.remove(g.traffic);
     },
     onChange: () => {
@@ -218,6 +228,17 @@ async function start(): Promise<void> {
     if (g) lastGround = terrainHeightAt(cell, g.terrain, lat, lon);
     return lastGround;
   };
+
+  // Live aircraft: drawn on the loaded terrain when taxiing; elsewhere on the ground under the camera.
+  const air = new AirTraffic((lat, lon) => {
+    const cell = cellFromLatLon(lat, lon, CELL_LEVEL), g = streamer.get(cell);
+    return g ? terrainHeightAt(cell, g.terrain, lat, lon) : lastGround;
+  });
+  const planeInstances = emptyAircraftInstances();
+  const planeRenderer = showPlanes
+    ? createCarRenderer(gl, createCarModels(gl, aircraftMeshes(), new ImageData(new Uint8ClampedArray(AIRCRAFT_PALETTE), 16, 1)))
+    : undefined;
+  air.onUpdate = () => wake();
 
   // --- which cells: refreshed when the camera enters another cell or the radius steps ---
   let refreshedCell: CellId | null = null;
@@ -303,6 +324,7 @@ async function start(): Promise<void> {
       g.ground.draw(f, g.model, SUN, g.lods[lod]);
     }
     for (const g of visible) g.water?.draw(f, g.model);
+    for (const g of visible) g.aeroways?.draw(f, g.model);
     for (const g of visible) g.roads?.draw(f, g.model);
     for (const g of visible) g.buildings?.draw(f, g.model, SUN);
     let carTriangles = 0;
@@ -313,8 +335,14 @@ async function start(): Promise<void> {
       traffic.instances(carInstances);
       carTriangles = carRenderer.draw(f, SUN, ROAD_BIAS, carInstances);
     }
+    if (planeRenderer) {
+      const now = performance.now() / 1000;
+      air.refresh(camera.lat, camera.lon, now);
+      air.instances(vf, now, planeInstances);
+      planeRenderer.draw(f, SUN, ROAD_BIAS, planeInstances);
+    }
     const cars = traffic.cars.count;
-    Object.assign(status, { cars, carTriangles, simTime: traffic.simTime });
+    Object.assign(status, { cars, carTriangles, simTime: traffic.simTime, aircraft: air.count });
     if (status.graphOverlay) {
       for (const g of visible) {
         if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, bias: 1 });
@@ -328,10 +356,10 @@ async function start(): Promise<void> {
     hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
       `(${ground.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing}` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
-      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars (${(carTriangles / 1e6).toFixed(1)}M tris) · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
+      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars (${(carTriangles / 1e6).toFixed(1)}M tris) · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU`;
   };
 
-  // --- frame loop: running while there is input, or while traffic moves ---
+  // --- frame loop: running while there is input, or while traffic or aircraft move ---
   let running = false;
   let steering = false;  // input this frame
   let last = 0;
@@ -347,7 +375,7 @@ async function start(): Promise<void> {
       // Input just stopped: the pose goes to the URL.
       if (steering) history.replaceState(null, "", formatGlobeHash(camera));
       steering = false;
-      if (!(moving && carRenderer)) {
+      if (!(moving && carRenderer) && air.count === 0) {
         running = false;
         return;
       }

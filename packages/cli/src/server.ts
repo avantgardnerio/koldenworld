@@ -1,16 +1,32 @@
 // The cell server: GET /cells/<token>/<table>.arrow, generated on a miss
-// (see cells.ts). The viewer's dev server proxies /cells here.
+// (see cells.ts), and GET /aircraft?lat=&lon=&nm= for live air traffic (see
+// aircraft.ts). The viewer's dev server proxies both here.
 
 import { createServer } from "node:http";
 import { CELL_LEVEL, CELL_TABLES, cellFromToken, cellLevel, type CellFiles } from "@game/world";
+import { AircraftService } from "./aircraft.ts";
 import { CellService } from "./cells.ts";
 
 const ROUTE = new RegExp(`^/cells/([0-9a-f]{1,16})/(${CELL_TABLES.join("|")})\\.arrow$`);
 
 export function serve(port: number, log: (msg: string) => void): Promise<void> {
   const cells = new CellService(log);
+  const aircraft = new AircraftService(log);
   const server = createServer((req, res) => {
-    const m = ROUTE.exec(new URL(req.url ?? "/", "http://x").pathname);
+    const url = new URL(req.url ?? "/", "http://x");
+    if (req.method === "GET" && url.pathname === "/aircraft") {
+      const [lat, lon, nm] = ["lat", "lon", "nm"].map((k) => Number(url.searchParams.get(k)));
+      if (![lat, lon, nm].every(Number.isFinite)) {
+        res.writeHead(400).end("lat, lon and nm are required\n");
+        return;
+      }
+      aircraft.around(lat!, lon!, nm!).then(
+        (body) => res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(body),
+        (err: unknown) => res.writeHead(502, { "Content-Type": "text/plain" }).end(`${err instanceof Error ? err.message : String(err)}\n`),
+      );
+      return;
+    }
+    const m = ROUTE.exec(url.pathname);
     if (req.method !== "GET" || !m) {
       res.writeHead(404).end("not found\n");
       return;

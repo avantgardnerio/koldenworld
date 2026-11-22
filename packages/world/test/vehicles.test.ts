@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  buildRoadGraph, edgeArcLengths, enuFrame, enuProjection, enuUnprojection, lanePose, placeVehicles, readGlb, VEHICLE_MODELS,
+  buildRoadGraph, enuFrame, enuProjection, enuUnprojection, laneGeometry, lanePoint, placeVehicles, readGlb, VEHICLE_MODELS,
   VEHICLE_SCALE,
   type RoadWayInput,
 } from "../src/index.ts";
@@ -52,9 +52,9 @@ describe("placeVehicles", () => {
   });
 
   it("puts cars in their lanes, facing their direction (right-hand traffic)", () => {
-    const v = placeVehicles(g, 1), cum = edgeArcLengths(g), pose = new Float32Array(6);
+    const v = placeVehicles(g, 1), lg = laneGeometry(g), pose = new Float32Array(6);
     for (let i = 0; i < v.count; i++) {
-      lanePose(g, cum, v.edge[i]!, v.dir[i]!, v.lane[i]!, v.s[i]!, pose, 0);
+      lanePoint(lg, v.edge[i]!, v.dir[i]!, v.lane[i]!, v.s[i]!, pose);
       const [x, y, , fx, fy] = pose;
       if (Math.abs(y!) < 10) {
         // East-west two-way road along y = 0: eastbound south of the center line, westbound north.
@@ -69,11 +69,11 @@ describe("placeVehicles", () => {
   });
 
   it("measures s from the entry node in the direction of travel", () => {
-    const cum = edgeArcLengths(g), pose = new Float32Array(6);
+    const lg = laneGeometry(g), pose = new Float32Array(6);
     const e = 0;  // 0 → 2000 m east
-    lanePose(g, cum, e, 1, 0, 100, pose, 0);
+    lanePoint(lg, e, 1, 0, 100, pose);
     expect(pose[0]).toBeCloseTo(100, 0);
-    lanePose(g, cum, e, -1, 0, 100, pose, 0);  // westbound: entered at the east end
+    lanePoint(lg, e, -1, 0, 100, pose);  // westbound: entered at the east end
     expect(pose[0]).toBeCloseTo(1900, 0);
   });
 });

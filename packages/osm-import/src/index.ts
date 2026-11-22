@@ -14,3 +14,7 @@ export {
   extractWater, isWaterway, WATERWAY_WIDTH, waterAreaKind,
   type WaterArea, type WaterAreaKind, type Waterway, type WaterStats,
 } from "./water.ts";
+export {
+  AEROWAY_WIDTH, aerowayAreaKind, extractAeroways, isAerowayLine,
+  type AerowayArea, type AerowayKind, type AerowayLine, type AerowayStats,
+} from "./aeroways.ts";

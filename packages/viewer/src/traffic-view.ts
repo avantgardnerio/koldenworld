@@ -10,19 +10,28 @@
 //   that drive into a cell that isn't populated.
 // - The sim runs at a fixed step, so a run depends only on its seed and inputs.
 // - Poses are computed for cars in visible cells and written, already in the
-//   view frame, into one instance array per model.
+//   view frame, into one instance array per model. A car's path runs from
+//   the road it came from through its own to the one it takes next, turning
+//   through the junctions between (decision 30); it stands at its point on
+//   the path, facing from a point half a wheelbase behind to one half a
+//   wheelbase ahead, so it turns smoothly through bends and junctions alike.
+//   Path points on different cells' roads meet in the view frame.
 
-import { createCars, removeCars, Rng, spawnCar, stepTraffic, type Cars, type RoadNet } from "@game/sim";
-import { edgeArcLengths, edgeLanes, lanePose, VEHICLE_MODELS, type RoadGraph, type VehiclePlacements } from "@game/world";
+import { createCars, NONE, removeCars, Rng, spawnCar, stepTraffic, type Cars, type RoadNet } from "@game/sim";
+import {
+  edgeLanes, junctionReach, laneGeometry, lanePoint, turnPoint, VEHICLE_MODELS,
+  type LaneGeometry, type RoadGraph, type VehiclePlacements,
+} from "@game/world";
 import type { CarInstances } from "./car-layer.ts";
 
 const STEP = 1 / 30;     // s
 const MAX_STEPS = 6;     // per frame: a stalled tab doesn't try to catch up
+const HALF_WHEELBASE = 1.35;  // m
 
 export interface TrafficCell {
   slot: number;
   graph: RoadGraph;
-  cum: Float32Array;       // arc length at each point (edgeArcLengths)
+  lanes: LaneGeometry;
   lengths: Float32Array;   // per edge
   placements: VehiclePlacements;
   model: Float32Array;     // the cell's live cell → view transform (owned by the renderer)
@@ -38,7 +47,12 @@ export class TrafficView implements RoadNet {
   private free: number[] = [];
   private nodes = new Map<number, number[]>();  // OSM node id → slot, node, slot, node, …
   private acc = 0;
-  private pose = new Float32Array(6);
+  // Scratch for path points: two lane points (position, direction) and three path points.
+  private a = new Float64Array(6);
+  private b = new Float64Array(6);
+  private rear = new Float64Array(3);
+  private mid = new Float64Array(3);
+  private front = new Float64Array(3);
 
   constructor(seed: number) {
     this.rng = new Rng(seed);
@@ -47,10 +61,10 @@ export class TrafficView implements RoadNet {
   /** Registers a loaded cell's roads. */
   add(graph: RoadGraph, placements: VehiclePlacements, model: Float32Array): TrafficCell {
     const slot = this.free.pop() ?? this.slots.length;
-    const cum = edgeArcLengths(graph);
+    const lanes = laneGeometry(graph);
     const lengths = new Float32Array(graph.edges.count);
-    for (let e = 0; e < graph.edges.count; e++) lengths[e] = cum[graph.edges.pointStart[e + 1]! - 1]!;
-    const tc: TrafficCell = { slot, graph, cum, lengths, placements, model, populated: false, visible: false };
+    for (let e = 0; e < graph.edges.count; e++) lengths[e] = lanes.cum[graph.edges.pointStart[e + 1]! - 1]!;
+    const tc: TrafficCell = { slot, graph, lanes, lengths, placements, model, populated: false, visible: false };
     this.slots[slot] = tc;
     for (let n = 0; n < graph.nodes.count; n++) {
       const id = graph.nodes.osmId[n]!;
@@ -61,12 +75,22 @@ export class TrafficView implements RoadNet {
     return tc;
   }
 
-  /** Unregisters a cell; its cars leave at the next update. */
+  /**
+   * Unregisters a cell. Its cars leave now, before the slot can be reused,
+   * and other cars forget it as the road they came from or take next (so
+   * one that was turning into it leaves at the end of its road).
+   */
   remove(tc: TrafficCell): void {
     for (let n = 0; n < tc.graph.nodes.count; n++) {
       const id = tc.graph.nodes.osmId[n]!, list = this.nodes.get(id)!;
       for (let k = list.length - 2; k >= 0; k -= 2) if (list[k] === tc.slot) list.splice(k, 2);
       if (list.length === 0) this.nodes.delete(id);
+    }
+    removeCars(this.cars, (cell) => cell !== tc.slot);
+    const { pcell, ncell } = this.cars.c;
+    for (let i = 0; i < this.cars.count; i++) {
+      if (pcell[i] === tc.slot) pcell[i] = NONE;
+      if (ncell[i] === tc.slot) ncell[i] = NONE;
     }
     tc.populated = false;
     this.slots[tc.slot] = undefined;
@@ -119,7 +143,7 @@ export class TrafficView implements RoadNet {
         tc.populated = true;
         const p = tc.placements;
         for (let i = 0; i < p.count; i++) {
-          spawnCar(this.cars, this, { model: p.model[i]!, cell: tc.slot, edge: p.edge[i]!, dir: p.dir[i]!, lane: p.lane[i]!, s: p.s[i]! });
+          spawnCar(this.cars, this, { model: p.model[i]!, cell: tc.slot, edge: p.edge[i]!, dir: p.dir[i]!, lane: p.lane[i]!, s: p.s[i]! }, this.rng);
         }
       } else if (tc.populated && d > far) tc.populated = false;
     }
@@ -136,13 +160,14 @@ export class TrafficView implements RoadNet {
   /** Writes the poses of cars in visible cells into per-model instance arrays, in the view frame. */
   instances(out: CarInstances): void {
     out.count.fill(0);
-    const { model, cell, edge, dir, lane, s } = this.cars.c;
-    const pose = this.pose;
+    const { model, cell } = this.cars.c;
+    const { rear, mid, front } = this;
     for (let i = 0; i < this.cars.count; i++) {
-      const tc = this.slots[cell[i]!];
-      if (!tc?.visible) continue;
-      lanePose(tc.graph, tc.cum, edge[i]!, dir[i]!, lane[i]!, s[i]!, pose, 0);
-      const m = tc.model, k = model[i]!;
+      if (!this.slots[cell[i]!]?.visible) continue;
+      this.pathPoint(i, -HALF_WHEELBASE, rear);
+      this.pathPoint(i, 0, mid);
+      this.pathPoint(i, HALF_WHEELBASE, front);
+      const k = model[i]!;
       let data = out.data[k]!;
       const o = 6 * out.count[k]!++;
       if (o + 6 > data.length) {
@@ -150,14 +175,70 @@ export class TrafficView implements RoadNet {
         grown.set(data);
         out.data[k] = data = grown;
       }
-      const [x, y, z, fx, fy, fz] = pose as unknown as [number, number, number, number, number, number];
-      data[o] = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
-      data[o + 1] = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
-      data[o + 2] = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
-      data[o + 3] = m[0]! * fx + m[4]! * fy + m[8]! * fz;
-      data[o + 4] = m[1]! * fx + m[5]! * fy + m[9]! * fz;
-      data[o + 5] = m[2]! * fx + m[6]! * fy + m[10]! * fz;
+      const fx = front[0]! - rear[0]!, fy = front[1]! - rear[1]!, fz = front[2]! - rear[2]!, fl = Math.hypot(fx, fy, fz) || 1;
+      data[o] = mid[0]!;
+      data[o + 1] = mid[1]!;
+      data[o + 2] = mid[2]!;
+      data[o + 3] = fx / fl;
+      data[o + 4] = fy / fl;
+      data[o + 5] = fz / fl;
     }
+  }
+
+  /**
+   * The point on car i's path ds m ahead of it (behind, if negative), in the
+   * view frame. The path is the road it came from, its own and the one it
+   * takes next, with junction curves between; past their ends it stops.
+   */
+  private pathPoint(i: number, ds: number, out: Float64Array): void {
+    const c = this.cars.c;
+    // (cell, edge, dir, lane) before, on and after the road the point is on; cell −1: none.
+    let pc = c.pcell[i] === NONE ? -1 : c.pcell[i]!, pe = c.pedge[i]!, pd = c.pdir[i]!, pl = c.plane[i]!;
+    let cc = c.cell[i]!, ce = c.edge[i]!, cd = c.dir[i]!, cl = c.lane[i]!;
+    let nc = c.ncell[i] === NONE ? -1 : c.ncell[i]!, ne = c.nedge[i]!, nd = c.ndir[i]!, nl = c.nlane[i]!;
+    let s = c.s[i]! + ds;
+    if (s < 0 && pc >= 0) {
+      [nc, ne, nd, nl, cc, ce, cd, cl] = [cc, ce, cd, cl, pc, pe, pd, pl];
+      pc = -1;
+      s += this.length(cc, ce);
+    } else if (s > c.length[i]! && nc >= 0) {
+      s -= c.length[i]!;
+      [pc, pe, pd, pl, cc, ce, cd, cl] = [cc, ce, cd, cl, nc, ne, nd, nl];
+      nc = -1;
+    }
+    const here = this.slots[cc]!.lanes, length = this.length(cc, ce);
+    const rIn = pc >= 0 ? junctionReach(here, ce, cd, "entry") : 0;
+    const rOut = nc >= 0 ? junctionReach(here, ce, cd, "exit") : 0;
+    if (pc >= 0 && s < rIn) {
+      // Turning in from the road before: its curve reaches back rA along that road.
+      const rA = junctionReach(this.slots[pc]!.lanes, pe, pd, "exit");
+      this.lanePoint(pc, pe, pd, pl, this.length(pc, pe) - rA, this.a);
+      this.lanePoint(cc, ce, cd, cl, rIn, this.b);
+      turnPoint(this.a, this.b, (rA + s) / (rA + rIn), out);
+    } else if (nc >= 0 && s > length - rOut) {
+      const rB = junctionReach(this.slots[nc]!.lanes, ne, nd, "entry");
+      this.lanePoint(cc, ce, cd, cl, length - rOut, this.a);
+      this.lanePoint(nc, ne, nd, nl, rB, this.b);
+      turnPoint(this.a, this.b, (s - (length - rOut)) / (rOut + rB), out);
+    } else {
+      this.lanePoint(cc, ce, cd, cl, s, this.a);
+      out[0] = this.a[0]!;
+      out[1] = this.a[1]!;
+      out[2] = this.a[2]!;
+    }
+  }
+
+  /** A lane point (position, direction) of a cell's edge, in the view frame. */
+  private lanePoint(cell: number, edge: number, dir: number, lane: number, s: number, out: Float64Array): void {
+    const tc = this.slots[cell]!, m = tc.model;
+    lanePoint(tc.lanes, edge, dir, lane, s, out);
+    const x = out[0]!, y = out[1]!, z = out[2]!, fx = out[3]!, fy = out[4]!, fz = out[5]!;
+    out[0] = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
+    out[1] = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
+    out[2] = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
+    out[3] = m[0]! * fx + m[4]! * fy + m[8]! * fz;
+    out[4] = m[1]! * fx + m[5]! * fy + m[9]! * fz;
+    out[5] = m[2]! * fx + m[6]! * fy + m[10]! * fz;
   }
 }
 

@@ -35,8 +35,16 @@ export {
   carveWater, cellWater, clipPolygon, clipPolyline, emptyWater, WATER_CARVE, WaterMaterial, waterFromArrow, waterToArrow,
   type WaterAreaInput, type WaterHeights, type WaterMesh, type WaterwayInput,
 } from "./water.ts";
+export {
+  AEROWAY_LIFT, AerowayMaterial, aerowaysFromArrow, aerowaysToArrow, cellAeroways, emptyAeroways,
+  type AerowayAreaInput, type AerowayLineInput, type AerowayMesh,
+} from "./aeroways.ts";
 export { readGlb, type ModelMesh } from "./glb.ts";
 export {
-  edgeArcLengths, edgeLanes, laneOffset, lanePose, placeVehicles, VEHICLE_MODELS, VEHICLE_SCALE,
-  type VehicleModel, type VehiclePlacements,
+  AIRCRAFT_KINDS, AIRCRAFT_PALETTE, aircraftKind, aircraftMesh, aircraftMeshes, parseAircraft, tailColor, TAIL_COLORS,
+  type AircraftKind, type AircraftReport,
+} from "./aircraft.ts";
+export {
+  edgeArcLengths, edgeLanes, junctionReach, laneGeometry, laneOffset, lanePoint, placeVehicles, turnPoint, VEHICLE_MODELS, VEHICLE_SCALE,
+  type LaneGeometry, type VehicleModel, type VehiclePlacements,
 } from "./vehicles.ts";

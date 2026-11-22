@@ -18,7 +18,7 @@ import path from "node:path";
 import { inflateSync } from "node:zlib";
 import { fetchAreas } from "@game/db";
 import {
-  blobData, buildingKind, isRoad, isWaterway, pbfBlocks, readHeader, readPrimitiveBlock, waterAreaKind,
+  aerowayAreaKind, blobData, buildingKind, isAerowayLine, isRoad, isWaterway, pbfBlocks, readHeader, readPrimitiveBlock, waterAreaKind,
   type OsmElement, type OsmNode, type OsmRelation, type OsmWay, type PbfVisitor,
 } from "@game/osm-import";
 import { cellCorners, cellFromLatLon, cellsWithin, cellToken, type CellId } from "@game/world";
@@ -125,12 +125,12 @@ export async function importPbf(o: ImportPbfOptions, log: (msg: string) => void)
   pass({ node: (id, lat, lon) => nodes.add(id, lat, lon) });
   log(`${nodes.count} nodes indexed (${elapsed()})`);
 
-  // Pass 2: building and water relations, and the ways they need.
+  // Pass 2: building, water and airport relations, and the ways they need.
   const relations: OsmRelation[] = [];
   const memberWays = new Set<number>();
   pass({
     relation(r) {
-      if (r.tags?.type !== "multipolygon" || (!buildingKind(r.tags) && !waterAreaKind(r.tags))) return;
+      if (r.tags?.type !== "multipolygon" || (!buildingKind(r.tags) && !waterAreaKind(r.tags) && !aerowayAreaKind(r.tags))) return;
       relations.push(r);
       for (const m of r.members) if (m.type === "way") memberWays.add(m.ref);
     },
@@ -148,7 +148,8 @@ export async function importPbf(o: ImportPbfOptions, log: (msg: string) => void)
   };
   pass({
     way(w) {
-      const wanted = isRoad(w.tags) || buildingKind(w.tags) !== undefined || waterAreaKind(w.tags) !== undefined || isWaterway(w.tags);
+      const wanted = isRoad(w.tags) || buildingKind(w.tags) !== undefined || waterAreaKind(w.tags) !== undefined || isWaterway(w.tags)
+        || aerowayAreaKind(w.tags) !== undefined || isAerowayLine(w.tags);
       if (!wanted && !memberWays.has(w.id)) return;
       const cells = new Set<CellId>();
       let last = -1;
@@ -175,7 +176,7 @@ export async function importPbf(o: ImportPbfOptions, log: (msg: string) => void)
     }
     for (const c of cells) bucket(c).relations.push(ri);
   });
-  log(`${ways.length} ways and ${relations.length} building and water relations kept, in ${buckets.size} download cells (${elapsed()})`);
+  log(`${ways.length} ways and ${relations.length} building, water and airport relations kept, in ${buckets.size} download cells (${elapsed()})`);
 
   // Which cells: inside the extract (corners and edge midpoints), optionally near a point.
   const fullyInside = (c: CellId) => {

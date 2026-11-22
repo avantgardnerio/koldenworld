@@ -246,7 +246,7 @@ function lakeLevel(rings: Pt[][], unproject: (x: number, y: number) => [number, 
  * across: each point at the highest ground under the segments on either side
  * of it (maxOver), so the water is never below the drawn ground.
  */
-function ribbon(
+export function ribbon(
   pl: Pt[], hw: number, m: number, put: (x: number, y: number, m: number, h?: number) => void,
   maxOver?: (corners: Pt[]) => number,
 ): void {

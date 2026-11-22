@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  buildCell, CELL_LEVEL, CELL_TABLES, cellCenter, cellFromLatLon, cellToArrow, cellToken, drapeCell, edgeArcLengths, enuFrame,
+  buildCell, CELL_LEVEL, CELL_TABLES, cellCenter, cellFromLatLon, cellToArrow, cellToken, drapeCell, enuFrame,
   groundSampler,
-  enuUnprojection, lanePose, placeVehicles,
+  enuUnprojection, laneGeometry, lanePoint, placeVehicles,
   type BuildingInput, type RoadWayInput,
 } from "@game/world";
 import { openViewer, type Session } from "../harness/browser.ts";
@@ -187,7 +187,7 @@ function firstCar(): [number, number, number, number] {
   const v = placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n))));
   expect(v.count).toBeGreaterThan(0);
   const pose = new Float32Array(6);
-  lanePose(c.graph, edgeArcLengths(c.graph), v.edge[0]!, v.dir[0]!, v.lane[0]!, v.s[0]!, pose, 0);
+  lanePoint(laneGeometry(c.graph), v.edge[0]!, v.dir[0]!, v.lane[0]!, v.s[0]!, pose);
   return [pose[0]!, pose[1]!, pose[3]!, pose[4]!];
 }
 
