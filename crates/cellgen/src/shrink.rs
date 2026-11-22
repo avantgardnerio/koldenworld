@@ -11,6 +11,7 @@ const MITER: f64 = 4.0;
 /// What shrinking ran into.
 #[derive(Debug, Default)]
 pub struct ShrinkStats {
+    pub tips: usize,      // dead-end tips given square end caps
     pub crossings: usize, // self-crossings cut away
     pub pinches: usize,   // crossings whose two loops were both positive: the smaller was dropped
     pub touches: usize,   // sides touching or collinear (exact zero signs), left alone
@@ -23,7 +24,7 @@ impl Polygon {
     pub fn shrink(&self, d: f64, metric: &Metric, stats: &mut ShrinkStats) -> Option<Polygon> {
         let mut band = self.in_metres(metric);
         band.drop_repeats();
-        band.move_in(d);
+        band.move_in(d, stats);
         band.cut_self_crossings(stats);
         if !band.is_solid() {
             stats.vanished += 1;
@@ -32,19 +33,29 @@ impl Polygon {
         Some(band.in_st(metric))
     }
 
-    /// Every vertex moved so both its sides land `d` further in. All are worked out from the ring as it was, then
-    /// set.
-    fn move_in(&mut self, d: f64) {
+    /// Every vertex moved so both its sides land `d` further in; where the ring doubles back (a dead end's tip) the
+    /// vertex becomes two, the corners of a square end cap. All are worked out from the ring as it was, then set.
+    fn move_in(&mut self, d: f64, stats: &mut ShrinkStats) {
         let Some(mut v) = self.first() else { return };
-        let moved: Vec<DVec2> = (0..v.ring_len())
+        let moved: Vec<(DVec2, Option<DVec2>)> = (0..v.ring_len())
             .map(|_| {
-                let to = v.pos() + v.inward_offset(d);
+                let to = if v.doubles_back() {
+                    stats.tips += 1;
+                    let (corner, other) = v.end_cap(d);
+                    (corner, Some(other))
+                } else {
+                    (v.pos() + v.inward_offset(d), None)
+                };
                 v.next();
                 to
             })
             .collect();
-        for to in moved {
+        for (to, also) in moved {
             v.set_pos(to);
+            if let Some(also) = also {
+                v.insert_after(also, v.source());
+                v.next();
+            }
             v.next();
         }
     }
@@ -70,14 +81,22 @@ impl Polygon {
 
 impl Cursor<'_> {
     /// How far to move this vertex so both its sides land `d` further in: along the bisector of their inward
-    /// normals, d ÷ cos(half the angle between them), at most MITER × d. Where the ring doubles back (a dead end's
-    /// tip) the normals cancel, and the tip carries straight on by d: the road's end cap.
+    /// normals, d ÷ cos(half the angle between them), at most MITER × d. (Not for a vertex that doubles back: its
+    /// normals cancel.)
     fn inward_offset(&self, d: f64) -> DVec2 {
         let (a, b) = (self.side_in().inward(), self.side_out().inward());
-        match (a + b).try_normalize() {
-            Some(bisector) => bisector * (d / bisector.dot(a)).min(MITER * d),
-            None => self.side_in().dir() * d,
-        }
+        let bisector = (a + b).normalize();
+        bisector * (d / bisector.dot(a)).min(MITER * d)
+    }
+
+    /// A dead end's tip, as the two corners of a square end cap `d` past it: one where the side in, moved in, meets
+    /// the cap, then one where the cap meets the side out.
+    fn end_cap(&self, d: f64) -> (DVec2, DVec2) {
+        let (ahead, inward) = (self.side_in().dir(), self.side_in().inward());
+        (
+            self.pos() + (ahead + inward) * d,
+            self.pos() + (ahead - inward) * d,
+        )
     }
 
     /// The first side ahead that properly crosses this vertex's side out: its first vertex, and where.

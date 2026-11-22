@@ -136,6 +136,19 @@ impl Cursor<'_> {
         self.poly.pos[self.at as usize] = pos;
     }
 
+    /// The OSM point it came from, or MADE.
+    pub fn source(&self) -> u32 {
+        self.poly.source[self.at as usize]
+    }
+
+    /// Whether the ring turns straight back on itself here (a dead end's tip): the sides in and out lie on one line,
+    /// pointing opposite ways. Exact.
+    pub fn doubles_back(&self) -> bool {
+        let (side_in, side_out) = (self.side_in(), self.side_out());
+        geom::orient(side_in.a, side_in.b, side_out.b) == 0.0
+            && (side_in.b - side_in.a).dot(side_out.b - side_out.a) < 0.0
+    }
+
     /// The side arriving here: previous vertex → this one.
     pub fn side_in(&self) -> Segment {
         let prev = self.poly.prev[self.at as usize];
