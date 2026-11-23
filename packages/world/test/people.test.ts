@@ -1,5 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { HIP, PART, PERSON_HEIGHT, personMesh, SHOULDER } from "../src/index.ts";
+import {
+  buildRoadGraph, enuFrame, enuProjection, enuUnprojection, HIP, PART, PERSON_HEIGHT, personMesh, placePeople, SHOULDER,
+  type RoadWayInput,
+} from "../src/index.ts";
+
+describe("placing people", () => {
+  const frame = enuFrame({ lat: 0, lon: 0, h: 0 }), ll = enuUnprojection(frame);
+  const road = (id: number, nodes: number[], y: number, cls: RoadWayInput["class"], sidewalks: number): RoadWayInput => ({
+    osmWayId: id, nodeIds: nodes, points: [ll(0, y), ll(1000, y)], class: cls, name: null,
+    lanesFwd: 1, lanesBack: 1, speedLimitMps: 12, sidewalks,
+  });
+  const g = buildRoadGraph([
+    road(1, [1, 2], 0, "primary", 3),        // both sides
+    road(2, [3, 4], 100, "residential", 2),  // right only
+    road(3, [5, 6], 200, "primary", 0),      // none
+  ], enuProjection(frame));
+
+  it("puts people only on sidewalks, more on busier streets, both ways, the same for a seed", () => {
+    const p = placePeople(g, 7);
+    const on = (e: number, side: number) => [...p.edge].filter((x, i) => x === e && p.side[i] === side).length;
+    const [primary, residential, bare] = [0, 1, 2].map((y) => [...Array(g.edges.count).keys()].find((e) => Math.round(g.points[2 * g.edges.pointStart[e]! + 1]!) === 100 * y)!);
+    expect(on(primary!, 1)).toBeGreaterThan(15);
+    expect(on(primary!, -1)).toBeGreaterThan(15);
+    expect(on(residential!, 1)).toBeGreaterThan(5);
+    expect(on(residential!, 1)).toBeLessThan(on(primary!, 1));
+    expect(on(residential!, -1)).toBe(0);
+    expect([...p.edge]).not.toContain(bare);
+    expect(new Set(p.dir)).toEqual(new Set([1, -1]));
+    for (let i = 0; i < p.count; i++) expect(p.s[i]).toBeLessThan(g.edges.length[p.edge[i]!]!);
+    expect(placePeople(g, 7)).toEqual(p);
+  });
+});
 
 describe("person model", () => {
   it("is low poly, with unit normals, facing +y, feet on z = 0, PERSON_HEIGHT tall, symmetric", () => {

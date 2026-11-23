@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, enuFrame, localToEcef, ecefToGeodetic, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -66,6 +66,7 @@ export interface ViewerStatus {
   drawn: { ground: number; buildings: number; massing: number; cars: number };
   simTime: number;        // s of traffic simulated
   aircraft: number;       // live aircraft known (drawn wherever they are)
+  people: number;         // pedestrians in the simulation
   graphOverlay: boolean;
   frames: number;
   /** Render now and read the RGB at a CSS pixel (origin top left). */
@@ -109,8 +110,8 @@ const MOUSE_WHEEL = 1 / 400, MOUSE_PEDAL = 1 / 300;
 const CAR_LOD_DISTANCE = 250;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
 const CAR_DISTANCE = 1500;
-/** P puts people on the sidewalk nearest the point this far (m) in front of the camera. */
-const PERSON_AHEAD = 6;
+/** Cells within this distance (m) get people on their sidewalks; beyond 1.3× it they lose them. */
+const PEOPLE_DISTANCE = 800;
 
 const params = new URLSearchParams(location.search);
 const fixedRadius = params.has("radius") ? Number(params.get("radius")) : undefined;
@@ -118,9 +119,12 @@ const showCars = params.get("cars") !== "0";
 /** traffic=0: cars stand where they start (tests that look at exact pixels). */
 const moving = showCars && params.get("traffic") !== "0";
 const showPlanes = params.get("planes") !== "0";
+/** people=0: no pedestrians; with traffic=0, they stand where they start. */
+const showPeople = params.get("people") !== "0";
+const walking = showPeople && params.get("traffic") !== "0";
 const status: ViewerStatus = (window.viewer = {
   state: "loading", cells: { ready: 0, loading: 0, queued: 0, failed: 0, missing: 0, coarse: 0, drawn: 0 }, radius: 0,
-  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0, drawn: { ground: 0, buildings: 0, massing: 0, cars: 0 }, simTime: 0, aircraft: 0,
+  nodes: 0, edges: 0, surfaceTriangles: 0, buildings: 0, buildingTriangles: 0, carModels: 0, cars: 0, carTriangles: 0, drawn: { ground: 0, buildings: 0, massing: 0, cars: 0 }, simTime: 0, aircraft: 0, people: 0,
   graphOverlay: params.get("graph") === "1", frames: 0,
 });
 
@@ -261,6 +265,8 @@ async function start(): Promise<void> {
     // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
     const flat = Math.max(groundReach, reach(c.graph.points, 2) + 20, reach(c.buildings.points, 2));
     for (let i = 0; i < c.buildings.count; i++) z1 = Math.max(z1, c.buildings.base[i]! + c.buildings.height[i]!);
+    // Where the cell's cars and people start.
+    const seed = Number(BigInt.asUintN(32, cell ^ (cell >> 32n)));
     return {
       frame,
       coarse: false,
@@ -271,7 +277,7 @@ async function start(): Promise<void> {
       ground: layer,
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       traffic: c.graph.edges.count === 0 ? undefined
-        : peopleView.add(traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model)),
+        : peopleView.add(traffic.add(c.graph, placeVehicles(c.graph, seed), model), seed ^ 0x9e3779b9),
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB, BUILDING_WINDOWS, PAINTS),
       // Street name signs at the intersections this cell owns, and its businesses' signs.
       signs: createSignLayer(gl!, [
@@ -500,10 +506,12 @@ async function start(): Promise<void> {
       if (drive) addCar(carInstances, PLAYER_MODEL, drive.pose(vf));
       carTriangles = carRenderer.draw(f, SUN, ROAD_BIAS, carInstances);
     }
-    if (peopleView.people.count > 0) {
-      peopleView.update(dt);
+    let personTriangles = 0;
+    if (showPeople) {
+      // Horizontal distance to the cell's anchor, as for traffic.
+      peopleView.update(dt, (tc) => Math.hypot(tc.model[12]!, tc.model[13]!), PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
       peopleView.instances(personInstances);
-      personRenderer.draw(f, SUN, ROAD_BIAS, personInstances);
+      personTriangles = personRenderer.draw(f, SUN, ROAD_BIAS, personInstances);
     }
     if (planeRenderer) {
       const now = performance.now() / 1000;
@@ -513,7 +521,8 @@ async function start(): Promise<void> {
     }
     const cars = traffic.cars.count;
     drawn.cars = carTriangles;
-    Object.assign(status, { cars, carTriangles, simTime: traffic.simTime, aircraft: air.count });
+    const people = peopleView.people.count;
+    Object.assign(status, { cars, carTriangles, simTime: traffic.simTime, aircraft: air.count, people });
     if (contrailLayer) {
       // Last: blended over everything, without writing depth.
       air.contrails(vf, performance.now() / 1000, contrails);
@@ -536,7 +545,7 @@ async function start(): Promise<void> {
     hud.textContent = (drive ? `driving ${Math.abs(drive.kmh).toFixed(0)} km/h · wheel ${percent(wheel)} · pedal ${percent(pedal)} (V: fly) · ` : "") + `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
       `(${below.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
-      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU · ` +
+      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars · ${people} people (${m(personTriangles)} M tris) · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU · ` +
       `M tris: ground ${m(status.drawn.ground)}, buildings ${m(status.drawn.buildings)}, massing ${m(status.drawn.massing)}, cars ${m(status.drawn.cars)}`;
   };
 
@@ -568,7 +577,7 @@ async function start(): Promise<void> {
       // Input just stopped: the pose goes to the URL.
       if (steering) history.replaceState(null, "", formatGlobeHash(camera));
       steering = false;
-      if (!(moving && carRenderer) && air.count === 0 && peopleView.people.count === 0) {
+      if (!(moving && carRenderer) && air.count === 0 && !(walking && peopleView.people.count > 0)) {
         running = false;
         return;
       }
@@ -603,19 +612,6 @@ async function start(): Promise<void> {
       });
       wake();
     }
-  });
-
-  // P: a row of people on the sidewalk nearest the point PERSON_AHEAD m in front of the camera.
-  addEventListener("keydown", (e) => {
-    if (e.code !== "KeyP" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-    const heading = yawPitch(camera.rot)[0] + Math.PI / 2;
-    const at = enuFrame({ lat: camera.lat, lon: camera.lon, h: 0 });
-    const ahead = localToEcef(at, [PERSON_AHEAD * Math.cos(heading), PERSON_AHEAD * Math.sin(heading), 0]);
-    const { lat, lon } = ecefToGeodetic(ahead);
-    const g = streamer.get(cellFromLatLon(lat, lon, CELL_LEVEL));
-    const [x, y] = g ? ecefToLocal(g.frame, ahead) : [0, 0];
-    if (!g?.traffic || peopleView.spawnRow(g.traffic, x, y) === 0) console.info("people: no sidewalk in this cell");
-    wake();
   });
 
   addEventListener("keydown", (e) => {

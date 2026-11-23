@@ -1,5 +1,5 @@
 // People: a generated low-poly figure, blocky like a toy brick figure, for
-// pedestrians. Pure.
+// pedestrians, and where they start in a cell (placePeople). Pure.
 //
 // The figure is rigid parts, so it can be animated by swinging them about
 // their pivots (legs at the hips, arms at the shoulders) with no skeleton:
@@ -11,6 +11,8 @@
 
 import { Builder } from "./aircraft.ts";
 import type { ModelMesh } from "./glb.ts";
+import { ROAD_CLASSES, type RoadClass, type RoadGraph } from "./road-graph.ts";
+import { rng } from "./vehicles.ts";
 
 export const PERSON_HEIGHT = 1.8;
 /** Where the legs and arms swing from: the hips' and shoulders' height, m. */
@@ -31,6 +33,44 @@ export const PEOPLE_PALETTE: Uint8Array = (() => {
   });
   return out;
 })();
+
+/** Average gap between people on one sidewalk, m, by the road's class: busy streets are fuller. */
+const SPACING: Record<RoadClass, number> = {
+  motorway: 200, motorway_link: 200, trunk: 60, trunk_link: 80, primary: 40, primary_link: 60,
+  secondary: 40, secondary_link: 60, tertiary: 50, tertiary_link: 70,
+  unclassified: 80, residential: 100, living_street: 60, service: 120, road: 100,
+};
+
+/** Where people start in a cell: per sidewalk, s m past its edge's from node, walking dir. */
+export interface PeoplePlacements {
+  count: number;
+  edge: Uint32Array;
+  side: Int8Array;  // 1: right of from → to, −1: left
+  dir: Int8Array;
+  s: Float32Array;
+}
+
+/** Where people start in a cell: spaced by road class along every sidewalk, either way. */
+export function placePeople(g: RoadGraph, seed: number): PeoplePlacements {
+  const rand = rng(seed);
+  const out = { edge: [] as number[], side: [] as number[], dir: [] as number[], s: [] as number[] };
+  for (let e = 0; e < g.edges.count; e++) {
+    const bits = g.edges.sidewalks[e]!, gap = SPACING[ROAD_CLASSES[g.edges.class[e]!]!], length = g.edges.length[e]!;
+    for (const side of [1, -1]) {
+      if (!(bits & (side > 0 ? 2 : 1))) continue;
+      for (let s = rand() * gap; s < length; s += gap * (0.4 + 1.2 * rand())) {
+        out.edge.push(e);
+        out.side.push(side);
+        out.dir.push(rand() < 0.5 ? 1 : -1);
+        out.s.push(s);
+      }
+    }
+  }
+  return {
+    count: out.edge.length, edge: Uint32Array.from(out.edge), side: Int8Array.from(out.side),
+    dir: Int8Array.from(out.dir), s: Float32Array.from(out.s),
+  };
+}
 
 /** The figure's mesh, and each vertex's part. */
 export interface PersonMesh extends ModelMesh {

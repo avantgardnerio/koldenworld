@@ -23,23 +23,36 @@ const g = buildRoadGraph([
 const identity = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 const none = { count: 0, model: new Uint8Array(0), edge: new Uint32Array(0), dir: new Int8Array(0), lane: new Uint8Array(0), s: new Float32Array(0) };
 
+/** The crossroads registered, and populated (its cell 0 m away). */
 function crossroads(): PeopleView {
   const tc = new TrafficView(1).add(g, none, identity);
   tc.visible = true;
   const v = new PeopleView(2);
-  v.add(tc);
-  // A row near the junction on each corner's sidewalks.
-  for (const [x, y] of [[20, 8], [-20, -8], [8, -20], [-8, 20]] as const) v.spawnRow(tc, x, y);
+  v.add(tc, 3);
+  step(v, 0);
   return v;
 }
+const step = (v: PeopleView, dt: number, distance = 0) => v.update(dt, () => distance, 1, 2, true);
 
 describe("people view", () => {
+  it("populates a cell's sidewalks when it's near, and empties them when it's far", () => {
+    const v = crossroads();
+    expect(v.people.count).toBeGreaterThan(15);
+    const n = v.people.count;
+    step(v, 1, 1.5);  // between near and far: as it was
+    expect(v.people.count).toBe(n);
+    step(v, 1, 3);
+    expect(v.people.count).toBe(0);
+    step(v, 1, 0);  // back: the same placements
+    expect(v.people.count).toBe(n);
+  });
+
   it("never jumps: everyone moves and turns smoothly along sidewalks, round corners and across crosswalks", () => {
     const v = crossroads(), out: PersonInstances = { data: new Float32Array(PERSON_STRIDE * 64), count: 0 };
     const n = v.people.count;
     let last: Float32Array | undefined;
     for (let k = 0; k < 30 * 300; k++) {
-      v.update(1 / 30);
+      step(v, 1 / 30);
       v.instances(out);
       expect(out.count).toBe(n);
       const now = out.data.slice(0, PERSON_STRIDE * n);
@@ -61,7 +74,7 @@ describe("people view", () => {
     let corners = 0, crossings = 0;
     const along = new Set<number>();
     for (let k = 0; k < 30 * 600; k++) {
-      v.update(1 / 30);
+      step(v, 1 / 30);
       for (let i = 0; i < v.people.count; i++) {
         if (c.leg[i] !== PASSAGE || c.s[i]! > 0.06) continue;  // just set out
         // At the node along the north road, they walk on, on the same side of the street (both ways run north).

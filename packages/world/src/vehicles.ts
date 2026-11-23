@@ -39,7 +39,7 @@ export interface VehiclePlacements {
 }
 
 /** mulberry32 */
-function rng(seed: number) {
+export function rng(seed: number) {
   let s = seed >>> 0;
   return () => {
     let t = (s = (s + 0x6d2b79f5) >>> 0);

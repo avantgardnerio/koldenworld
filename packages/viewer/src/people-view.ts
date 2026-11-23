@@ -23,24 +23,26 @@
 // - A person stands on their sidewalk's line, `across` m right of its middle
 //   as they walk (on crosswalks too), on the curb, upright (facing along their
 //   way, level).
-// - For now people come only from spawnRow (P in the viewer): a row of them on
-//   the sidewalk nearest a point, walking both ways.
+// - Cells near the camera are populated: the people placed on their sidewalks
+//   (placePeople) start walking. Cells beyond a larger distance are dropped,
+//   and with them everyone on their sidewalks. Ways on lead only into
+//   populated cells, so the edge of the populated area is like a dead end.
 
 import {
   createPeople, NO_CROSSING, PASSAGE, removePeople, Rng, spawnPerson, stepPeople, type People, type SidewalkNet,
 } from "@game/sim";
-import { offsetPoint, SIDEWALK, sidewalkOffset, turnPoint } from "@game/world";
+import { offsetPoint, placePeople, SIDEWALK, sidewalkOffset, turnPoint } from "@game/world";
 import { PERSON_STRIDE, type PersonInstances } from "./person-layer.ts";
 import type { TrafficCell } from "./traffic-view.ts";
 
-/** spawnRow: this many people, this far apart (m). */
-const ROW = 10, ROW_GAP = 3;
 /** The weight of a way on that goes back along the road they came by (others: 1). */
 const BACK = 0.25;
 
 export class PeopleView implements SidewalkNet {
   readonly people: People = createPeople(256);
   private slots = new Map<number, TrafficCell>();
+  private seeds = new Map<number, number>();  // per slot: its cell's placement seed
+  private populated = new Set<number>();      // slots
   private nodes = new Map<number, number[]>();  // OSM node id → slot, node, slot, node, …
   private rng: Rng;
   // Scratch: a junction's roads out (junction), by column, and their counterclockwise order.
@@ -57,9 +59,10 @@ export class PeopleView implements SidewalkNet {
     this.rng = new Rng(seed);
   }
 
-  /** Registers a loaded cell's roads; returns it. */
-  add(tc: TrafficCell): TrafficCell {
+  /** Registers a loaded cell's roads, with the seed its people are placed by; returns it. */
+  add(tc: TrafficCell, seed: number): TrafficCell {
     this.slots.set(tc.slot, tc);
+    this.seeds.set(tc.slot, seed);
     for (let n = 0; n < tc.graph.nodes.count; n++) {
       const id = tc.graph.nodes.osmId[n]!, list = this.nodes.get(id);
       if (list) list.push(tc.slot, n);
@@ -71,6 +74,8 @@ export class PeopleView implements SidewalkNet {
   /** Unregisters a cell; everyone on, crossing or heading for its sidewalks leaves with it. */
   remove(tc: TrafficCell): void {
     if (!this.slots.delete(tc.slot)) return;
+    this.seeds.delete(tc.slot);
+    this.populated.delete(tc.slot);
     for (let n = 0; n < tc.graph.nodes.count; n++) {
       const id = tc.graph.nodes.osmId[n]!, list = this.nodes.get(id)!;
       for (let k = list.length - 2; k >= 0; k -= 2) if (list[k] === tc.slot) list.splice(k, 2);
@@ -80,39 +85,27 @@ export class PeopleView implements SidewalkNet {
   }
 
   /**
-   * Puts a row of ROW people, ROW_GAP m apart, on the sidewalk nearest (x, y) (in the cell's frame), centered on the
-   * point nearest it, every other one walking the other way. Returns how many (0: the cell has no sidewalks).
+   * Populates cells within `near` m (their placements start walking), drops those beyond `far` (and everyone on
+   * them), and advances the sim by dt if `moving`.
    */
-  spawnRow(tc: TrafficCell, x: number, y: number): number {
-    const g = tc.graph, cum = tc.lanes.cum;
-    let best = Infinity, edge = -1, side = 0, along = 0;
-    for (let e = 0; e < g.edges.count; e++) {
-      const bits = g.edges.sidewalks[e]!;
-      if (!bits) continue;
-      for (let p = g.edges.pointStart[e]!; p + 1 < g.edges.pointStart[e + 1]!; p++) {
-        const ax = g.points[2 * p]!, ay = g.points[2 * p + 1]!;
-        const dx = g.points[2 * p + 2]! - ax, dy = g.points[2 * p + 3]! - ay, l2 = dx * dx + dy * dy;
-        if (l2 === 0) continue;
-        const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2));
-        const d = Math.hypot(x - ax - t * dx, y - ay - t * dy);
-        if (d >= best) continue;
-        // The side the point is on, if it has a sidewalk; else the other.
-        const left = dx * (y - ay) - dy * (x - ax) > 0;
-        [best, edge, along] = [d, e, cum[p]! + t * (cum[p + 1]! - cum[p]!)];
-        side = left ? (bits & 1 ? -1 : 1) : (bits & 2 ? 1 : -1);
+  update(dt: number, distance: (tc: TrafficCell) => number, near: number, far: number, moving: boolean): void {
+    let dropped = false;
+    for (const [slot, tc] of this.slots) {
+      const d = distance(tc);
+      if (!this.populated.has(slot) && d < near) {
+        this.populated.add(slot);
+        const p = placePeople(tc.graph, this.seeds.get(slot)!);
+        for (let i = 0; i < p.count; i++) {
+          const dir = p.dir[i]!, s = dir > 0 ? p.s[i]! : tc.lengths[p.edge[i]!]! - p.s[i]!;
+          spawnPerson(this.people, this, { cell: slot, edge: p.edge[i]!, side: p.side[i]!, dir, s }, this.rng);
+        }
+      } else if (this.populated.has(slot) && d > far) {
+        this.populated.delete(slot);
+        dropped = true;
       }
     }
-    if (edge < 0) return 0;
-    const length = tc.lengths[edge]!;
-    for (let k = 0; k < ROW; k++) {
-      const a = along + (k - (ROW - 1) / 2) * ROW_GAP, dir = k % 2 ? -1 : 1;
-      spawnPerson(this.people, this, { cell: tc.slot, edge, side, dir, s: dir > 0 ? a : length - a }, this.rng);
-    }
-    return ROW;
-  }
-
-  update(dt: number): void {
-    stepPeople(this.people, this, dt, this.rng);
+    if (dropped) removePeople(this.people, (cell) => this.populated.has(cell));
+    if (moving) stepPeople(this.people, this, dt, this.rng);
   }
 
   /** Writes everyone in visible cells into `out`, in the view frame. */
@@ -207,6 +200,7 @@ export class PeopleView implements SidewalkNet {
     const here = this.nodes.get(id) ?? [];
     for (let k = 0; k < here.length; k += 2) {
       const slot = here[k]!, n = here[k + 1]!, h = this.slots.get(slot)!;
+      if (!this.populated.has(slot)) continue;  // onward only into populated cells
       const hg = h.graph, m = h.model;
       for (let j = hg.nodes.edgeStart[n]!; j < hg.nodes.edgeStart[n + 1]!; j++) {
         const e = hg.nodes.edgeList[j]!;
