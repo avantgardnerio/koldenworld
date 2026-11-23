@@ -9,6 +9,9 @@
 //   min_height     float32                    m, bottom of walls
 //   base           float32                    m, ground under the building in the frame (lowest point)
 //   height_source  dictionary<uint8, utf8>    "height" | "levels" | "default"
+//   levels         float32                    building:levels; NaN where not tagged
+//   min_level      float32                    building:min_level; 0 where not tagged
+//   roof_shape     dictionary<uint8, utf8>    ROOF_SHAPES
 //   rings          list<list<fixed_size_list<float32, 2>>>   outer first (CCW), holes CW; open rings
 
 import { Field, FixedSizeList, Float32, List, makeData, Uint16, Uint8 } from "apache-arrow";
@@ -16,7 +19,7 @@ import {
   column, dictionaryStrings, f32, f64, listParts, readTable, toIPC, u8, utf8Dictionary, values,
   type FileMetadata,
 } from "./arrow-util.ts";
-import { HEIGHT_SOURCES, OSM_TYPES, type Buildings } from "./buildings.ts";
+import { HEIGHT_SOURCES, OSM_TYPES, ROOF_SHAPES, type Buildings } from "./buildings.ts";
 
 export function buildingsToArrow(b: Buildings, metadata: FileMetadata): Uint8Array {
   const pointType = new FixedSizeList(2, new Field("xy", new Float32(), false));
@@ -44,6 +47,9 @@ export function buildingsToArrow(b: Buildings, metadata: FileMetadata): Uint8Arr
     min_height: f32(b.minHeight),
     base: f32(b.base),
     height_source: utf8Dictionary(2, new Uint8(), b.heightSource, HEIGHT_SOURCES),
+    levels: f32(b.levels),
+    min_level: f32(b.minLevel),
+    roof_shape: utf8Dictionary(3, new Uint8(), b.roofShape, ROOF_SHAPES),
     rings,
   }, b.count, metadata);
 }
@@ -59,6 +65,7 @@ export function buildingsFromArrow(bytes: Uint8Array): { buildings: Buildings; m
   };
   fixed("osm_type", OSM_TYPES);
   fixed("height_source", HEIGHT_SOURCES);
+  fixed("roof_shape", ROOF_SHAPES);
 
   const outer = listParts(c("rings"), "buildings.rings");
   const ringCount = outer.offsets[count]!;
@@ -77,6 +84,9 @@ export function buildingsFromArrow(bytes: Uint8Array): { buildings: Buildings; m
       minHeight: values(c("min_height"), count, Float32Array, "buildings.min_height"),
       base: values(c("base"), count, Float32Array, "buildings.base"),
       heightSource: values(c("height_source"), count, Uint8Array, "buildings.height_source"),
+      levels: values(c("levels"), count, Float32Array, "buildings.levels"),
+      minLevel: values(c("min_level"), count, Float32Array, "buildings.min_level"),
+      roofShape: values(c("roof_shape"), count, Uint8Array, "buildings.roof_shape"),
       ringStart: outer.offsets,
       pointStart: inner.offsets,
       points: values(inner.child.children[0]!, pointCount * 2, Float32Array, "buildings.points"),

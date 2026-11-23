@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  AO_BAND, buildBuildings, buildingMesh, buildingsFromArrow, buildingsToArrow, idShade, signedArea2,
+  AO_BAND, buildBuildings, buildingMesh, buildingsFromArrow, buildingsToArrow, idShade, signedArea2, WINDOW_STYLES,
   type BuildingInput, type BuildingMesh,
   enuFrame, enuProjection, enuUnprojection,
 } from "../src/index.ts";
@@ -148,6 +148,30 @@ describe("buildingMesh", () => {
       const roof = m.normals[4 * v + 2] !== 0;
       expect(occluded).toBe(!roof && z === 0 ? 127 : 0);
     }
+  });
+
+  it("puts windows only on whole bays of real façades, floors from building:levels", () => {
+    // Floor heights (dm) on a building's walls, roofs excluded.
+    const floors = (input: BuildingInput) => {
+      const m = buildingMesh(buildBuildings([input], origin));
+      return new Set(Array.from({ length: m.material.length }, (_, v) => v).filter((v) => m.normals[4 * v + 2] === 0).map((v) => m.floor[v]));
+    };
+    expect(floors(building(1, [[square(0, 0, 3)]]))).toEqual(new Set([30]));                 // a house: 3 m floors
+    expect(floors(building(2, [[square(0, 0, 3)]], { height: 12, levels: 3 }))).toEqual(new Set([40]));  // tagged
+    expect(floors(building(3, [[square(0, 0, 0.2)]]))).toEqual(new Set([0]));               // 2.2 m walls: no bay
+    expect(floors(building(4, [[square(0, 0, 3)]], { kind: "shed" }))).toEqual(new Set([0]));
+    expect(floors(building(5, [[square(0, 0, 0.5)]], { isPart: true, minHeight: 20, height: 23 }))).toEqual(new Set([0]));  // on a roof
+    expect(floors(building(6, [[square(0, 0, 3)]], { roofShape: "dome" }))).toEqual(new Set([0]));
+  });
+
+  it("measures each wall's façade from its first whole bay, centered", () => {
+    const m = buildingMesh(buildBuildings([building(1, [[square(0, 0, 3)]])], origin));
+    const len = 3 * M, bay = WINDOW_STYLES.residential!.bay, bays = Math.floor(len / bay);
+    const first = 4 * 0;  // the first wall's first vertex: its start, at the base
+    expect(m.facade[first]).toBeCloseTo(-(len - bays * bay) / 2, 4);
+    expect(m.facade[first + 1]).toBe(0);
+    expect(m.facade[first + 2]).toBeCloseTo(bays * bay, 4);
+    expect(m.facade[first + 3]).toBe(10);
   });
 
   it("skips buildings with no height and tags materials by group", () => {

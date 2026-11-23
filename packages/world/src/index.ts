@@ -25,11 +25,13 @@ export {
   edgeExtents, edgeHalfWidth, nodeRadii, ROAD_PROFILES, SIDEWALK,
 } from "./road-surface.ts";
 export {
-  BUILDING_GROUPS, BUILDINGS_VERSION, buildBuildings, buildingGroup, HEIGHT_SOURCES, OSM_TYPES, signedArea2,
+  BUILDING_GROUPS, BUILDINGS_VERSION, buildBuildings, buildingGroup, HEIGHT_SOURCES, OSM_TYPES, ROOF_SHAPES, signedArea2,
   type BuildingGroup, type BuildingInput, type Buildings, type HeightSource, type OsmType,
 } from "./buildings.ts";
 export { buildingsFromArrow, buildingsToArrow } from "./buildings-arrow.ts";
-export { AO_BAND, BUILDING_MATERIALS, buildingMesh, CREASE, idShade, type BuildingMesh } from "./building-mesh.ts";
+export {
+  AO_BAND, BUILDING_MATERIALS, buildingMesh, CREASE, idShade, WINDOW_STYLES, type BuildingMesh, type WindowStyle,
+} from "./building-mesh.ts";
 export type { FileMetadata } from "./arrow-util.ts";
 export {
   carveWater, WATER_CARVE,

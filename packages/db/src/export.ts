@@ -111,10 +111,12 @@ export function loadBuildings(bbox: Bbox, url = DATABASE_URL): Promise<BuildingI
   return withClient(url, async (c) => {
     const { rows } = await c.query<{
       osm_type: OsmType; osm_id: string; kind: string; is_part: boolean;
-      height_m: number; min_height_m: number; height_source: HeightSource; coords: [number, number][][][];
+      height_m: number; min_height_m: number; height_source: HeightSource; levels: number | null;
+      min_level: string | null; roof_shape: string | null; coords: [number, number][][][];
     }>(
       `WITH box AS (SELECT ST_MakeEnvelope($1, $2, $3, $4, 4326) AS g)
        SELECT b.osm_type, b.osm_id::text, b.kind, b.is_part, b.height_m, b.min_height_m, b.height_source,
+              b.levels, b.tags ->> 'building:min_level' AS min_level, b.tags ->> 'roof:shape' AS roof_shape,
               ST_AsGeoJSON(b.geom)::json -> 'coordinates' AS coords
        FROM buildings b, box
        WHERE ST_Intersects(b.geom, box.g)
@@ -132,6 +134,9 @@ export function loadBuildings(bbox: Bbox, url = DATABASE_URL): Promise<BuildingI
       height: r.height_m,
       minHeight: r.min_height_m,
       heightSource: r.height_source,
+      levels: r.levels,
+      minLevel: r.min_level !== null && Number.isFinite(parseFloat(r.min_level)) ? parseFloat(r.min_level) : null,
+      roofShape: r.roof_shape,
       polygons: r.coords,
     }));
   });

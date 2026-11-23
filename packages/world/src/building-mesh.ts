@@ -9,17 +9,43 @@
 // fourth byte, 127 at the ground to 0 at the band's top (0 everywhere else).
 // Roofs are triangulated with earcut, holes included. Every triangle is
 // counterclockwise seen from outside, so back faces can be culled.
+//
+// Windows are drawn by the shader from where each wall vertex is on its
+// façade (facade: m along the wall from its first whole window bay, m above
+// the wall's bottom, the width of its whole bays, the wall's height) and the
+// building's floor height (floor, dm; 0: none). Only whole windows: a wall too
+// short for a bay (a curve's facets, a dome) has none, nor do utility
+// buildings, small parts on top of others (air conditioners, stair housings),
+// and domes. Floors come from building:levels where tagged.
 
 import earcut from "earcut";
-import { BUILDING_GROUPS, buildingGroup, type Buildings } from "./buildings.ts";
+import { BUILDING_GROUPS, buildingGroup, ROOF_SHAPES, signedArea2, type BuildingGroup, type Buildings } from "./buildings.ts";
 
 export interface BuildingMesh {
   positions: Float32Array;  // x, y, z, m
   normals: Int8Array;       // x, y, z, occlusion per vertex; ×127 (occlusion 0..127: how much darker, toward the ground)
   material: Uint8Array;     // group × 2 + (1 for roof), group from BUILDING_GROUPS
   shade: Uint8Array;        // per-building variation 0..255, stable per OSM id
+  facade: Float32Array;     // per vertex: m along the wall from its first bay, m above its bottom, bays' width, wall height
+  floor: Uint8Array;        // per vertex: floor height, dm; 0: no windows
   indices: Uint32Array;
 }
+
+/** A building group's windows, m: bay width, window width, sill height, window height, and floor height where untagged. */
+export interface WindowStyle { bay: number; width: number; sill: number; height: number; floor: number }
+
+export const WINDOW_STYLES: Record<BuildingGroup, WindowStyle | null> = {
+  residential: { bay: 3.2, width: 1.2, sill: 0.9, height: 1.4, floor: 3.0 },
+  commercial: { bay: 3.0, width: 2.2, sill: 0.6, height: 2.3, floor: 3.8 },
+  industrial: { bay: 6.0, width: 2.6, sill: 2.4, height: 1.4, floor: 6.0 },
+  civic: { bay: 3.6, width: 1.6, sill: 1.0, height: 2.1, floor: 4.2 },
+  utility: null,
+  other: { bay: 3.2, width: 1.4, sill: 0.9, height: 1.5, floor: 3.2 },
+};
+
+/** A part on top of another smaller than this (m²) is equipment, not rooms: no windows. */
+const EQUIPMENT_AREA = 40;
+const NO_WINDOW_ROOFS = new Set(["dome", "onion"]);
 
 export const BUILDING_MATERIALS = BUILDING_GROUPS.length * 2;
 
@@ -44,10 +70,16 @@ export function buildingMesh(b: Buildings): BuildingMesh {
   const normals = new Int8Array(4 * vertexCap);
   const material = new Uint8Array(vertexCap);
   const shade = new Uint8Array(vertexCap);
+  const facade = new Float32Array(4 * vertexCap);
+  const floorDm = new Uint8Array(vertexCap);
   const indices = new Uint32Array(indexCap);
   let v = 0, ix = 0;
 
+  // Where on its façade a wall vertex is (see the top), and its building's floor height; nothing for a roof.
+  const at = { u: 0, v: 0, span: 0, wall: 0, floor: 0 };
   const vertex = (x: number, y: number, z: number, nx: number, ny: number, nz: number, mat: number, sh: number, ao = 0) => {
+    facade.set([at.u, at.v, at.span, at.wall], 4 * v);
+    floorDm[v] = Math.round(at.floor * 10);
     positions[3 * v] = x;
     positions[3 * v + 1] = y;
     positions[3 * v + 2] = z;
@@ -75,6 +107,8 @@ export function buildingMesh(b: Buildings): BuildingMesh {
     // Walls: each edge's outward normal, then each corner's (smooth or creased), then a quad per edge, split at the
     // top of its dark band.
     const band = Math.min(top, bottom + AO_BAND);
+    const style = windows(b, i, groups[b.kind[i]!]!);
+    const wall = top - bottom;
     for (let r = r0; r < r1; r++) {
       const a = b.pointStart[r]!, n = b.pointStart[r + 1]! - a;
       const pt = (k: number) => a + ((k % n) + n) % n;
@@ -85,22 +119,35 @@ export function buildingMesh(b: Buildings): BuildingMesh {
         const xj = b.points[2 * pj]!, yj = b.points[2 * pj + 1]!;
         if (xi === xj && yi === yj) continue;
         const [si, ti] = corner(edges, k, n, -1), [sj, tj] = corner(edges, k, n, 1);
-        const q = vertex(xi, yi, bottom, si, ti, 0, wallMat, sh, 1);
-        vertex(xj, yj, bottom, sj, tj, 0, wallMat, sh, 1);
-        vertex(xj, yj, band, sj, tj, 0, wallMat, sh);
-        vertex(xi, yi, band, si, ti, 0, wallMat, sh);
-        indices.set([q, q + 1, q + 2, q, q + 2, q + 3], ix);
+        // Whole bays, centered on the wall: u from the first one's start.
+        const len = Math.hypot(xj - xi, yj - yi);
+        const bays = style ? Math.floor(len / style.bay) : 0;
+        const offset = bays > 0 ? (len - bays * style!.bay) / 2 : 0;
+        Object.assign(at, { span: bays * (style?.bay ?? 0), wall, floor: bays > 0 ? style!.floor : 0 });
+        const corners = (z: number, ao: number) => {
+          at.v = z - bottom;
+          at.u = -offset;
+          const first = vertex(xi, yi, z, si, ti, 0, wallMat, sh, ao);
+          at.u = len - offset;
+          vertex(xj, yj, z, sj, tj, 0, wallMat, sh, ao);
+          return first;
+        };
+        // Rows of two vertices (i, j): the base, the band's top, the top; each pair of rows a quad, counterclockwise
+        // from outside.
+        const q = corners(bottom, 1);
+        corners(band, 0);
+        indices.set([q, q + 1, q + 3, q, q + 3, q + 2], ix);
         ix += 6;
         if (band < top) {
-          vertex(xj, yj, top, sj, tj, 0, wallMat, sh);
-          vertex(xi, yi, top, si, ti, 0, wallMat, sh);
-          indices.set([q + 3, q + 2, q + 4, q + 3, q + 4, q + 5], ix);
+          corners(top, 0);
+          indices.set([q + 2, q + 3, q + 5, q + 2, q + 5, q + 4], ix);
           ix += 6;
         }
       }
     }
 
     // Roof
+    Object.assign(at, { u: 0, v: 0, span: 0, wall: 0, floor: 0 });
     const flat = b.points.subarray(2 * p0, 2 * p1);
     const holes: number[] = [];
     for (let r = r0 + 1; r < r1; r++) holes.push(b.pointStart[r]! - p0);
@@ -123,8 +170,25 @@ export function buildingMesh(b: Buildings): BuildingMesh {
     normals: normals.slice(0, 4 * v),
     material: material.slice(0, v),
     shade: shade.slice(0, v),
+    facade: facade.slice(0, 4 * v),
+    floor: floorDm.slice(0, v),
     indices: indices.slice(0, ix),
   };
+}
+
+/**
+ * A building's windows: its group's style with its floor height (from building:levels where tagged), or null where it
+ * has none (utility buildings, equipment on top of other parts, domes, walls lower than a floor).
+ */
+function windows(b: Buildings, i: number, group: number): WindowStyle | null {
+  const style = WINDOW_STYLES[BUILDING_GROUPS[group]!];
+  const wall = b.height[i]! - b.minHeight[i]!;
+  if (!style || wall < 2.5 || NO_WINDOW_ROOFS.has(ROOF_SHAPES[b.roofShape[i]!]!)) return null;
+  const r = b.ringStart[i]!, a = b.pointStart[r]!, e = b.pointStart[r + 1]!;
+  if (b.isPart[i] && b.minHeight[i]! > 0 && Math.abs(signedArea2(b.points, a, e)) / 2 < EQUIPMENT_AREA) return null;
+  const floors = b.levels[i]! - b.minLevel[i]!;
+  const floor = floors >= 1 ? Math.min(8, Math.max(2.4, wall / floors)) : style.floor;
+  return { ...style, floor };
 }
 
 /** Each edge's outward unit normal (x, y) of a ring of n points from `a`; a zero-length edge takes the next one's. */

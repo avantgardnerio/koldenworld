@@ -1,6 +1,6 @@
 // Colors and atmosphere are a view concern: they live here, not in the map data.
 
-import { BUILDING_GROUPS, ROAD_CLASSES, type BuildingGroup, type RoadClass } from "@game/world";
+import { BUILDING_GROUPS, ROAD_CLASSES, WINDOW_STYLES, type BuildingGroup, type RoadClass } from "@game/world";
 
 const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
 const palette = (hexes: string[]) => new Float32Array(hexes.flatMap(rgb));
@@ -41,6 +41,12 @@ const BUILDING_COLORS: Record<BuildingGroup, [wall: string, roof: string]> = {
 };
 /** vec3 per building material: group × 2 + (1 for roof), as emitted by buildingMesh. */
 export const BUILDING_COLORS_RGB = palette(BUILDING_GROUPS.flatMap((g) => BUILDING_COLORS[g]));
+
+/** vec4 per building material (as BUILDING_COLORS_RGB): its window style (bay, width, sill, height, m); roofs none. */
+export const BUILDING_WINDOWS = new Float32Array(BUILDING_GROUPS.flatMap((g) => {
+  const w = WINDOW_STYLES[g];
+  return [...(w ? [w.bay, w.width, w.sill, w.height] : [0, 0, 0, 0]), 0, 0, 0, 0];
+}));
 
 /** Unit vector toward the sun: high in the south-southeast, so north and west walls fall in shade. */
 export const SUN: [number, number, number] = (() => {

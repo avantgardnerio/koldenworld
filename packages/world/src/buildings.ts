@@ -8,10 +8,14 @@
 
 import type { Projection } from "./projection.ts";
 
-export const BUILDINGS_VERSION = 2;
+export const BUILDINGS_VERSION = 3;
 
 /** Where a building's height came from. */
 export const HEIGHT_SOURCES = ["height", "levels", "default"] as const;
+/** OSM roof:shape values we tell apart ("" for none or another); a building's roof shape is an index into this. */
+export const ROOF_SHAPES = [
+  "", "flat", "gabled", "hipped", "pyramidal", "skillion", "half-hipped", "gambrel", "mansard", "round", "dome", "onion",
+] as const;
 export type HeightSource = (typeof HEIGHT_SOURCES)[number];
 
 export const OSM_TYPES = ["way", "relation"] as const;
@@ -26,6 +30,9 @@ export interface BuildingInput {
   height: number;          // m above ground, top of the walls
   minHeight: number;       // m above ground, bottom of the walls
   heightSource: HeightSource;
+  levels?: number | null;     // building:levels (above ground), if tagged
+  minLevel?: number | null;   // building:min_level, if tagged
+  roofShape?: string | null;  // roof:shape, if tagged
   polygons: [lon: number, lat: number][][][];  // polygon → rings (outer first) → points
 }
 
@@ -39,6 +46,9 @@ export interface Buildings {
   minHeight: Float32Array;
   base: Float32Array;       // m up in the frame: the lowest ground under the outer ring (0 until draped)
   heightSource: Uint8Array; // index into HEIGHT_SOURCES
+  levels: Float32Array;     // building:levels; NaN where not tagged
+  minLevel: Float32Array;   // building:min_level; 0 where not tagged
+  roofShape: Uint8Array;    // index into ROOF_SHAPES
   ringStart: Int32Array;    // count + 1 offsets into rings (CSR; Int32 like Arrow list offsets)
   pointStart: Int32Array;   // rings + 1 offsets into points
   points: Float32Array;     // x, y interleaved, m
@@ -101,6 +111,9 @@ export function buildBuildings(inputs: BuildingInput[], project: Projection): Bu
     minHeight: new Float32Array(count),
     base: new Float32Array(count),
     heightSource: new Uint8Array(count),
+    levels: new Float32Array(count),
+    minLevel: new Float32Array(count),
+    roofShape: new Uint8Array(count),
     ringStart: new Int32Array(count + 1),
     pointStart: new Int32Array(ringTotal + 1),
     points: new Float32Array(pointTotal * 2),
@@ -115,6 +128,9 @@ export function buildBuildings(inputs: BuildingInput[], project: Projection): Bu
     t.height[i] = b.height;
     t.minHeight[i] = b.minHeight;
     t.heightSource[i] = HEIGHT_SOURCES.indexOf(b.heightSource);
+    t.levels[i] = b.levels ?? NaN;
+    t.minLevel[i] = b.minLevel ?? 0;
+    t.roofShape[i] = Math.max(0, ROOF_SHAPES.indexOf((b.roofShape ?? "") as (typeof ROOF_SHAPES)[number]));
     t.ringStart[i] = ring;
     for (const xy of rings) {
       t.pointStart[ring++] = point;
