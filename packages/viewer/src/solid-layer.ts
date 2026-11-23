@@ -20,6 +20,8 @@ in uint a_mat;
 in float a_shade;
 in vec4 a_facade;     // m along the wall from its first bay, m above its bottom, the bays' width, the wall's height
 in float a_floor;     // floor height, dm; 0: no windows
+in uint a_paint;      // index into u_paints; 0: the material's color
+uniform vec3 u_paints[${MAX_MATERIALS}];
 uniform vec4 u_windows[${MAX_MATERIALS}];  // per material: bay width, window width, sill, window height (m); 0: none
 out vec3 v_world;
 out vec4 v_facade;
@@ -34,7 +36,7 @@ void main() {
   v_world = world.xyz;
   v_normal = mat3(u_model) * a_normal.xyz;
   v_occluded = a_normal.w;
-  v_color = u_colors[a_mat] * (0.9 + 0.2 * a_shade);
+  v_color = (a_paint > 0u ? u_paints[a_paint] : u_colors[a_mat]) * (0.9 + 0.2 * a_shade);
   v_facade = a_facade;
   v_floor = a_floor * 0.1;
   v_window = u_windows[a_mat];
@@ -99,7 +101,7 @@ function program(gl: WebGL2RenderingContext): WebGLProgram {
   p = gl.createProgram();
   gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, VERTEX));
   gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT));
-  ["a_pos", "a_normal", "a_mat", "a_shade", "a_facade", "a_floor"].forEach((name, i) => gl.bindAttribLocation(p!, i, name));
+  ["a_pos", "a_normal", "a_mat", "a_shade", "a_facade", "a_floor", "a_paint"].forEach((name, i) => gl.bindAttribLocation(p!, i, name));
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`program: ${gl.getProgramInfoLog(p)}`);
   programs.set(gl, p);
@@ -108,16 +110,18 @@ function program(gl: WebGL2RenderingContext): WebGLProgram {
 
 export function createSolidLayer(
   gl: WebGL2RenderingContext,
-  mesh: Omit<BuildingMesh, "indices" | "facade" | "floor"> & {
-    indices: Uint16Array | Uint32Array; facade?: Float32Array; floor?: Uint8Array;
+  mesh: Omit<BuildingMesh, "indices" | "facade" | "floor" | "paint"> & {
+    indices: Uint16Array | Uint32Array; facade?: Float32Array; floor?: Uint8Array; paint?: Uint8Array;
   },
   colors: Float32Array,
   windows?: Float32Array,  // vec4 per material (window style), for buildings
+  paints?: Float32Array,   // vec3 per paint index, for buildings
 ): SolidLayer {
   if (colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
   const p = program(gl);
   const u = (name: string) => gl.getUniformLocation(p, name);
   const uWindows = u("u_windows"), noWindows = new Float32Array(4 * MAX_MATERIALS);
+  const uPaints = u("u_paints"), noPaints = new Float32Array(3 * MAX_MATERIALS);
   const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uSun = u("u_sun");
 
   const vao = gl.createVertexArray();
@@ -127,9 +131,10 @@ export function createSolidLayer(
     { data: mesh.normals, size: 4, type: gl.BYTE, normalized: true, stride: 4 },
     { data: mesh.material, size: 1, type: gl.UNSIGNED_BYTE, normalized: false, stride: 0, integer: true },
     { data: mesh.shade, size: 1, type: gl.UNSIGNED_BYTE, normalized: true, stride: 0 },
-    ...(mesh.facade && mesh.floor ? [
+    ...(mesh.facade && mesh.floor && mesh.paint ? [
       { data: mesh.facade, size: 4, type: gl.FLOAT, normalized: false, stride: 0 },
       { data: mesh.floor, size: 1, type: gl.UNSIGNED_BYTE, normalized: false, stride: 0 },
+      { data: mesh.paint!, size: 1, type: gl.UNSIGNED_BYTE, normalized: false, stride: 0, integer: true },
     ] : []),
   ].map((a, i) => {
     const buf = gl.createBuffer();
@@ -156,8 +161,10 @@ export function createSolidLayer(
       if (!mesh.facade) {
         gl.vertexAttrib4f(4, 0, 0, 0, 0);
         gl.vertexAttrib1f(5, 0);
+        gl.vertexAttribI4ui(6, 0, 0, 0, 0);
       }
       gl.uniform4fv(uWindows, windows ?? noWindows);
+      gl.uniform3fv(uPaints, paints ?? noPaints);
       gl.uniformMatrix4fv(uView, false, f.view);
       gl.uniformMatrix4fv(uModel, false, model);
       gl.uniform3fv(uColors, colors);

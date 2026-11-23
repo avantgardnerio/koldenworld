@@ -30,7 +30,8 @@ export {
 } from "./buildings.ts";
 export { buildingsFromArrow, buildingsToArrow } from "./buildings-arrow.ts";
 export {
-  AO_BAND, BUILDING_MATERIALS, buildingMesh, CREASE, idShade, WINDOW_STYLES, type BuildingMesh, type WindowStyle,
+  AO_BAND, BUILDING_MATERIALS, buildingMesh, CREASE, idShade, ROOF_PAINTS, WALL_PAINTS, WINDOW_STYLES, type BuildingMesh,
+  type WindowStyle,
 } from "./building-mesh.ts";
 export type { FileMetadata } from "./arrow-util.ts";
 export {
@@ -48,3 +49,4 @@ export {
   type LaneGeometry, type VehicleModel, type VehiclePlacements,
 } from "./vehicles.ts";
 export { groundFromArrow, type CellGround } from "./ground-arrow.ts";
+export { clipConvex, pitchedRoof, type PitchedRoof, type RoofFace, type RoofShape } from "./roofs.ts";

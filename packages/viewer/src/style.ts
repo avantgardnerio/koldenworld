@@ -42,6 +42,16 @@ const BUILDING_COLORS: Record<BuildingGroup, [wall: string, roof: string]> = {
 /** vec3 per building material: group × 2 + (1 for roof), as emitted by buildingMesh. */
 export const BUILDING_COLORS_RGB = palette(BUILDING_GROUPS.flatMap((g) => BUILDING_COLORS[g]));
 
+/**
+ * vec3 per paint index (building-mesh.ts): 0 unused (the material's color), then WALL_PAINTS house colors (white,
+ * cream, tan, gray, sage, pale blue, brick, butter yellow), then ROOF_PAINTS roof colors (charcoal, brown, red-brown,
+ * slate, moss).
+ */
+export const PAINTS = palette([
+  "#000000", "#e8e4da", "#e3d4b0", "#c9b28c", "#c2c4c0", "#a8b496", "#a9b9c6", "#9a5a46", "#e0c777",
+  "#47474b", "#6a5446", "#7c4a3a", "#56606c", "#505d4a",
+]);
+
 /** vec4 per building material (as BUILDING_COLORS_RGB): its window style (bay, width, sill, height, m); roofs none. */
 export const BUILDING_WINDOWS = new Float32Array(BUILDING_GROUPS.flatMap((g) => {
   const w = WINDOW_STYLES[g];

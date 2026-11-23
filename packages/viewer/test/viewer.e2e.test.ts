@@ -43,7 +43,7 @@ const building = (osmId: number, kind: string, height: number, ring: [number, nu
   osmType: "way", osmId, kind, isPart: false, height, minHeight: 0, heightSource: "height", polygons: [[ring]],
 });
 const buildings = [
-  building(1, "house", 10, box(30, 30, 50, 50)),
+  { ...building(1, "house", 10, box(30, 30, 50, 50)), roofShape: "flat" },  // flat: the depth test needs its 10 m roofline
   building(2, "office", 30, box(30, 60, 50, 80)),
 ];
 
