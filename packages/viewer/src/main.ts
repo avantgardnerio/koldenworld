@@ -756,7 +756,7 @@ start().catch((err: unknown) => {
 function handData(foot: OnFoot): HandData {
   const inv = foot.inventory, gun = heldGun(inv);
   const rounds = gun && (inv.reloading > 0 ? "reloading" : `${inv.rounds[inv.selected]}/${gun.magazine}`);
-  return { slots: inv.items.map((k) => ITEMS[k].name), selected: inv.selected, rounds, crosshair: !!gun, aiming: foot.aiming };
+  return { slots: inv.items.map((k) => ITEMS[k].name), selected: inv.selected, rounds, crosshair: !!gun, aiming: foot.aiming, sway: foot.sway };
 }
 
 /** Adds one car (position and forward direction, in the view frame) to a model's instances. */

@@ -11,8 +11,8 @@
 // - Driving: a speedometer (km/h; R in reverse) with the heading above it,
 //   and the wheel (left–right) and pedal (throttle up, brake down) beside it.
 // - On foot: the inventory along the bottom (what's in hand outlined, a gun's
-//   rounds beside it), a crosshair with a gun in hand (green aiming), and a
-//   hint now and then (what F does).
+//   rounds beside it), a crosshair with a gun in hand (green aiming; swaying
+//   with their steps, where shots go), and a hint now and then (what F does).
 //
 // Drawn as light lines with a dark outline, so they read over sky and ground.
 
@@ -36,6 +36,7 @@ export interface HandData {
   rounds?: string;    // a gun in hand: what's in it ("12/12", "reloading")
   crosshair: boolean; // a gun in hand
   aiming: boolean;
+  sway: [number, number];  // the crosshair off the middle, radians right and up
 }
 
 export interface DriveData {
@@ -92,7 +93,9 @@ export class Instruments {
       this.text(`${i + 1}  ${name}${on && d.rounds ? `  ${d.rounds}` : ""}`, x, y + 5, 13, "center", on ? INK : "rgb(244 251 255 / 0.6)");
     });
     if (!d.crosshair) return;
-    const [cx, cy] = [w / 2, h / 2], color = d.aiming ? ACCENT : INK;
+    // Off the middle by its sway, as the view projects it.
+    const f = h / 2 / Math.tan(FOV_Y / 2), color = d.aiming ? ACCENT : INK;
+    const [cx, cy] = [w / 2 + f * Math.tan(d.sway[0]), h / 2 - f * Math.tan(d.sway[1])];
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
       this.stroke([[cx + dx * 5, cy + dy * 5], [cx + dx * 13, cy + dy * 13]], 2, color);
     }

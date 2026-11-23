@@ -15,13 +15,21 @@
 // arm locked straight down: no swing, walking or running), a slung rifle in
 // patrol ready (both hands on it in front of the chest, muzzle at the ground a
 // foot in front of the left foot); only while the
-// right mouse button is held is it aimed (the right arm straight out along
-// the camera's line, facing where it looks, at a walk), and only then does
-// the left fire. A shot goes from the camera through the crosshair (the
-// middle of the screen): the first thing it hits (raycast) is where it stops;
-// onShot hears of it (the muzzle and that point, in ECEF).
+// right mouse button is held is it aimed (raised along the camera's line,
+// facing where it looks), and only then does the left fire. A shot goes from
+// the camera through the crosshair: the first thing it hits (raycast) is
+// where it stops; onShot hears of it (the muzzle and that point, in ECEF).
+//
+// The crosshair sways as they move (sway): still standing; on the move it
+// follows a U in time with their feet (across once every four steps, dipping
+// in the middle as it crosses), small walking, big running, bigger in the
+// air; it trails the steps, smoothed, as an aim lags a body. It eases between
+// sizes. Shots go where it is.
 
-import { createInventory, fire, held, heldGun, placeWalker, reload, select, stepInventory, stepWalker, walkerGait, type Inventory, type ItemKind, type Walker } from "@game/sim";
+import {
+  createInventory, fire, held, heldGun, placeWalker, reload, select, stepInventory, stepWalker, WALKER, walkerGait,
+  type Inventory, type ItemKind, type Walker,
+} from "@game/sim";
 import { geodeticToEcef, MUZZLE, SHOULDER, type Frame, type Vec3 } from "@game/world";
 import { fromYawPitch, LOOK_RADIANS_PER_PX, type CameraInput } from "./camera.ts";
 import type { Parked } from "./drive.ts";
@@ -37,6 +45,13 @@ const DOOR = 1.7;
 export const ENTER = 3.5;
 /** After a shot, the arm holds the angle it was fired at this long (s), before following the camera again. */
 const SHOT_HOLD = 0.3;
+/**
+ * The crosshair's U, radians: how far the steps would swing it either side and raise its ends above its middle,
+ * walking and running (in the air, running's and a fifth again); how fast it eases to a new size; its rhythm (U cycles
+ * a walk cycle: across once every four steps); how fast the aim follows the steps (/s: the aim trails them, so it
+ * moves slower and softer than the feet).
+ */
+const SWAY = { walk: [0.011, 0.006], run: [0.04, 0.03], air: 1.2, ease: 4, rate: 0.5, follow: 5 } as const;
 
 export class OnFoot {
   readonly walker: Walker;
@@ -53,6 +68,7 @@ export class OnFoot {
   onShot?: (muzzle: Vec3, end: Vec3, hit: boolean, gun: ItemKind) => void;
   private sinceShot = Infinity;  // s
   private aimPitch = 0;          // radians: the right arm's, aiming
+  private swayAmp = 0;           // the crosshair's U: 0 still, 1 walking, more running (eased)
 
   /**
    * Standing at a point facing `heading` (radians counterclockwise from east); or, out of a parked car (`car`, its
@@ -88,8 +104,18 @@ export class OnFoot {
     // Forward is where the camera looks, level; right is to its right.
     const [fx, fy] = [Math.cos(this.yaw), Math.sin(this.yaw)], [rx, ry] = [fy, -fx];
     const [m0, m1] = [input.move[0], input.move[1]];
-    const run = input.fast && !aiming;
-    stepWalker(this.walker, { dx: fx * m1 + rx * m0, dy: fy * m1 + ry * m0, run, jump: input.move[2] > 0 }, dt, this.local);
+    stepWalker(this.walker, { dx: fx * m1 + rx * m0, dy: fy * m1 + ry * m0, run: input.fast, jump: input.move[2] > 0 }, dt, this.local);
+    // The crosshair's U eases toward the size for how they're moving: walkerGait's 0 still, 1 walking, more running.
+    const w = this.walker, target = w.air ? WALKER.runGait * SWAY.air : walkerGait(w);
+    this.swayAmp += (target - this.swayAmp) * Math.min(1, SWAY.ease * dt);
+    // The U's own phase, at a fraction of the steps' (their phase wraps at a full turn).
+    const dp = (((w.phase - this.lastPhase) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    this.swayPhase = (this.swayPhase + dp * SWAY.rate) % (2 * Math.PI);
+    this.lastPhase = w.phase;
+    // The aim trails the steps: smoothed, so it's slower and softer than the feet.
+    const [tx, ty] = this.steps, k = Math.min(1, SWAY.follow * dt);
+    this.swayX += (tx - this.swayX) * k;
+    this.swayY += (ty - this.swayY) * k;
     // Aiming, they face where the camera looks, whichever way they're going.
     if (aiming) this.walker.heading = this.yaw;
     const r = this.local.reanchor(this.walker.x, this.walker.y);
@@ -140,9 +166,12 @@ export class OnFoot {
    */
   private shoot(): void {
     const w = this.walker, gun = heldGun(this.inventory)!, cp = Math.cos(this.pitch);
-    const d: Vec3 = [Math.cos(this.yaw) * cp, Math.sin(this.yaw) * cp, Math.sin(this.pitch)];
+    // Along where the crosshair is now: the camera's line, swayed (right is a smaller yaw).
+    const [sx, sy] = this.sway, [yaw, pitch] = [this.yaw - sx, this.pitch + sy], cq = Math.cos(pitch);
+    const d: Vec3 = [Math.cos(yaw) * cq, Math.sin(yaw) * cq, Math.sin(pitch)];
     // The camera, as camera() places it (without its ground clearance), and the ray from beside them.
-    const eye: Vec3 = [w.x - d[0] * VIEW.back, w.y - d[1] * VIEW.back, w.z + VIEW.eye - Math.sin(this.pitch) * VIEW.back];
+    const [cx, cy] = [Math.cos(this.yaw) * cp, Math.sin(this.yaw) * cp];
+    const eye: Vec3 = [w.x - cx * VIEW.back, w.y - cy * VIEW.back, w.z + VIEW.eye - Math.sin(this.pitch) * VIEW.back];
     const from: Vec3 = [eye[0] + d[0] * VIEW.back, eye[1] + d[1] * VIEW.back, eye[2] + d[2] * VIEW.back];
     const { t, hit } = this.local.raycast(from, d, gun.range);
     const end: Vec3 = [from[0] + d[0] * t, from[1] + d[1] * t, from[2] + d[2] * t];
@@ -156,6 +185,31 @@ export class OnFoot {
     this.sinceShot = 0;
     const ecef = (p: Vec3) => geodeticToEcef({ ...this.local.geodetic(p[0], p[1]), h: p[2] });
     this.onShot?.(ecef(muzzle), ecef(end), hit, this.holding);
+  }
+
+  /** Where the crosshair is off the camera's line now, radians: right and up (trailing their steps' U). */
+  get sway(): [number, number] {
+    return [this.swayX, this.swayY];
+  }
+  private swayX = 0;
+  private swayY = 0;
+  private swayPhase = 0;  // radians: the U's own cycle
+  private lastPhase = 0;  // the walker's phase, last step
+
+  /**
+   * Where their steps would put the crosshair, radians right and up: a U in time with their feet, across once every
+   * 1/SWAY.rate walk cycles, rising toward its ends.
+   */
+  private get steps(): [number, number] {
+    const a = this.swayAmp, ph = this.swayPhase, run = WALKER.runGait;
+    // Growing to walking's size by the gait, then to running's, then past it (in the air).
+    const size = (i: number) => {
+      if (a <= 1) return a * SWAY.walk[i]!;
+      if (a <= run) return SWAY.walk[i]! + ((SWAY.run[i]! - SWAY.walk[i]!) * (a - 1)) / (run - 1);
+      return (SWAY.run[i]! * a) / run;
+    };
+    // Across and back once a cycle of its own, dipping each time it crosses the middle.
+    return [size(0) * Math.sin(ph), size(1) * Math.sin(ph) ** 2];
   }
 
   /** Close enough to the parked car to get in. */
