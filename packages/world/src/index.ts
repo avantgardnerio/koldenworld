@@ -22,7 +22,7 @@ export {
 export { roadGraphFromArrow, roadGraphToArrow, type GraphMetadata, type RoadGraphFiles } from "./road-graph-arrow.ts";
 export { roadLineMesh, type Bounds, type RoadLineMesh } from "./road-lines.ts";
 export {
-  edgeExtents, edgeHalfWidth, nodeRadii, ROAD_PROFILES, SIDEWALK,
+  edgeExtents, edgeHalfWidth, nodeRadii, ROAD_PROFILES, SIDEWALK, sidewalkOffset,
 } from "./road-surface.ts";
 export {
   BUILDING_GROUPS, BUILDINGS_VERSION, buildBuildings, buildingGroup, HEIGHT_SOURCES, OSM_TYPES, ROOF_SHAPES, signedArea2,
@@ -47,7 +47,7 @@ export {
 } from "./aircraft.ts";
 export { HIP, PART, PEOPLE_PALETTE, PERSON_HEIGHT, personMesh, SHOULDER, type PersonMesh } from "./people.ts";
 export {
-  edgeArcLengths, edgeLanes, junctionReach, laneGeometry, laneOffset, lanePoint, placeVehicles, turnPoint, VEHICLE_MODELS, VEHICLE_SCALE,
+  edgeArcLengths, edgeLanes, junctionReach, laneGeometry, laneOffset, lanePoint, offsetPoint, placeVehicles, turnPoint, VEHICLE_MODELS, VEHICLE_SCALE,
   type LaneGeometry, type VehicleModel, type VehiclePlacements,
 } from "./vehicles.ts";
 export { groundFromArrow, type CellGround } from "./ground-arrow.ts";

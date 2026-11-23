@@ -168,6 +168,13 @@ export function laneGeometry(g: RoadGraph): LaneGeometry {
 export function lanePoint(
   lg: LaneGeometry, e: number, dir: number, lane: number, s: number, out: Float32Array | Float64Array, o = 0,
 ): void {
+  offsetPoint(lg, e, dir, laneOffset(lg.graph, e, dir, lane), s, out, o);
+}
+
+/** As lanePoint, on the line `off` m right of the centerline (from → to; negative: left), mitered as the lanes. */
+export function offsetPoint(
+  lg: LaneGeometry, e: number, dir: number, off: number, s: number, out: Float32Array | Float64Array, o = 0,
+): void {
   const { graph: g, cum, miter } = lg;
   const p0 = g.edges.pointStart[e]!, p1 = g.edges.pointStart[e + 1]! - 1;
   const length = cum[p1]!;
@@ -182,7 +189,6 @@ export function lanePoint(
   while (lo < p1 && cum[lo] === cum[lo - 1]) lo++;
   const i0 = lo - 1, i1 = lo;
   const seg = cum[i1]! - cum[i0]!, t = seg > 0 ? (along - cum[i0]!) / seg : 0;
-  const off = laneOffset(g, e, dir, lane);
   const x0 = g.points[2 * i0]! + miter[2 * i0]! * off, y0 = g.points[2 * i0 + 1]! + miter[2 * i0 + 1]! * off, z0 = g.pointZ[i0]!;
   const dx = g.points[2 * i1]! + miter[2 * i1]! * off - x0, dy = g.points[2 * i1 + 1]! + miter[2 * i1 + 1]! * off - y0;
   const dz = g.pointZ[i1]! - z0, len = Math.hypot(dx, dy, dz) || 1;

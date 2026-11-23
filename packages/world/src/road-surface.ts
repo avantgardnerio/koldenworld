@@ -27,7 +27,8 @@ const PROFILES = ROAD_CLASSES.map((c) => ROAD_PROFILES[c]);
 
 
 export const SIDEWALK = {
-  width: 1.8,  // m: 5 ft plus the curb
+  grass: 1.5,  // m: the strip between the kerb and the sidewalk (as cellgen's widths::GRASS)
+  width: 1.8,  // m: 5 ft plus the curb (as cellgen's widths::SIDEWALK)
   curb: 0.15,  // m above the road
 } as const;
 
@@ -42,6 +43,10 @@ export function edgeExtents(g: RoadGraph, e: number): [left: number, right: numb
   const hw = edgeHalfWidth(g, e), s = g.edges.sidewalks[e]!;
   return [hw + (s & 1 ? SIDEWALK.width : 0), hw + (s & 2 ? SIDEWALK.width : 0)];
 }
+
+/** The middle of an edge's sidewalk on a side (1: right of from → to, −1: left), as a right-positive offset, m. */
+export const sidewalkOffset = (g: RoadGraph, e: number, side: number) =>
+  side * (edgeHalfWidth(g, e) + SIDEWALK.grass + SIDEWALK.width / 2);
 
 /** Per node: the widest half width of its incident edges (the intersection disc radius). */
 export function nodeRadii(g: RoadGraph): Float32Array {

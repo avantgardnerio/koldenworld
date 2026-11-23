@@ -1,3 +1,4 @@
+export { createPeople, PERSON, removePeople, spawnPerson, stepPeople, WALK, type People, type PersonStart } from "./people.ts";
 export { Rng } from "./rng.ts";
 export { Table, type Columns, type Cursor, type Schema } from "./table.ts";
 export {
