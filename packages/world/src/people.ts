@@ -145,6 +145,22 @@ export const vagrantMesh = (): PersonMesh => figure(VAGRANT);
 /** The player on foot: a pedestrian in a red jacket, to stand out. */
 export const playerMesh = (): PersonMesh => figure(PLAYER);
 
+/** Where a pistol's muzzle is, below the right shoulder with the arm hanging (m); the arm raised, this far ahead of it. */
+export const MUZZLE = { x: 0.24, z: 0.68 } as const;
+
+/**
+ * A pistol in the right hand, as a part of the right forearm (so it moves with it): its barrel pointing down the
+ * hanging arm, to MUZZLE (forward, with the arm raised to aim), its grip in the hand, pointing back.
+ */
+export function pistolMesh(): PersonMesh {
+  const b = new Builder(), [x0, x1] = [MUZZLE.x - 0.018, MUZZLE.x + 0.018];
+  b.box(x0, x1, -0.005, 0.035, MUZZLE.z, 0.9, SWATCH.shoes);         // slide and barrel
+  b.box(x0 + 0.003, x1 - 0.003, -0.11, -0.005, 0.85, 0.89, SWATCH.shoes);  // grip
+  b.box(x0 + 0.008, x1 - 0.008, -0.04, -0.005, 0.83, 0.85, SWATCH.shoes);  // trigger guard
+  const m = b.mesh();
+  return { ...m, parts: new Uint8Array(m.positions.length / 3).fill(PART.rightForearm) };
+}
+
 function figure(o: Outfit): PersonMesh {
   const b = new Builder();
   const parts: number[] = [];

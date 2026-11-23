@@ -98,7 +98,7 @@ export class VagrantView implements RoamWorld {
       out.data.set([
         m[0]! * x + m[4]! * y + m[8]! * z + m[12]!, m[1]! * x + m[5]! * y + m[9]! * z + m[13]!, m[2]! * x + m[6]! * y + m[10]! * z + m[14]!,
         m[0]! * fx + m[4]! * fy, m[1]! * fx + m[5]! * fy, m[2]! * fx + m[6]! * fy,
-        c.phase[i]!, gait, pose,
+        c.phase[i]!, gait, pose, 0,
       ], o);
     }
   }

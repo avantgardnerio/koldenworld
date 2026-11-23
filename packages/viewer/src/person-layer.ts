@@ -24,10 +24,14 @@ import type { Frame } from "./flat-layer.ts";
 const LEG_SWING = 0.45, ARM_SWING = 0.35;
 /** Radians: the most a knee bends at a walk (more running); the elbows' bend at a walk, and how much more running. */
 const KNEE_BEND = 0.9, ELBOW_BEND = 0.15, ELBOW_RUN = 1.1;
-/** Floats per instance: position, forward, phase, gait, pose. */
-export const PERSON_STRIDE = 9;
-/** How a figure holds itself: upright, sitting, lying, shouting (arms up, waving), staggering (swaying side to side). */
-export const POSE = { upright: 0, sit: 1, lie: 2, shout: 3, stagger: 4 } as const;
+/** Floats per instance: position, forward, phase, gait, pose, aim (radians up, aiming). */
+export const PERSON_STRIDE = 10;
+/**
+ * How a figure holds itself: upright, sitting, lying, shouting (arms up, waving), staggering (swaying side to side),
+ * aiming (the right arm straight out, `aim` radians up from level), carrying (a gun in the right hand: the arm
+ * locked straight down, so it points at the ground, however they move). Aiming and carrying walk as upright.
+ */
+export const POSE = { upright: 0, sit: 1, lie: 2, shout: 3, stagger: 4, aim: 5, carry: 6 } as const;
 /** Staggering: how far the body sways either side, radians. */
 const SWAY = 0.14;
 /** Sitting on the ground: how far the hips are above it, m (the legs' half thickness). */
@@ -43,7 +47,7 @@ in vec2 a_uv;
 in float a_part;
 in vec3 i_pos;
 in vec3 i_fwd;
-in vec3 i_walk;
+in vec4 i_walk;
 out vec3 v_world;
 out vec3 v_normal;
 out vec2 v_uv;
@@ -58,7 +62,8 @@ vec3 turn(vec3 n, float a) {
 }
 void main() {
   float ph = i_walk.x, gait = i_walk.y, pose = i_walk.z;
-  bool sit = pose > 0.5 && pose < 1.5, lie = pose > 1.5 && pose < 2.5, shout = pose > 2.5 && pose < 3.5, stagger = pose > 3.5;
+  bool sit = pose > 0.5 && pose < 1.5, lie = pose > 1.5 && pose < 2.5, shout = pose > 2.5 && pose < 3.5;
+  bool stagger = pose > 3.5 && pose < 4.5, aim = pose > 4.5 && pose < 5.5, carry = pose > 5.5;
   float leg = ${LEG_SWING.toFixed(3)} * gait * sin(ph);  // the left thigh's angle; the right's is −leg
   // Each side's joints (x left, y right): thigh and upper arm swing, knee and elbow bend. A knee bends as its leg
   // swings forward; elbows bend a little walking and toward a right angle running.
@@ -77,6 +82,16 @@ void main() {
     // Shouting: both arms up over the head, waving, out of step with each other.
     arm = 2.7 + 0.4 * vec2(sin(2.0 * ph), sin(2.0 * ph + 3.14));
     elbow = vec2(0.3);
+  }
+  if (aim) {
+    // Aiming: the right arm straight out ahead, tipped up (or down) with the aim.
+    arm.y = 1.571 + i_walk.w;
+    elbow.y = 0.0;
+  }
+  if (carry) {
+    // Carrying a gun: the right arm locked straight down, no swing, no bend.
+    arm.y = 0.0;
+    elbow.y = 0.0;
   }
   int part = int(a_part + 0.5);
   bool left = part == ${PART.leftLeg} || part == ${PART.leftShin} || part == ${PART.leftArm} || part == ${PART.leftForearm};
@@ -153,7 +168,7 @@ export function createPersonRenderer(gl: WebGL2RenderingContext, mesh: PersonMes
   });
   const ibuf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, ibuf);
-  for (const [a, size, off] of [[4, 3, 0], [5, 3, 12], [6, 3, 24]] as const) {
+  for (const [a, size, off] of [[4, 3, 0], [5, 3, 12], [6, 4, 24]] as const) {
     gl.enableVertexAttribArray(a);
     gl.vertexAttribPointer(a, size, gl.FLOAT, false, 4 * PERSON_STRIDE, off);
     gl.vertexAttribDivisor(a, 1);

@@ -48,8 +48,8 @@ export interface DriveInput {
 export interface VehicleWorld {
   /** The ground's height at a point, m. */
   height(x: number, y: number): number;
-  /** Every wall segment (a building's edge) that may touch a box (x0, y0)–(x1, y1). */
-  walls(x0: number, y0: number, x1: number, y1: number, visit: (ax: number, ay: number, bx: number, by: number) => void): void;
+  /** Every wall segment (a building's edge) that may touch a box (x0, y0)–(x1, y1), and how high it reaches if known. */
+  walls(x0: number, y0: number, x1: number, y1: number, visit: (ax: number, ay: number, bx: number, by: number, top?: number) => void): void;
 }
 
 export const VEHICLE = {

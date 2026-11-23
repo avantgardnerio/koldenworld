@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, placeVagrants, playerMesh, vagrantMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, vagrantMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -37,7 +37,10 @@ import { OnFoot } from "./on-foot.ts";
 import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
 import { createContrailLayer } from "./contrail-layer.ts";
 import { createCarModels, createCarRenderer, type CarInstances, type CarModels, type CarRenderer } from "./car-layer.ts";
-import { Instruments } from "./instruments.ts";
+import { heldGun, ITEMS } from "@game/sim";
+import { gunshot } from "./audio.ts";
+import { createEffectsLayer, Effects } from "./effects-layer.ts";
+import { Instruments, type HandData } from "./instruments.ts";
 import { PeopleView } from "./people-view.ts";
 import { VagrantView, type RoamCell } from "./vagrant-view.ts";
 import { createPersonRenderer, PERSON_STRIDE, type PersonInstances } from "./person-layer.ts";
@@ -367,6 +370,9 @@ async function start(): Promise<void> {
   // The player on foot.
   const playerRenderer = createPersonRenderer(gl, playerMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
   const playerInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE), count: 0 };
+  // What's in their hand (drawn with them), and what shots leave behind.
+  const pistolRenderer = createPersonRenderer(gl, pistolMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
+  const effects = new Effects(), effectsLayer = createEffectsLayer(gl);
   const contrails = emptyContrails();
   const contrailLayer = showPlanes ? createContrailLayer(gl) : undefined;
   air.onUpdate = () => wake();
@@ -537,6 +543,7 @@ async function start(): Promise<void> {
     if (foot) {
       foot.instance(vf, playerInstances);
       playerRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
+      if (foot.holding === "pistol") pistolRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
     }
     let personTriangles = 0;
     if (showPeople) {
@@ -564,6 +571,7 @@ async function start(): Promise<void> {
       air.contrails(vf, performance.now() / 1000, contrails);
       contrailLayer.draw(f, contrails, h);
     }
+    effectsLayer.draw(f, vf, effects, performance.now() / 1000, h);
     if (status.graphOverlay) {
       for (const g of visible) {
         if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, bias: 1 });
@@ -591,6 +599,7 @@ async function start(): Promise<void> {
         : { bearing: (-yaw * 180) / Math.PI, pitch, speed: groundSpeed, climb, altitude: camera.h, agl, ground: below, lat: camera.lat, lon: camera.lon },
       drive && { kmh: drive.kmh, bearing: 90 - (drive.car.heading * 180) / Math.PI, wheel, pedal },
       foot && (foot.nearCar ? "F: get in" : foot.car ? undefined : "V: fly"),
+      foot && handData(foot),
     );
     const m = (t: number) => (t / 1e6).toFixed(2);
     hud.textContent = `cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
@@ -676,15 +685,29 @@ async function start(): Promise<void> {
     wheel = pedal = 0;
     if (drive) {
       const car = drive.parked();
-      foot = new OnFoot(car.lat, car.lon, car.heading, loaded, car, CAR_HALF);
+      foot = onFoot(new OnFoot(car.lat, car.lon, car.heading, loaded, car, CAR_HALF));
       drive = undefined;
     } else if (foot?.car && foot.nearCar) {
       drive = Drive.from(foot.car, loaded);
       foot = undefined;
     } else if (!foot) {
-      foot = new OnFoot(camera.lat, camera.lon, yawPitch(camera.rot)[0] + Math.PI / 2, loaded);
+      foot = onFoot(new OnFoot(camera.lat, camera.lon, yawPitch(camera.rot)[0] + Math.PI / 2, loaded));
     }
     wake();
+  });
+  /** On foot: their shots flash, trace and go bang. */
+  const onFoot = (o: OnFoot): OnFoot => {
+    o.onShot = (muzzle, end, hit) => {
+      effects.shot(muzzle, end, hit, performance.now() / 1000);
+      gunshot();
+    };
+    return o;
+  };
+  // On foot: 1–9 take an inventory slot in hand; R reloads.
+  addEventListener("keydown", (e) => {
+    if (!foot || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (/^Digit[1-9]$/.test(e.code)) foot.select(Number(e.code.slice(5)) - 1);
+    if (e.code === "KeyR") foot.reload();
   });
 
   addEventListener("keydown", (e) => {
@@ -720,6 +743,13 @@ start().catch((err: unknown) => {
   status.error = err instanceof Error ? err.message : String(err);
   console.error(err);
 });
+
+/** What the instruments show of what's in hand, on foot. */
+function handData(foot: OnFoot): HandData {
+  const inv = foot.inventory, gun = heldGun(inv);
+  const rounds = gun && (inv.reloading > 0 ? "reloading" : `${inv.rounds[inv.selected]}/${gun.magazine}`);
+  return { slots: inv.items.map((k) => ITEMS[k].name), selected: inv.selected, rounds, crosshair: !!gun, aiming: foot.aiming };
+}
 
 /** Adds one car (position and forward direction, in the view frame) to a model's instances. */
 function addCar(out: CarInstances, model: number, { pos, fwd }: { pos: Vec3; fwd: Vec3 }): void {

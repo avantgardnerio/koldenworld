@@ -131,7 +131,7 @@ export class PeopleView implements SidewalkNet {
         out.data = grown;
       }
       const o = PERSON_STRIDE * out.count++, d = out.data;
-      d.set([p[0]!, p[1]!, p[2]!, fx / fl, fy / fl, 0, c.phase[i]!, 1, POSE.upright], o);
+      d.set([p[0]!, p[1]!, p[2]!, fx / fl, fy / fl, 0, c.phase[i]!, 1, POSE.upright, 0], o);
     }
   }
 

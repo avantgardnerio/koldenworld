@@ -13,6 +13,7 @@ const GROUND = 1;
 
 export interface WallGrid {
   segments: Float32Array;  // x0, y0, x1, y1 per segment
+  tops: Float32Array;      // per segment: how high its building reaches, m (as the cell's z: base + height)
   x0: number;
   y0: number;
   nx: number;
@@ -24,7 +25,7 @@ export interface WallGrid {
 }
 
 export function wallGrid(b: Buildings): WallGrid {
-  const seg: number[] = [];
+  const seg: number[] = [], top: number[] = [];
   for (let i = 0; i < b.count; i++) {
     if (b.minHeight[i]! > GROUND) continue;
     for (let r = b.ringStart[i]!; r < b.ringStart[i + 1]!; r++) {
@@ -32,6 +33,7 @@ export function wallGrid(b: Buildings): WallGrid {
       for (let k = a; k < e; k++) {
         const j = k + 1 < e ? k + 1 : a;  // rings are open
         seg.push(b.points[2 * k]!, b.points[2 * k + 1]!, b.points[2 * j]!, b.points[2 * j + 1]!);
+        top.push(b.base[i]! + b.height[i]!);
       }
     }
   }
@@ -46,7 +48,7 @@ export function wallGrid(b: Buildings): WallGrid {
   if (n === 0) [x0, y0, x1, y1] = [0, 0, 0, 0];
   const nx = Math.max(1, Math.ceil((x1 - x0) / BUCKET)), ny = Math.max(1, Math.ceil((y1 - y0) / BUCKET));
   const grid: WallGrid = {
-    segments, x0, y0, nx, ny, start: new Uint32Array(nx * ny + 1), items: new Uint32Array(0),
+    segments, tops: Float32Array.from(top), x0, y0, nx, ny, start: new Uint32Array(nx * ny + 1), items: new Uint32Array(0),
     seen: new Uint32Array(n), query: 0,
   };
   // Counts, offsets, fill (CSR): each segment in every bucket its box touches.
@@ -62,10 +64,10 @@ export function wallGrid(b: Buildings): WallGrid {
   return grid;
 }
 
-/** Visits every segment whose bucket a box touches, once each. */
+/** Visits every segment whose bucket a box touches, once each (with how high its building reaches). */
 export function queryWalls(
   g: WallGrid, x0: number, y0: number, x1: number, y1: number,
-  visit: (ax: number, ay: number, bx: number, by: number) => void,
+  visit: (ax: number, ay: number, bx: number, by: number, top: number) => void,
 ): void {
   const q = ++g.query;
   forBuckets(g, x0, y0, x1, y1, (c) => {
@@ -73,7 +75,7 @@ export function queryWalls(
       const s = g.items[k]!;
       if (g.seen[s] === q) continue;
       g.seen[s] = q;
-      visit(g.segments[4 * s]!, g.segments[4 * s + 1]!, g.segments[4 * s + 2]!, g.segments[4 * s + 3]!);
+      visit(g.segments[4 * s]!, g.segments[4 * s + 1]!, g.segments[4 * s + 2]!, g.segments[4 * s + 3]!, g.tops[s]!);
     }
   });
 }

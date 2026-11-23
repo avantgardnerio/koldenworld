@@ -11,8 +11,11 @@ import { fromYawPitch } from "./camera.ts";
 import type { GlobeCamera } from "./globe-camera.ts";
 import { LocalWorld, type LoadedWorld } from "./local-world.ts";
 
-/** The chase camera: behind and above the car (m), looking down a little, turning toward the car's heading at LAG /s. */
-const CHASE = { back: 7.5, up: 2.6, pitch: -0.16, lag: 5, clearance: 1.2 };
+/**
+ * The chase camera: behind and above the car (m), looking down a little over its roof, turning toward the car's
+ * heading at `lag` /s and tipping with its pitch at `pitchLag` /s (so downhill it looks down the road).
+ */
+const CHASE = { back: 7.5, up: 3.4, pitch: -0.22, lag: 5, pitchLag: 3, clearance: 1.2 };
 
 /** A car standing somewhere: lat/lon, and its heading (radians counterclockwise from east, in the ENU frame there). */
 export interface Parked {
@@ -25,6 +28,7 @@ export class Drive {
   readonly car: Vehicle;
   readonly local: LocalWorld;
   private yaw: number;  // the camera's heading, radians counterclockwise from east
+  private tilt = 0;     // the camera's share of the car's pitch, radians (lagging it)
   private w: LoadedWorld;
 
   /** Starts at rest at a point, facing `heading` (radians counterclockwise from east). */
@@ -45,6 +49,7 @@ export class Drive {
     // The camera turns toward the car's heading (the short way round).
     const d = Math.atan2(Math.sin(this.car.heading - this.yaw), Math.cos(this.car.heading - this.yaw));
     this.yaw += d * Math.min(1, CHASE.lag * dt);
+    this.tilt += (this.car.pitch - this.tilt) * Math.min(1, CHASE.pitchLag * dt);
     const r = this.local.reanchor(this.car.x, this.car.y);
     if (r) {
       const c = this.car;
@@ -73,13 +78,17 @@ export class Drive {
     return { lat, lon, heading: Math.atan2(dy, dx) };
   }
 
-  /** The chase camera: behind the car along the camera's heading, above it, never under the ground. */
+  /**
+   * The chase camera: behind the car along the camera's heading and back up the slope it's on (by its lagged
+   * pitch), above it, tipped with it; never under the ground.
+   */
   camera(): GlobeCamera {
-    const [x, y] = [this.car.x - Math.cos(this.yaw) * CHASE.back, this.car.y - Math.sin(this.yaw) * CHASE.back];
+    const back = CHASE.back * Math.cos(this.tilt);
+    const [x, y] = [this.car.x - Math.cos(this.yaw) * back, this.car.y - Math.sin(this.yaw) * back];
     const { lat, lon } = this.local.geodetic(x, y);
-    const h = Math.max(this.car.z + CHASE.up, this.w.groundAt(lat, lon) + CHASE.clearance);
+    const h = Math.max(this.car.z + CHASE.up - CHASE.back * Math.sin(this.tilt), this.w.groundAt(lat, lon) + CHASE.clearance);
     // Yaw counterclockwise from north; our headings are from east.
-    return { lat, lon, h, rot: fromYawPitch(this.yaw - Math.PI / 2, CHASE.pitch) };
+    return { lat, lon, h, rot: fromYawPitch(this.yaw - Math.PI / 2, CHASE.pitch + this.tilt) };
   }
 
   /** The car's position and forward direction in a view frame (for drawing it as a traffic car). */

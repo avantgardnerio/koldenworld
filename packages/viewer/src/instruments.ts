@@ -10,7 +10,9 @@
 //   and of 8,000 m/s both read).
 // - Driving: a speedometer (km/h; R in reverse) with the heading above it,
 //   and the wheel (left–right) and pedal (throttle up, brake down) beside it.
-// - On foot: nothing but a hint now and then (what F does).
+// - On foot: the inventory along the bottom (what's in hand outlined, a gun's
+//   rounds beside it), a crosshair with a gun in hand (green aiming), and a
+//   hint now and then (what F does).
 //
 // Drawn as light lines with a dark outline, so they read over sky and ground.
 
@@ -26,6 +28,14 @@ export interface FlightData {
   ground: number;   // the ground's height, m above the ellipsoid
   lat: number;
   lon: number;
+}
+
+export interface HandData {
+  slots: string[];    // the inventory's items, by name
+  selected: number;   // the one in hand
+  rounds?: string;    // a gun in hand: what's in it ("12/12", "reloading")
+  crosshair: boolean; // a gun in hand
+  aiming: boolean;
 }
 
 export interface DriveData {
@@ -50,8 +60,11 @@ export class Instruments {
     this.ctx = canvas.getContext("2d")!;
   }
 
-  /** Clears, sized to the window; then draws one set of instruments (or none), and a hint at the bottom if there is one. */
-  draw(flight?: FlightData, drive?: DriveData, hint?: string): void {
+  /**
+   * Clears, sized to the window; then draws one set of instruments (or none), what's in hand on foot, and a hint at
+   * the bottom if there is one.
+   */
+  draw(flight?: FlightData, drive?: DriveData, hint?: string, hand?: HandData): void {
     const { canvas, ctx } = this, dpr = devicePixelRatio;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
@@ -64,7 +77,25 @@ export class Instruments {
     ctx.lineJoin = "round";
     if (drive) this.dashboard(w, h, drive);
     else if (flight) this.hud(w, h, flight);
+    if (hand) this.hand(w, h, hand);
     if (hint) this.text(hint, w / 2, h - 70, 15, "center");
+  }
+
+  // --- on foot -----------------------------------------------------------------------
+
+  /** The inventory along the bottom (the slot in hand outlined, with its rounds); a crosshair with a gun in hand. */
+  private hand(w: number, h: number, d: HandData): void {
+    const bw = 104, bh = 26, y = h - 26, x0 = w / 2 - (d.slots.length * (bw + 6)) / 2 + bw / 2;
+    d.slots.forEach((name, i) => {
+      const x = x0 + i * (bw + 6), on = i === d.selected;
+      this.box(x, y, bw, bh, on ? ACCENT : "rgb(255 255 255 / 0.35)");
+      this.text(`${i + 1}  ${name}${on && d.rounds ? `  ${d.rounds}` : ""}`, x, y + 5, 13, "center", on ? INK : "rgb(244 251 255 / 0.6)");
+    });
+    if (!d.crosshair) return;
+    const [cx, cy] = [w / 2, h / 2], color = d.aiming ? ACCENT : INK;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      this.stroke([[cx + dx * 5, cy + dy * 5], [cx + dx * 13, cy + dy * 13]], 2, color);
+    }
   }
 
   // --- flying ------------------------------------------------------------------------
@@ -205,12 +236,12 @@ export class Instruments {
   }
 
   /** A value's box, centered at (x, y). */
-  private box(x: number, y: number, w: number, h: number): void {
+  private box(x: number, y: number, w: number, h: number, edge = INK): void {
     const ctx = this.ctx;
     ctx.fillStyle = "rgb(10 20 30 / 0.55)";
     ctx.fillRect(x - w / 2, y - h / 2, w, h);
     ctx.lineWidth = 1.5;
-    ctx.strokeStyle = INK;
+    ctx.strokeStyle = edge;
     ctx.strokeRect(x - w / 2, y - h / 2, w, h);
   }
 }

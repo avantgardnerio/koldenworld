@@ -15,13 +15,13 @@ const AXES: Record<string, [axis: 0 | 1 | 2, sign: 1 | -1]> = {
 
 export const isControlKey = (code: string) => code in AXES || code === "ShiftLeft" || code === "ShiftRight";
 
-export function decodeInput(held: ReadonlySet<string>, look: [number, number]): CameraInput {
+export function decodeInput(held: ReadonlySet<string>, look: [number, number], fire = 0, aim = false): CameraInput {
   const move: [number, number, number] = [0, 0, 0];
   for (const code of held) {
     const a = AXES[code];
     if (a) move[a[0]] = Math.max(-1, Math.min(1, move[a[0]] + a[1]));
   }
-  return { move, look, fast: held.has("ShiftLeft") || held.has("ShiftRight") };
+  return { move, look, fast: held.has("ShiftLeft") || held.has("ShiftRight"), fire, aim };
 }
 
 export const isIdle = (i: CameraInput) =>
@@ -42,8 +42,20 @@ export function attachInput(canvas: HTMLCanvasElement, onActivity: () => void) {
   addEventListener("keyup", (e) => { held.delete(e.code); });
   addEventListener("blur", () => { held.clear(); dragging = false; });
 
-  // Click to capture the mouse (Esc releases). Dragging also looks, if capture is refused.
-  canvas.addEventListener("click", () => { canvas.requestPointerLock?.()?.catch?.(() => {}); });
+  // Click to capture the mouse (Esc releases). Dragging also looks, if capture is refused. Captured, the left button
+  // fires (each press counted) and the right one aims (while held).
+  let fire = 0, aim = false;
+  const captured = () => document.pointerLockElement === canvas;
+  canvas.addEventListener("click", () => { if (!captured()) canvas.requestPointerLock?.()?.catch?.(() => {}); });
+  canvas.addEventListener("mousedown", (e) => {
+    if (!captured()) return;
+    if (e.button === 0) fire++;
+    if (e.button === 2) aim = true;
+    onActivity();
+  });
+  addEventListener("mouseup", (e) => { if (e.button === 2) aim = false; });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  document.addEventListener("pointerlockchange", () => { if (!captured()) aim = false; });
   canvas.addEventListener("pointerdown", () => { dragging = true; });
   addEventListener("pointerup", () => { dragging = false; });
   addEventListener("pointermove", (e) => {
@@ -55,9 +67,10 @@ export function attachInput(canvas: HTMLCanvasElement, onActivity: () => void) {
 
   return {
     take(): CameraInput {
-      const input = decodeInput(held, [dx, dy]);
+      const input = decodeInput(held, [dx, dy], fire, aim);
       dx = 0;
       dy = 0;
+      fire = 0;
       return input;
     },
   };

@@ -94,7 +94,8 @@ describe("projection", () => {
 
 describe("decodeInput", () => {
   it("maps physical keys to axes; opposite keys cancel", () => {
-    expect(decodeInput(new Set(["KeyW", "KeyD", "ShiftLeft"]), [1, 2])).toEqual({ move: [1, 1, 0], look: [1, 2], fast: true });
+    expect(decodeInput(new Set(["KeyW", "KeyD", "ShiftLeft"]), [1, 2])).toEqual({ move: [1, 1, 0], look: [1, 2], fast: true, fire: 0, aim: false });
+    expect(decodeInput(new Set(), [0, 0], 2, true)).toMatchObject({ fire: 2, aim: true });
     expect(decodeInput(new Set(["KeyW", "KeyS", "KeyQ"]), [0, 0]).move).toEqual([0, 0, -1]);
     expect(decodeInput(new Set(["KeyW", "ArrowUp"]), [0, 0]).move).toEqual([0, 1, 0]);
   });

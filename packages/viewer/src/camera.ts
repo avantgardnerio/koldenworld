@@ -21,6 +21,8 @@ export interface CameraInput {
   move: Vec3;      // -1..1 along camera right, camera forward, world up
   look: [dx: number, dy: number];  // mouse movement, CSS px (y down)
   fast: boolean;
+  fire?: number;   // left-button presses since the last input (mouse captured)
+  aim?: boolean;   // the right button held (mouse captured)
 }
 
 export const FOV_Y = (60 * Math.PI) / 180;
