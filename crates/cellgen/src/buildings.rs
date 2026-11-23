@@ -6,8 +6,9 @@
 //! Loaded from Postgres (buildings: outlines, not building:parts); a tile has the buildings it owns, by the same point
 //! as the TS (the area centroid of the first outer ring), so each building is in exactly one tile, the parent of its
 //! fine cell. Extruded as prisms (walls from just below the lowest ground under the outline, a flat roof at the mean
-//! ground height plus the height) in the tile's frame, each vertex knowing which of the tile's 64 fine cells its shape
-//! is in, so a viewer can hide the shapes where it has the fine cells' own buildings.
+//! ground height plus the height) in the tile's frame, sorted by which of the tile's 64 fine cells each shape is in (a
+//! range each), so a viewer draws only where it doesn't have the fine cells' own buildings. Shapes under MIN_AREA are
+//! left out.
 
 use crate::clip::{UNITS, point};
 use crate::geodesy::{self, Frame};
@@ -30,14 +31,14 @@ pub const GAP: f64 = 10.0;
 /// Footprints simplified to within this, m, before merging.
 pub const SIMPLIFY: f64 = 1.0;
 /// Merged outlines simplified to within this, m.
-pub const OUTLINE: f64 = 3.0;
+pub const OUTLINE: f64 = 5.0;
 /// At least this tall, m: a tower, kept on its own.
 pub const TOWER: f64 = 40.0;
 /// Walls meeting at less than this share a normal at their corner (curves shade smoothly); at more, a crease (as the
 /// TS building mesh's CREASE).
 const CREASE_COS: f64 = 0.866; // cos 30°
-/// The bottom of a wall this high, m, darkens toward the ground (the normal's fourth byte; as the TS AO_BAND).
-const AO_BAND: f64 = 5.0;
+/// Merged shapes smaller than this, m², left out of the massing (towers always kept).
+pub const MIN_AREA: f64 = 100.0;
 
 /// Buildings as columns: per building an id and a height, and its polygons' rings (outer counterclockwise, holes
 /// clockwise) as runs of points (CSR).
@@ -207,6 +208,10 @@ pub fn extrude(
     let (mut walls, mut roofs) = (Mesh::default(), Mesh::default());
     for (outer, holes) in shapes(&m.paths) {
         let o = &m.paths[outer];
+        // Too small to see from where coarse tiles show (a shed, a garage).
+        if m.tower[outer].is_none() && area(o) < MIN_AREA {
+            continue;
+        }
         let ground: Vec<f64> = o.iter().map(|&p| terrain.height_at(st_of(p))).collect();
         let base = ground.iter().copied().fold(f64::MAX, f64::min) - 1.0;
         let roof = ground.iter().sum::<f64>() / ground.len() as f64 + m.height[outer];
@@ -215,9 +220,8 @@ pub fn extrude(
             .chain(holes.iter().map(|&h| &m.paths[h]))
             .collect();
 
-        // Walls: a quad per edge, facing out (outer rings counterclockwise, holes clockwise), split at the top of its
-        // dark band; each corner smooth or creased.
-        let band = roof.min(base + AO_BAND);
+        // Walls: a quad per edge, facing out (outer rings counterclockwise, holes clockwise), dark at the base (the
+        // normal's fourth byte); each corner smooth or creased.
         for ring in &rings {
             let n = ring.len();
             let faces: Vec<glam::DVec3> = (0..n)
@@ -240,10 +244,9 @@ pub fn extrude(
             for k in 0..n {
                 let (p, q) = (st_of(ring[k]), st_of(ring[(k + 1) % n]));
                 let (np, nq) = (corner(k, k + n - 1), corner(k, k + 1));
-                let mut heights = vec![base, band];
-                if band < roof {
-                    heights.push(roof);
-                }
+                // Base to roof, darkening toward the base: seen from where massing shows (beyond the fine cells), a whole-
+                // wall gradient reads like the fine buildings' dark band, at half the triangles.
+                let heights = [base, roof];
                 let first = walls.positions.len() as u32;
                 for (row, &h) in heights.iter().enumerate() {
                     for (at, nm) in [(p, np), (q, nq)] {
@@ -307,10 +310,10 @@ pub fn extrude(
         }
     }
 
-    // One mesh: walls, then roofs, a range each.
+    // One mesh, its triangles sorted by fine cell: a range per fine cell (child, first index, index count), so a viewer
+    // draws only the cells it doesn't have the buildings of. Walls and roofs tell apart by material.
     let mut mesh = walls;
     let offset = mesh.positions.len() as u32;
-    let wall_indices = mesh.indices.len() as u32;
     mesh.positions.extend(roofs.positions);
     mesh.normals.extend(roofs.normals);
     mesh.material.extend(roofs.material);
@@ -318,12 +321,22 @@ pub fn extrude(
     mesh.indices
         .extend(roofs.indices.iter().map(|i| i + offset));
     mesh.failed = roofs.failed;
-    let roof_indices = mesh.indices.len() as u32 - wall_indices;
-    for (kind, first, count) in [(0, 0, wall_indices), (1, wall_indices, roof_indices)] {
-        if count > 0 {
-            mesh.ranges.push([kind, first, count]);
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 64];
+    for t in mesh.indices.chunks(3) {
+        buckets[mesh.child[t[0] as usize] as usize].extend_from_slice(t);
+    }
+    mesh.indices.clear();
+    for (child, indices) in buckets.into_iter().enumerate() {
+        if !indices.is_empty() {
+            mesh.ranges.push([
+                child as u32,
+                mesh.indices.len() as u32,
+                indices.len() as u32,
+            ]);
+            mesh.indices.extend(indices);
         }
     }
+    mesh.child.clear();
     mesh
 }
 

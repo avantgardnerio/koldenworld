@@ -1,6 +1,6 @@
 // A lit 3D mesh: buildings, and the ground. Depth-tested against everything drawn before it
-// and back-face culled (the operator emits front faces counterclockwise). A mesh with a child
-// per vertex (a coarse tile's buildings: which of its 64 fine cells) hides the ones draw is told to.
+// and back-face culled (the operator emits front faces counterclockwise). A draw can be limited
+// to runs of the index buffer (a coarse tile's buildings, less the fine cells that have their own).
 // Positions and normals are in a cell's frame, placed by its model matrix
 // (rigid, so it rotates normals too). Holds GPU handles only.
 
@@ -15,18 +15,11 @@ in vec3 a_pos;
 in vec4 a_normal;     // x, y, z, and how occluded (0..1: walls darken toward the ground)
 in uint a_mat;
 in float a_shade;
-in uint a_child;      // 64 and up: never hidden
-uniform uvec2 u_hidden;  // bits: fine cells 0–31, 32–63
 out vec3 v_world;
 out vec3 v_normal;
 out vec3 v_color;
 out float v_occluded;
 void main() {
-  uint bits = a_child < 32u ? u_hidden.x >> a_child : a_child < 64u ? u_hidden.y >> (a_child - 32u) : 0u;
-  if ((bits & 1u) == 1u) {
-    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);  // every corner of a hidden shape outside the view: clipped
-    return;
-  }
   vec4 world = u_model * vec4(a_pos, 1.0);
   gl_Position = u_view * world;
   v_world = world.xyz;
@@ -54,8 +47,8 @@ void main() {
 }`;
 
 export interface SolidLayer {
-  /** hidden: the fine cells (bits 0–63, as two 32-bit halves) whose shapes not to draw, for a mesh with children. */
-  draw(f: Frame, model: Float32Array, sun: readonly [number, number, number], hidden?: readonly [number, number]): number;  // triangles drawn (hidden ones included)
+  /** runs: only these (first index, index count) pairs, the first `runCount` of them; triangles drawn. */
+  draw(f: Frame, model: Float32Array, sun: readonly [number, number, number], runs?: Uint32Array, runCount?: number): number;
   dispose(): void;
 }
 
@@ -75,7 +68,7 @@ function program(gl: WebGL2RenderingContext): WebGLProgram {
   p = gl.createProgram();
   gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, VERTEX));
   gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT));
-  ["a_pos", "a_normal", "a_mat", "a_shade", "a_child"].forEach((name, i) => gl.bindAttribLocation(p!, i, name));
+  ["a_pos", "a_normal", "a_mat", "a_shade"].forEach((name, i) => gl.bindAttribLocation(p!, i, name));
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`program: ${gl.getProgramInfoLog(p)}`);
   programs.set(gl, p);
@@ -84,14 +77,13 @@ function program(gl: WebGL2RenderingContext): WebGLProgram {
 
 export function createSolidLayer(
   gl: WebGL2RenderingContext,
-  mesh: Omit<BuildingMesh, "indices"> & { indices: Uint16Array | Uint32Array; child?: Uint8Array },
+  mesh: Omit<BuildingMesh, "indices"> & { indices: Uint16Array | Uint32Array },
   colors: Float32Array,
 ): SolidLayer {
   if (colors.length > 3 * MAX_MATERIALS) throw new Error("too many materials");
   const p = program(gl);
   const u = (name: string) => gl.getUniformLocation(p, name);
   const uView = u("u_view"), uModel = u("u_model"), uColors = u("u_colors"), uEye = u("u_eye"), uSky = u("u_sky"), uFog = u("u_fog"), uSun = u("u_sun");
-  const uHidden = u("u_hidden");
 
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
@@ -100,7 +92,6 @@ export function createSolidLayer(
     { data: mesh.normals, size: 4, type: gl.BYTE, normalized: true, stride: 4 },
     { data: mesh.material, size: 1, type: gl.UNSIGNED_BYTE, normalized: false, stride: 0, integer: true },
     { data: mesh.shade, size: 1, type: gl.UNSIGNED_BYTE, normalized: true, stride: 0 },
-    ...(mesh.child ? [{ data: mesh.child, size: 1, type: gl.UNSIGNED_BYTE, normalized: false, stride: 0, integer: true }] : []),
   ].map((a, i) => {
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -116,14 +107,12 @@ export function createSolidLayer(
   gl.bindVertexArray(null);
   const count = mesh.indices.length;
   const indexType = mesh.indices instanceof Uint16Array ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
+  const indexBytes = mesh.indices.BYTES_PER_ELEMENT;
 
   return {
-    draw(f, model, sun, hidden = [0, 0]) {
-      if (count === 0) return 0;
+    draw(f, model, sun, runs, runCount = 0) {
+      if (count === 0 || (runs && runCount === 0)) return 0;
       gl.useProgram(p);
-      // Without a child per vertex, a_child is a constant (context state, not the vertex array's): never hidden.
-      if (!mesh.child) gl.vertexAttribI4ui(4, 64, 0, 0, 0);
-      gl.uniform2ui(uHidden, hidden[0], hidden[1]);
       gl.uniformMatrix4fv(uView, false, f.view);
       gl.uniformMatrix4fv(uModel, false, model);
       gl.uniform3fv(uColors, colors);
@@ -134,10 +123,19 @@ export function createSolidLayer(
       gl.depthFunc(gl.LEQUAL);
       gl.enable(gl.CULL_FACE);
       gl.bindVertexArray(vao);
-      gl.drawElements(gl.TRIANGLES, count, indexType, 0);
+      let drawn = count;
+      if (runs) {
+        drawn = 0;
+        for (let r = 0; r < runCount; r++) {
+          gl.drawElements(gl.TRIANGLES, runs[2 * r + 1]!, indexType, runs[2 * r]! * indexBytes);
+          drawn += runs[2 * r + 1]!;
+        }
+      } else {
+        gl.drawElements(gl.TRIANGLES, count, indexType, 0);
+      }
       gl.bindVertexArray(null);
       gl.disable(gl.CULL_FACE);
-      return count / 3;
+      return drawn / 3;
     },
     dispose() {
       for (const b of buffers) gl.deleteBuffer(b);

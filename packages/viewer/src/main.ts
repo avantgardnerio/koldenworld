@@ -96,6 +96,8 @@ const MAX_DT = 0.1;  // s; a stalled tab must not teleport the camera
 const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 1975, rot: fromYawPitch(0, -35 * Math.PI / 180) };
 /** Cars and planes drawn this far toward the camera from the ground they're on (m, plus 0.1% of distance). */
 const ROAD_BIAS = 0.3;
+/** Coarse tiles' massing is drawn only within this distance (m): past it a 15 m building is about a pixel tall. */
+const MASSING_DISTANCE = 12_000;
 /** Cars farther than this (m) from the camera are drawn as simple stand-ins (~20 px long there). */
 const CAR_LOD_DISTANCE = 250;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
@@ -158,7 +160,8 @@ interface CellGpu {
   far?: boolean;    // a far tile: drawn where coarse tiles aren't
   massing?: SolidLayer;  // a coarse tile's buildings, merged; a shape hides where its fine cell is loaded
   children?: CellId[];   // a coarse tile's 64 fine cells, by the index its massing knows them by
-  hidden?: [number, number];  // which of them are loaded this frame (bits), reused
+  massingRanges?: [child: number, first: number, count: number][];  // the massing's triangles per fine cell
+  runs?: Uint32Array;    // this frame's massing to draw: (first index, index count) pairs, reused
   missing: boolean;
   radius: number;  // bounding sphere around (0, 0, centerZ) in the frame, m: the ground, roads, building tops
   centerZ: number;
@@ -216,7 +219,8 @@ async function start(): Promise<void> {
         frame, coarse: true, far: !coarseTile, missing: false, model: new Float32Array(16), terrain: flatTerrain(),
         ground: createSolidLayer(gl!, mesh, GROUND), ...sphere,
         massing: massing && createSolidLayer(gl!, massing, MASSING),
-        children: coarseTile ? fineChildren(cell) : undefined, hidden: [0, 0],
+        massingRanges: massing?.ranges, runs: massing && new Uint32Array(2 * massing.ranges.length),
+        children: coarseTile ? fineChildren(cell) : undefined,
         counts: { ...zero, surfaceTriangles: mesh.indices.length / 3, buildingTriangles: massing ? massing.indices.length / 3 : 0 },
       };
     }
@@ -440,14 +444,20 @@ async function start(): Promise<void> {
     for (const g of visible) drawn.buildings += g.buildings?.draw(f, g.model, SUN) ?? 0;
     // Coarse tiles' massing, less the shapes in fine cells that have their own buildings.
     for (const g of visible) {
-      const { massing, children, hidden } = g;
-      if (!massing || !children || !hidden) continue;
-      hidden[0] = hidden[1] = 0;
-      children.forEach((child, i) => {
-        const fine = streamer.get(child);
-        if (fine && !fine.missing) hidden[i >> 5] = (hidden[i >> 5]! | (1 << (i & 31))) >>> 0;
-      });
-      drawn.massing += massing.draw(f, g.model, SUN, hidden);
+      const { massing, children, massingRanges, runs } = g;
+      if (!massing || !children || !massingRanges || !runs) continue;
+      // The tile's nearest point: its frame's origin, in the view frame, less its bounding sphere.
+      const m = g.model;
+      if (Math.hypot(m[12]! + m[8]! * g.centerZ, m[13]! + m[9]! * g.centerZ, m[14]! + m[10]! * g.centerZ) - g.radius > MASSING_DISTANCE) continue;
+      // The fine cells without their own buildings loaded, neighbors in the index buffer as one run.
+      let n = 0;
+      for (const [child, first, count] of massingRanges) {
+        const fine = streamer.get(children[child]!);
+        if (fine && !fine.missing) continue;
+        if (n > 0 && runs[2 * n - 2]! + runs[2 * n - 1]! === 3 * first) runs[2 * n - 1]! += 3 * count;
+        else [runs[2 * n], runs[2 * n + 1], n] = [3 * first, 3 * count, n + 1];
+      }
+      drawn.massing += massing.draw(f, g.model, SUN, runs, n);
     }
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
     let carTriangles = 0;

@@ -19,7 +19,7 @@ pub struct Mesh {
     pub normals: Vec<[i8; 4]>,
     pub material: Vec<u8>,
     pub indices: Vec<u32>,
-    pub child: Vec<u8>, // per vertex, if any: which of the tile's 64 fine cells it's in (buildings)
+    pub child: Vec<u8>, // per vertex while building massing: which of the tile's 64 fine cells (not written)
     pub ranges: Vec<[u32; 3]>, // per kind present: kind, first index, index count
     pub failed: usize,  // pieces earcut couldn't triangulate
 }
