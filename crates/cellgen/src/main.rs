@@ -5,6 +5,7 @@ mod clip;
 mod crossings;
 mod draw;
 mod elevation;
+mod extract;
 mod faces;
 mod fetch;
 mod geodesy;
@@ -35,6 +36,7 @@ const USAGE: &str = "usage:
   cellgen buildings <token> [--gap <m>] [--simplify <m>] [--outline <m>]
                                                 a tile's buildings merged into massing: target/buildings.png
   cellgen fetch <token | lat,lon>               an area's raw OSM (Overpass, cached in data/osm/s2/), parsed: counts
+  cellgen extract <token | lat,lon>             an area's roads, buildings, water, airports, points of interest: counts
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
 The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
@@ -205,6 +207,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 osm.strings.text.len(),
                 osm.timestamp.as_deref().unwrap_or("?")
             );
+            Ok(())
+        }
+        Some("extract") => {
+            let what = args.get(1).ok_or(USAGE)?;
+            let c = match what.split_once(',') {
+                Some((lat, lon)) => fetch::fetch_cell(lat.trim().parse()?, lon.trim().parse()?),
+                None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
+            };
+            let body = tokio::runtime::Runtime::new()?
+                .block_on(fetch::fetch(&data_dir()?, &c, |m| println!("{m}")))
+                .map_err(|e| e.to_string())?;
+            let osm = osm::parse(&body)?;
+            let started = std::time::Instant::now();
+            let x = extract::extract(&osm);
+            let parts = x.buildings.is_part.iter().filter(|&&p| p).count();
+            let polygons = |p: &extract::Polygons| p.ring_start.len() - 1;
+            println!(
+                "{} extracted in {:.0?}: {} roads, {} buildings + {} parts ({} polygons), {} water areas, {} waterways, \
+                 {} airport areas, {} airport lines, {} points of interest; {} skipped",
+                c.token,
+                started.elapsed(),
+                x.roads.way.len(),
+                x.buildings.is_part.len() - parts,
+                parts,
+                polygons(&x.buildings.shape),
+                x.water_areas.kind.len(),
+                x.waterways.way.len(),
+                x.aeroway_areas.kind.len(),
+                x.aeroway_lines.way.len(),
+                x.pois.key.len(),
+                x.skipped
+            );
+            // Sums to compare with the TS extractors.
+            let r = &x.roads;
+            println!(
+                "  roads: lanes {}, oneway {}, sidewalk bits {}, points {}, speed {:.1}; buildings: height {:.1}, min {:.1}, \
+                 levels {}, points {}; waterways: width {:.1}, points {}; airport lines: width {:.1}",
+                r.lanes_fwd
+                    .iter()
+                    .chain(&r.lanes_back)
+                    .map(|&l| l as u32)
+                    .sum::<u32>(),
+                r.oneway.iter().filter(|&&o| o).count(),
+                r.sidewalks.iter().map(|&s| s.count_ones()).sum::<u32>(),
+                r.node_id.len(),
+                r.speed.iter().map(|&s| s as f64).sum::<f64>(),
+                x.buildings.height.iter().map(|&h| h as f64).sum::<f64>(),
+                x.buildings
+                    .min_height
+                    .iter()
+                    .map(|&h| h as f64)
+                    .sum::<f64>(),
+                x.buildings.levels.iter().filter(|l| !l.is_nan()).count(),
+                x.buildings.shape.lonlat.len(),
+                x.waterways.width.iter().map(|&w| w as f64).sum::<f64>(),
+                x.waterways.lonlat.len(),
+                x.aeroway_lines.width.iter().map(|&w| w as f64).sum::<f64>(),
+            );
+            // A few points of interest, every 50th: kind and name.
+            let name = osm.strings.find("name");
+            let sample: Vec<String> = (0..x.pois.key.len())
+                .step_by(50)
+                .take(12)
+                .map(|i| {
+                    let tags = match x.pois.element_type[i] {
+                        osm::NODE => &osm.node_tags,
+                        osm::WAY => &osm.way_tags,
+                        _ => &osm.relation_tags,
+                    };
+                    let n = name.and_then(|k| tags.get(x.pois.element[i] as usize, k));
+                    format!(
+                        "{}={} \"{}\"",
+                        extract::POI_KEYS[x.pois.key[i] as usize],
+                        osm.strings.text[x.pois.value[i] as usize],
+                        n.map_or("", |v| osm.strings.text[v as usize].as_str())
+                    )
+                })
+                .collect();
+            println!("  points of interest, e.g.: {}", sample.join(", "));
             Ok(())
         }
         Some("serve") => {
