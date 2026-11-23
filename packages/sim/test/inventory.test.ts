@@ -4,15 +4,27 @@ import { createInventory, fire, held, ITEMS, reload, select, stepInventory } fro
 const pistol = ITEMS.pistol.gun!;
 
 describe("inventory", () => {
-  it("starts with empty hands in hand and a loaded pistol; hands don't fire", () => {
+  it("starts with empty hands in hand, and a loaded pistol and rifle; hands don't fire", () => {
     const inv = createInventory();
     expect(held(inv)).toBe("hands");
     expect(fire(inv)).toBe(false);
     select(inv, 1);
     expect(held(inv)).toBe("pistol");
     expect(inv.rounds[1]).toBe(pistol.magazine);
+    select(inv, 2);
+    expect(held(inv)).toBe("rifle");
+    expect(inv.rounds[2]).toBe(ITEMS.rifle.gun!.magazine);
     select(inv, 5);  // no such slot
-    expect(held(inv)).toBe("pistol");
+    expect(held(inv)).toBe("rifle");
+  });
+
+  it("keeps each gun's rounds its own", () => {
+    const inv = createInventory();
+    select(inv, 2);
+    fire(inv);
+    select(inv, 1);
+    expect(inv.rounds[1]).toBe(pistol.magazine);
+    expect(inv.rounds[2]).toBe(ITEMS.rifle.gun!.magazine - 1);
   });
 
   it("fires a round a shot, no faster than its interval", () => {

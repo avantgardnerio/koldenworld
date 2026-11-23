@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, vagrantMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -372,6 +372,9 @@ async function start(): Promise<void> {
   const playerInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE), count: 0 };
   // What's in their hand (drawn with them), and what shots leave behind.
   const pistolRenderer = createPersonRenderer(gl, pistolMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
+  const rifleRenderer = createPersonRenderer(gl, rifleMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
+  const rifleCarryRenderer = createPersonRenderer(gl, rifleCarryMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
+  const slingRenderer = createPersonRenderer(gl, slingMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
   const effects = new Effects(), effectsLayer = createEffectsLayer(gl);
   const contrails = emptyContrails();
   const contrailLayer = showPlanes ? createContrailLayer(gl) : undefined;
@@ -544,6 +547,11 @@ async function start(): Promise<void> {
       foot.instance(vf, playerInstances);
       playerRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
       if (foot.holding === "pistol") pistolRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
+      if (foot.holding === "rifle") {
+        // Slung; shouldered aiming, patrol ready otherwise.
+        slingRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
+        (foot.aiming ? rifleRenderer : rifleCarryRenderer).draw(f, SUN, ROAD_BIAS, playerInstances);
+      }
     }
     let personTriangles = 0;
     if (showPeople) {
@@ -697,9 +705,9 @@ async function start(): Promise<void> {
   });
   /** On foot: their shots flash, trace and go bang. */
   const onFoot = (o: OnFoot): OnFoot => {
-    o.onShot = (muzzle, end, hit) => {
+    o.onShot = (muzzle, end, hit, gun) => {
       effects.shot(muzzle, end, hit, performance.now() / 1000);
-      gunshot();
+      gunshot(gun === "rifle" ? "rifle" : "pistol");
     };
     return o;
   };

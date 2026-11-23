@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildRoadGraph, ELBOW, enuFrame, enuProjection, enuUnprojection, HIP, KNEE, PART, PERSON_HEIGHT, personMesh, placePeople,
+  ARM_X, buildRoadGraph, ELBOW, enuFrame, enuProjection, enuUnprojection, HAND, HIP, KNEE, PART, PATROL, PERSON_HEIGHT,
+  personMesh, placePeople, rifleCarryMesh,
   SHOULDER, vagrantMesh,
   type RoadWayInput,
 } from "../src/index.ts";
@@ -59,7 +60,7 @@ describe("person model", () => {
       [PART.leftLeg]: [KNEE - 0.05, HIP], [PART.rightLeg]: [KNEE - 0.05, HIP],
       [PART.leftShin]: [0, KNEE + 0.05], [PART.rightShin]: [0, KNEE + 0.05],
       [PART.leftArm]: [ELBOW - 0.05, SHOULDER + 0.1], [PART.rightArm]: [ELBOW - 0.05, SHOULDER + 0.1],
-      [PART.leftForearm]: [0.8, ELBOW + 0.05], [PART.rightForearm]: [0.8, ELBOW + 0.05],
+      [PART.leftForearm]: [HAND - 0.05, ELBOW + 0.05], [PART.rightForearm]: [HAND - 0.05, ELBOW + 0.05],
     };
     const left = [PART.leftLeg, PART.leftShin, PART.leftArm, PART.leftForearm] as number[];
     const right = [PART.rightLeg, PART.rightShin, PART.rightArm, PART.rightForearm] as number[];
@@ -85,5 +86,39 @@ describe("vagrant model", () => {
     expect(Math.max(...zs)).toBeCloseTo(PERSON_HEIGHT, 6);
     expect(Math.min(...ys)).toBeLessThan(Math.min(...[...p.positions].filter((_, i) => i % 3 === 1)) - 0.1);
     expect([...v.uvs]).not.toEqual([...p.uvs].concat(new Array(v.uvs.length - p.uvs.length).fill(0)));
+  });
+});
+
+describe("patrol ready", () => {
+  // The hand's middle, by the shader's arm: the forearm bent forward at the elbow, the arm swung forward at the
+  // shoulder, then rolled about the forward axis through the shoulder (at x).
+  const hand = (x: number, [swing, roll, elbow]: [number, number, number]) => {
+    const rot = (y: number, z: number, a: number, h: number): [number, number] =>
+      [y * Math.cos(a) - (z - h) * Math.sin(a), y * Math.sin(a) + (z - h) * Math.cos(a) + h];
+    let [y, z] = rot(0, HAND, elbow, ELBOW);
+    [y, z] = rot(y, z, swing, SHOULDER);
+    const dz = z - SHOULDER;
+    return [x + dz * Math.sin(roll), y, SHOULDER + dz * Math.cos(roll)];
+  };
+
+  it("puts the right hand on the grip and the left on the front of the receiver", () => {
+    const [r, l] = [hand(ARM_X, PATROL.right), hand(-ARM_X, PATROL.left)];
+    for (let k = 0; k < 3; k++) {
+      expect(r[k], `right ${k}`).toBeCloseTo(PATROL.grip[k]!, 2);
+      expect(l[k], `left ${k}`).toBeCloseTo(PATROL.front[k]!, 2);
+    }
+    // Both arms reach in toward the middle.
+    expect(PATROL.right[1]).toBeGreaterThan(0);
+    expect(PATROL.left[1]).toBeLessThan(0);
+  });
+
+  it("points the rifle at the ground a foot in front of the left foot, in front of the body, muzzle down", () => {
+    const g = PATROL.grip, d = PATROL.dir, t = -g[2] / d[2];
+    const ground = [g[0] + d[0] * t, g[1] + d[1] * t];
+    expect(ground[0]).toBeCloseTo(-0.095, 3);  // the left foot's middle
+    expect(ground[1]).toBeCloseTo(0.45, 3);    // a foot past its toe
+    const m = rifleCarryMesh(), ys = [...m.positions].filter((_, i) => i % 3 === 1);
+    expect(Math.min(...ys)).toBeGreaterThan(0.1);  // clear of the chest
+    expect([...m.parts].every((p) => p === PART.body)).toBe(true);
   });
 });

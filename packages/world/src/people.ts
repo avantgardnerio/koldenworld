@@ -21,7 +21,9 @@ import { rng } from "./vehicles.ts";
 
 export const PERSON_HEIGHT = 1.8;
 /** Where the legs and arms swing from (the hips' and shoulders' height) and bend (the knees' and elbows'), m. */
-export const HIP = 0.85, SHOULDER = 1.38, KNEE = 0.47, ELBOW = 1.19;
+export const HIP = 0.85, SHOULDER = 1.38, KNEE = 0.47, ELBOW = 1.15;
+/** The middle of a hand, hanging (m up), and how far either side of the middle the arms hang (m). */
+export const HAND = 0.82, ARM_X = 0.24;
 /** How far a limb's two halves overlap either side of the joint, m, so bending opens no gap. */
 const JOINT = 0.03;
 /**
@@ -145,8 +147,11 @@ export const vagrantMesh = (): PersonMesh => figure(VAGRANT);
 /** The player on foot: a pedestrian in a red jacket, to stand out. */
 export const playerMesh = (): PersonMesh => figure(PLAYER);
 
-/** Where a pistol's muzzle is, below the right shoulder with the arm hanging (m); the arm raised, this far ahead of it. */
-export const MUZZLE = { x: 0.24, z: 0.68 } as const;
+/**
+ * Where a gun's muzzle is, below the right shoulder with the arm hanging (m), by gun: the arm raised, this far ahead
+ * of it.
+ */
+export const MUZZLE = { x: ARM_X, z: HAND - 0.23, rifleZ: HAND - 0.55 } as const;
 
 /**
  * A pistol in the right hand, as a part of the right forearm (so it moves with it): its barrel pointing down the
@@ -154,12 +159,118 @@ export const MUZZLE = { x: 0.24, z: 0.68 } as const;
  */
 export function pistolMesh(): PersonMesh {
   const b = new Builder(), [x0, x1] = [MUZZLE.x - 0.018, MUZZLE.x + 0.018];
-  b.box(x0, x1, -0.005, 0.035, MUZZLE.z, 0.9, SWATCH.shoes);         // slide and barrel
-  b.box(x0 + 0.003, x1 - 0.003, -0.11, -0.005, 0.85, 0.89, SWATCH.shoes);  // grip
-  b.box(x0 + 0.008, x1 - 0.008, -0.04, -0.005, 0.83, 0.85, SWATCH.shoes);  // trigger guard
-  const m = b.mesh();
-  return { ...m, parts: new Uint8Array(m.positions.length / 3).fill(PART.rightForearm) };
+  b.box(x0, x1, -0.005, 0.035, MUZZLE.z, HAND - 0.01, SWATCH.shoes);                     // slide and barrel
+  b.box(x0 + 0.003, x1 - 0.003, -0.11, -0.005, HAND - 0.06, HAND - 0.02, SWATCH.shoes);  // grip
+  b.box(x0 + 0.008, x1 - 0.008, -0.04, -0.005, HAND - 0.08, HAND - 0.06, SWATCH.shoes);  // trigger guard
+  return held(b, PART.rightForearm);
 }
+
+/**
+ * An AR-15-style rifle in the right hand, aimed: as a part of the right forearm, held by the receiver behind its
+ * pistol grip, its barrel down the hanging arm to MUZZLE.rifleZ (forward, the arm raised) and its stock up behind the
+ * hand (against the shoulder, the arm raised); the magazine and grip toward the back, the sight toward the front.
+ */
+export function rifleMesh(): PersonMesh {
+  const b = new Builder();
+  rifle(b);
+  return held(b, PART.rightForearm);
+}
+
+/**
+ * A rifle in patrol ready (PATROL): muzzle down at the ground a foot in front of the left foot, held in front of the
+ * chest by both hands (the right on the grip, the left at the front of the receiver), as part of the body.
+ */
+export function rifleCarryMesh(): PersonMesh {
+  const b = new Builder();
+  rifle(b);
+  const m = b.mesh(), { grip, dir } = PATROL;
+  // Its frame, hanging in the hand (x across, y its top, z back up the barrel), onto the patrol line: the barrel along
+  // `dir`, its top as near up as it gets, across it what's left; the hand's middle onto the grip.
+  const top = normalize(sub([0, 0, 1], scale(dir, dir[2])));
+  const across = cross(top, scale(dir, -1));
+  const back = scale(dir, -1);
+  for (let i = 0; i < m.positions.length; i += 3) {
+    const [x, y, z] = [m.positions[i]! - ARM_X, m.positions[i + 1]!, m.positions[i + 2]! - HAND];
+    const [nx, ny, nz] = [m.normals[i]!, m.normals[i + 1]!, m.normals[i + 2]!];
+    for (let k = 0; k < 3; k++) {
+      m.positions[i + k] = grip[k]! + across[k]! * x + top[k]! * y + back[k]! * z;
+      m.normals[i + k] = across[k]! * nx + top[k]! * ny + back[k]! * nz;
+    }
+  }
+  return { ...m, parts: new Uint8Array(m.positions.length / 3).fill(PART.body) };
+}
+
+/** A rifle's sling: a strap from the left shoulder down across the chest to the right hip, and the same across the back. */
+export function slingMesh(): PersonMesh {
+  const b = new Builder();
+  for (const y of [0.11, -0.11]) strap(b, [-0.14, y * 0.92, 1.45], [0.17, y, 0.95], 0.04, SWATCH.shoes);
+  return held(b, PART.body);
+}
+
+/**
+ * Patrol ready: the rifle's line (the hand's middle on the grip, the barrel along `dir` toward `aim`, a foot in front
+ * of the left foot), where the left hand holds it (`front`), and the arms that put the hands there: each [swing
+ * forward, roll toward the middle (right +, left −), elbow bend], radians, as the shader turns them.
+ */
+export const PATROL = (() => {
+  const aim: Vec3 = [-0.095, 0.15 + 0.3, 0];
+  const grip: Vec3 = [0, 0.25, 1.15];
+  const dir = normalize(sub(aim, grip));
+  const front = add(grip, scale(dir, 0.19));
+  return { aim, grip, dir, front, right: reachArm(ARM_X, grip), left: reachArm(-ARM_X, front) };
+})();
+
+/**
+ * The arm (from the shoulder at x) that puts the hand's middle at a point: [swing, roll, elbow], radians. The shader
+ * bends the forearm forward at the elbow, swings the arm forward at the shoulder, then rolls it about the forward axis
+ * through the shoulder; out of reach, the arm points at it.
+ */
+function reachArm(x: number, t: Vec3): [number, number, number] {
+  const [dx, dy, dz] = [t[0] - x, t[1], t[2] - SHOULDER];
+  const l1 = SHOULDER - ELBOW, l2 = ELBOW - HAND;
+  const d = Math.min(l1 + l2 - 1e-4, Math.max(Math.abs(l1 - l2) + 1e-4, Math.hypot(dx, dy, dz)));
+  const elbow = Math.acos(Math.max(-1, Math.min(1, (d * d - l1 * l1 - l2 * l2) / (2 * l1 * l2))));
+  // Rolled, the arm's plane takes the hand out to dx: it reaches vz down in that plane.
+  const vz = -Math.hypot(dx, dz), roll = Math.atan2(dx / vz, dz / vz);
+  const swing = Math.atan2(dy, -vz) - Math.atan2(l2 * Math.sin(elbow), l1 + l2 * Math.cos(elbow));
+  return [swing, roll, elbow];
+}
+
+/** An AR-15-style rifle, hanging in the right hand (as rifleMesh describes it). */
+function rifle(b: Builder): void {
+  const x = MUZZLE.x, h = HAND - 0.91;  // modeled for a hand at 0.91 m
+  const at = (hw: number, y0: number, y1: number, z0: number, z1: number, swatch: number) => b.box(x - hw, x + hw, y0, y1, z0 + h, z1 + h, swatch);
+  at(0.025, -0.02, 0.05, 0.72, 1.02, SWATCH.shoes);            // receiver
+  at(0.022, -0.01, 0.05, 0.5, 0.72, SWATCH.pants);             // handguard
+  at(0.01, 0.01, 0.03, MUZZLE.rifleZ - h, 0.5, SWATCH.shoes);  // barrel
+  at(0.018, -0.03, 0.04, 1.02, 1.28, SWATCH.shoes);            // stock
+  at(0.012, -0.15, -0.02, 0.78, 0.86, SWATCH.shoes);           // magazine
+  at(0.012, -0.1, -0.02, 0.92, 0.96, SWATCH.shoes);            // pistol grip
+  at(0.01, 0.05, 0.08, 0.82, 0.98, SWATCH.shoes);              // sight rail
+}
+
+/** A strap from a to b, `w` wide, flat against the body (thin front to back). */
+function strap(b: Builder, p: Vec3, q: Vec3, w: number, swatch: number): void {
+  const along = sub(q, p), side = scale(normalize(cross(along, [0, 1, 0])), w / 2), thick: Vec3 = [0, 0.01, 0];
+  const ring = (c: Vec3): Vec3[] => [
+    sub(sub(c, side), thick), sub(add(c, side), thick), add(add(c, side), thick), add(sub(c, side), thick),
+  ];
+  b.hexa(ring(p), ring(q), swatch);
+}
+
+/** A held thing's mesh: all of it one part, so it moves with it. */
+function held(b: Builder, part: number): PersonMesh {
+  const m = b.mesh();
+  return { ...m, parts: new Uint8Array(m.positions.length / 3).fill(part) };
+}
+
+type Vec3 = [number, number, number];
+// Declared, not assigned, so PATROL (worked out as the module loads) can use them.
+function add(a: Vec3, b: Vec3): Vec3 { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+function sub(a: Vec3, b: Vec3): Vec3 { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+function scale(a: Vec3, k: number): Vec3 { return [a[0] * k, a[1] * k, a[2] * k]; }
+function cross(a: Vec3, b: Vec3): Vec3 { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function normalize(a: Vec3): Vec3 { return scale(a, 1 / Math.hypot(...a)); }
 
 function figure(o: Outfit): PersonMesh {
   const b = new Builder();
@@ -180,8 +291,8 @@ function figure(o: Outfit): PersonMesh {
     const [a0, a1] = side > 0 ? [0.19, 0.29] : [-0.29, -0.19];
     b.box(a0, a1, -0.06, 0.06, ELBOW - JOINT, 1.44, o.top);
     mark(side > 0 ? PART.rightArm : PART.leftArm);
-    b.box(a0 + 0.005, a1 - 0.005, -0.055, 0.055, 0.96, ELBOW + JOINT, o.top);
-    b.box(a0 + 0.015, a1 - 0.015, -0.045, 0.045, 0.86, 0.96, SWATCH.skin);
+    b.box(a0 + 0.005, a1 - 0.005, -0.055, 0.055, HAND + 0.05, ELBOW + JOINT, o.top);
+    b.box(a0 + 0.015, a1 - 0.015, -0.045, 0.045, HAND - 0.05, HAND + 0.05, SWATCH.skin);
     mark(side > 0 ? PART.rightForearm : PART.leftForearm);
   }
   b.box(-0.18, 0.18, -0.09, 0.09, HIP - 0.05, 0.93, o.legs);

@@ -11,8 +11,10 @@
 // cars near them (setObstacles).
 //
 // They carry an inventory (sim's): the number keys pick what's in their hand.
-// A gun is carried pointing straight at the ground (the right arm locked
-// down: no swing, walking or running); only while the
+// A gun is carried pointing at the ground: a pistol at the side (the right
+// arm locked straight down: no swing, walking or running), a slung rifle in
+// patrol ready (both hands on it in front of the chest, muzzle at the ground a
+// foot in front of the left foot); only while the
 // right mouse button is held is it aimed (the right arm straight out along
 // the camera's line, facing where it looks, at a walk), and only then does
 // the left fire. A shot goes from the camera through the crosshair (the
@@ -47,8 +49,8 @@ export class OnFoot {
   private pitch = VIEW.start;
   private w: LoadedWorld;
   readonly inventory: Inventory = createInventory();
-  /** Hears of each shot: the muzzle and where it stopped (ECEF), and whether it hit something. */
-  onShot?: (muzzle: Vec3, end: Vec3, hit: boolean) => void;
+  /** Hears of each shot: the muzzle and where it stopped (ECEF), whether it hit something, and the gun. */
+  onShot?: (muzzle: Vec3, end: Vec3, hit: boolean, gun: ItemKind) => void;
   private sinceShot = Infinity;  // s
   private aimPitch = 0;          // radians: the right arm's, aiming
 
@@ -149,11 +151,11 @@ export class OnFoot {
     const [fx, fy] = [Math.cos(this.yaw), Math.sin(this.yaw)];
     const s: Vec3 = [w.x + fy * MUZZLE.x, w.y - fx * MUZZLE.x, w.z + SHOULDER];
     this.aimPitch = Math.atan2(end[2] - s[2], Math.hypot(end[0] - s[0], end[1] - s[1]));
-    const arm = SHOULDER - MUZZLE.z, ca = Math.cos(this.aimPitch);
+    const arm = SHOULDER - (this.holding === "rifle" ? MUZZLE.rifleZ : MUZZLE.z), ca = Math.cos(this.aimPitch);
     const muzzle: Vec3 = [s[0] + fx * arm * ca, s[1] + fy * arm * ca, s[2] + arm * Math.sin(this.aimPitch)];
     this.sinceShot = 0;
     const ecef = (p: Vec3) => geodeticToEcef({ ...this.local.geodetic(p[0], p[1]), h: p[2] });
-    this.onShot?.(ecef(muzzle), ecef(end), hit);
+    this.onShot?.(ecef(muzzle), ecef(end), hit, this.holding);
   }
 
   /** Close enough to the parked car to get in. */
@@ -185,7 +187,9 @@ export class OnFoot {
   /** Writes them, walking (and aiming, if they are), into `out` (one instance), in a view frame. */
   instance(view: Frame, out: PersonInstances): void {
     const { pos, fwd } = this.pose(view), w = this.walker;
-    const pose = this.aiming ? POSE.aim : heldGun(this.inventory) ? POSE.carry : POSE.upright;
+    // A gun not aimed: a pistol carried at the side, a rifle in patrol ready; aimed, raised.
+    const rifle = this.holding === "rifle";
+    const pose = this.aiming ? (rifle ? POSE.aimRifle : POSE.aim) : rifle ? POSE.patrol : heldGun(this.inventory) ? POSE.carry : POSE.upright;
     out.data.set([...pos, ...fwd, w.phase, walkerGait(w), pose, this.aimPitch], 0);
     out.count = 1;
   }

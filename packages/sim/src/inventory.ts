@@ -1,12 +1,12 @@
 // What the player carries, and the one thing in their hand. Pure.
 //
 // The inventory is slots, each an item (ITEMS): empty hands first, then what
-// they've got (a pistol, for now). One is selected: in their hand. A gun has
+// they've got (a pistol, a rifle). One is selected: in their hand. A gun has
 // a magazine: each shot uses a round, at most one every `interval` s;
 // reloading takes `reload` s, and an empty gun starts reloading itself on the
 // next pull of the trigger.
 
-export type ItemKind = "hands" | "pistol";
+export type ItemKind = "hands" | "pistol" | "rifle";
 
 export interface Gun {
   magazine: number;  // rounds
@@ -18,6 +18,8 @@ export interface Gun {
 export const ITEMS: Record<ItemKind, { name: string; gun?: Gun }> = {
   hands: { name: "Hands" },
   pistol: { name: "Pistol", gun: { magazine: 12, interval: 0.15, reload: 1.2, range: 200 } },
+  // An AR-15-style rifle, semi-automatic: one shot a pull.
+  rifle: { name: "Rifle", gun: { magazine: 30, interval: 0.1, reload: 2.2, range: 400 } },
 };
 
 export interface Inventory {
@@ -28,9 +30,9 @@ export interface Inventory {
   reloading: number;  // s left reloading (0: not)
 }
 
-/** Empty hands and a loaded pistol, hands selected. */
+/** Empty hands, a loaded pistol and a loaded rifle, hands selected. */
 export function createInventory(): Inventory {
-  const items: ItemKind[] = ["hands", "pistol"];
+  const items: ItemKind[] = ["hands", "pistol", "rifle"];
   return { items, selected: 0, rounds: items.map((k) => ITEMS[k].gun?.magazine ?? 0), cooldown: 0, reloading: 0 };
 }
 

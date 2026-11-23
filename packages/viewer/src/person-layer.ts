@@ -16,7 +16,7 @@
 // lighting and fog as the cars (car-layer's fragment shader). Holds GPU
 // handles only.
 
-import { ELBOW, HIP, KNEE, PART, SHOULDER, type PersonMesh } from "@game/world";
+import { ARM_X, ELBOW, HIP, KNEE, PART, PATROL, SHOULDER, type PersonMesh } from "@game/world";
 import { compile, FRAGMENT } from "./car-layer.ts";
 import type { Frame } from "./flat-layer.ts";
 
@@ -29,9 +29,13 @@ export const PERSON_STRIDE = 10;
 /**
  * How a figure holds itself: upright, sitting, lying, shouting (arms up, waving), staggering (swaying side to side),
  * aiming (the right arm straight out, `aim` radians up from level), carrying (a gun in the right hand: the arm
- * locked straight down, so it points at the ground, however they move). Aiming and carrying walk as upright.
+ * locked straight down, so it points at the ground, however they move), aiming a rifle (as aiming, the left arm up
+ * along it to the handguard), patrol ready (both hands on a rifle held muzzle down in front of the chest: world's
+ * PATROL). Aiming, carrying and patrol ready walk as upright.
  */
-export const POSE = { upright: 0, sit: 1, lie: 2, shout: 3, stagger: 4, aim: 5, carry: 6 } as const;
+export const POSE = { upright: 0, sit: 1, lie: 2, shout: 3, stagger: 4, aim: 5, carry: 6, aimRifle: 7, patrol: 8 } as const;
+/** A number for the shader's source. */
+const f = (v: number) => v.toFixed(4);
 /** Staggering: how far the body sways either side, radians. */
 const SWAY = 0.14;
 /** Sitting on the ground: how far the hips are above it, m (the legs' half thickness). */
@@ -60,10 +64,20 @@ vec3 turn(vec3 n, float a) {
   float c = cos(a), s = sin(a);
   return vec3(n.x, n.y * c - n.z * s, n.y * s + n.z * c);
 }
+// Turns about the forward (y) axis through a shoulder at (x, h): positive takes a hanging hand toward −x.
+vec3 roll(vec3 p, float a, float x, float h) {
+  float c = cos(a), s = sin(a);
+  return vec3(x + (p.x - x) * c + (p.z - h) * s, p.y, h - (p.x - x) * s + (p.z - h) * c);
+}
+vec3 rollNormal(vec3 n, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(n.x * c + n.z * s, n.y, -n.x * s + n.z * c);
+}
 void main() {
   float ph = i_walk.x, gait = i_walk.y, pose = i_walk.z;
   bool sit = pose > 0.5 && pose < 1.5, lie = pose > 1.5 && pose < 2.5, shout = pose > 2.5 && pose < 3.5;
-  bool stagger = pose > 3.5 && pose < 4.5, aim = pose > 4.5 && pose < 5.5, carry = pose > 5.5;
+  bool stagger = pose > 3.5 && pose < 4.5, carry = pose > 5.5 && pose < 6.5, rifle = pose > 6.5 && pose < 7.5;
+  bool aim = (pose > 4.5 && pose < 5.5) || rifle, patrol = pose > 7.5;
   float leg = ${LEG_SWING.toFixed(3)} * gait * sin(ph);  // the left thigh's angle; the right's is −leg
   // Each side's joints (x left, y right): thigh and upper arm swing, knee and elbow bend. A knee bends as its leg
   // swings forward; elbows bend a little walking and toward a right angle running.
@@ -71,6 +85,13 @@ void main() {
   vec2 knee = ${KNEE_BEND.toFixed(3)} * gait * max(vec2(cos(ph), -cos(ph)), 0.0);
   vec2 arm = vec2(-leg, leg) * ${(ARM_SWING / LEG_SWING).toFixed(3)};
   vec2 elbow = vec2(${ELBOW_BEND.toFixed(3)} + ${ELBOW_RUN.toFixed(3)} * clamp(gait - 1.0, 0.0, 1.0));
+  vec2 inward = vec2(0.0);  // each arm's roll toward the middle (as roll() turns it)
+  if (patrol) {
+    // Patrol ready: both hands on the rifle in front of the chest (PATROL's arms), however they move.
+    arm = vec2(${f(PATROL.left[0])}, ${f(PATROL.right[0])});
+    inward = vec2(${f(PATROL.left[1])}, ${f(PATROL.right[1])});
+    elbow = vec2(${f(PATROL.left[2])}, ${f(PATROL.right[2])});
+  }
   if (sit) {
     // Sitting: legs straight out ahead, hands on the knees.
     thigh = vec2(1.571);
@@ -88,6 +109,11 @@ void main() {
     arm.y = 1.571 + i_walk.w;
     elbow.y = 0.0;
   }
+  if (rifle) {
+    // Aiming a rifle: the left arm up along it too, a little lower, bent toward the handguard.
+    arm.x = 1.35 + i_walk.w;
+    elbow.x = 0.35;
+  }
   if (carry) {
     // Carrying a gun: the right arm locked straight down, no swing, no bend.
     arm.y = 0.0;
@@ -101,13 +127,19 @@ void main() {
   bool arms = forearm || part == ${PART.leftArm} || part == ${PART.rightArm};
   // This side's joints.
   float th = left ? thigh.x : thigh.y, kn = left ? knee.x : knee.y, ar = left ? arm.x : arm.y, el = left ? elbow.x : elbow.y;
+  float ro = left ? inward.x : inward.y;
   vec3 p = a_pos, n = a_normal;
   // A shin bends back at the knee, then swings with its thigh at the hip; a forearm bends forward at the elbow, then
-  // swings with its upper arm at the shoulder.
+  // swings with its upper arm at the shoulder, then the whole arm rolls in toward the middle.
   if (shin) { p = swing(p, -kn, ${KNEE.toFixed(3)}); n = turn(n, -kn); }
   if (legs) { p = swing(p, th, ${HIP.toFixed(3)}); n = turn(n, th); }
   if (forearm) { p = swing(p, el, ${ELBOW.toFixed(3)}); n = turn(n, el); }
-  if (arms) { p = swing(p, ar, ${SHOULDER.toFixed(3)}); n = turn(n, ar); }
+  if (arms) {
+    p = swing(p, ar, ${SHOULDER.toFixed(3)});
+    n = turn(n, ar);
+    p = roll(p, ro, left ? ${f(-ARM_X)} : ${f(ARM_X)}, ${SHOULDER.toFixed(3)});
+    n = rollNormal(n, ro);
+  }
   if (sit) p.z -= ${(HIP - SEAT).toFixed(3)};
   else if (lie) {
     // Lying on the back: the whole figure tipped over backward about its heels, then up off the ground by its back.
