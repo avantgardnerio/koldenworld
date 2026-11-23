@@ -11,8 +11,9 @@
 // - Driving: a speedometer (km/h; R in reverse) with the heading above it,
 //   and the wheel (left–right) and pedal (throttle up, brake down) beside it.
 // - On foot: the inventory along the bottom (what's in hand outlined, a gun's
-//   rounds beside it), a crosshair with a gun in hand (green aiming; swaying
-//   with their steps, where shots go), and a hint now and then (what F does).
+//   rounds beside it), a red dot sight's reticle with a gun in hand (a dot in
+//   a ring, bright aiming; swaying with their steps, where shots go), and a
+//   hint now and then (what F does).
 //
 // Drawn as light lines with a dark outline, so they read over sky and ground.
 
@@ -48,6 +49,8 @@ export interface DriveData {
 
 const INK = "#f4fbff", OUTLINE = "rgb(10 20 30 / 0.75)", ACCENT = "#7fe0a0", BRAKE = "#ff7a6a";
 const FONT = "system-ui, sans-serif";
+/** The red dot sight's reticle, like a Holosun's: a dot and a ring, MOA across, drawn this many times true size. */
+const RETICLE = "#ff2a1f", RETICLE_DOT = 2, RETICLE_RING = 32, RETICLE_SCALE = 3;
 /** The speedometer's dial: 0 to this many km/h, over a 270° sweep. */
 const DIAL_MAX = 200;
 const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -94,11 +97,30 @@ export class Instruments {
     });
     if (!d.crosshair) return;
     // Off the middle by its sway, as the view projects it.
-    const f = h / 2 / Math.tan(FOV_Y / 2), color = d.aiming ? ACCENT : INK;
+    const f = h / 2 / Math.tan(FOV_Y / 2);
     const [cx, cy] = [w / 2 + f * Math.tan(d.sway[0]), h / 2 - f * Math.tan(d.sway[1])];
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-      this.stroke([[cx + dx * 5, cy + dy * 5], [cx + dx * 13, cy + dy * 13]], 2, color);
-    }
+    this.reticle(cx, cy, f, d.aiming);
+  }
+
+  /**
+   * A red dot sight's reticle at (cx, cy), `f` px per unit of tan(angle): a RETICLE_DOT MOA dot in a RETICLE_RING MOA
+   * ring, glowing, RETICLE_SCALE times true size; bright aiming, faint at the hip.
+   */
+  private reticle(cx: number, cy: number, f: number, aiming: boolean): void {
+    const ctx = this.ctx, px = (moa: number) => (f * RETICLE_SCALE * moa * Math.PI) / (180 * 60);
+    ctx.save();
+    ctx.globalAlpha = aiming ? 1 : 0.45;
+    ctx.shadowColor = RETICLE;
+    ctx.shadowBlur = 6;
+    ctx.strokeStyle = ctx.fillStyle = RETICLE;
+    ctx.lineWidth = Math.max(1.5, px(1));
+    ctx.beginPath();
+    ctx.arc(cx, cy, px(RETICLE_RING / 2), 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(1.5, px(RETICLE_DOT / 2)), 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.restore();
   }
 
   // --- flying ------------------------------------------------------------------------
