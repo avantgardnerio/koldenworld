@@ -271,7 +271,7 @@ async function start(): Promise<void> {
       ground: layer,
       lines: { positions: lines.positions, material: lines.pointClass, indices: lines.indices },
       traffic: c.graph.edges.count === 0 ? undefined
-        : traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model),
+        : peopleView.add(traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model)),
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB, BUILDING_WINDOWS, PAINTS),
       // Street name signs at the intersections this cell owns, and its businesses' signs.
       signs: createSignLayer(gl!, [

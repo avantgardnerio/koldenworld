@@ -1,4 +1,7 @@
-export { createPeople, PERSON, removePeople, spawnPerson, stepPeople, WALK, type People, type PersonStart } from "./people.ts";
+export {
+  createPeople, NO_CROSSING, PASSAGE, PERSON, removePeople, SIDEWALK_LEG, spawnPerson, stepPeople, WALK, WAY,
+  type People, type PersonStart, type SidewalkNet,
+} from "./people.ts";
 export { Rng } from "./rng.ts";
 export { Table, type Columns, type Cursor, type Schema } from "./table.ts";
 export {
