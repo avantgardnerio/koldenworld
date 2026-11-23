@@ -6,6 +6,7 @@ mod crossings;
 mod draw;
 mod elevation;
 mod faces;
+mod fetch;
 mod geodesy;
 mod geom;
 mod graph;
@@ -13,6 +14,7 @@ mod ground_arrow;
 mod landcover;
 mod markings;
 mod mesh;
+mod osm;
 mod polygon;
 mod s2;
 mod serve;
@@ -32,6 +34,7 @@ const USAGE: &str = "usage:
       (JSON, as the TS RoadWayInput) instead of the database: no water, terrain flat at --height (default 0)
   cellgen buildings <token> [--gap <m>] [--simplify <m>] [--outline <m>]
                                                 a tile's buildings merged into massing: target/buildings.png
+  cellgen fetch <token | lat,lon>               an area's raw OSM (Overpass, cached in data/osm/s2/), parsed: counts
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
 The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
@@ -172,6 +175,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             draw::draw_massing(&m, &c, &metric, "target/buildings.png")?;
             println!("wrote target/buildings.png");
+            Ok(())
+        }
+        Some("fetch") => {
+            let what = args.get(1).ok_or(USAGE)?;
+            let c = match what.split_once(',') {
+                Some((lat, lon)) => fetch::fetch_cell(lat.trim().parse()?, lon.trim().parse()?),
+                None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
+            };
+            let data = data_dir()?;
+            let started = std::time::Instant::now();
+            let body = tokio::runtime::Runtime::new()?
+                .block_on(fetch::fetch(&data, &c, |m| println!("{m}")))
+                .map_err(|e| e.to_string())?;
+            let got = started.elapsed();
+            let started = std::time::Instant::now();
+            let osm = osm::parse(&body)?;
+            println!(
+                "{}: {:.1} MB in {got:.1?}, parsed in {:.0?}: {} nodes ({} tagged), {} ways, {} relations, {} strings; data as of {}",
+                c.token,
+                body.len() as f64 / 1e6,
+                started.elapsed(),
+                osm.nodes(),
+                (0..osm.nodes())
+                    .filter(|&n| osm.node_tags.count(n) > 0)
+                    .count(),
+                osm.ways(),
+                osm.relations(),
+                osm.strings.text.len(),
+                osm.timestamp.as_deref().unwrap_or("?")
+            );
             Ok(())
         }
         Some("serve") => {
