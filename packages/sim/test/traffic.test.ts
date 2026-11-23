@@ -41,6 +41,20 @@ describe("traffic", () => {
     }
   });
 
+  it("never goes faster than its cap: slows to it, stops at 0, and drives on once it's lifted", () => {
+    const n = net(), cars = createCars(), rng = new Rng(1);
+    const i = spawnCar(cars, n, { model: 0, cell: 0, edge: 1, dir: 1, lane: 1, s: 0 }, rng);
+    expect(cars.c.cap[i]).toBe(Infinity);
+    for (let k = 0; k < 200; k++) stepTraffic(cars, n, 0.05, rng);
+    expect(cars.c.speed[i]).toBeCloseTo(LIMIT, 3);
+    cars.c.cap[i] = 0;  // something stopped right ahead
+    for (let k = 0; k < 100; k++) stepTraffic(cars, n, 0.05, rng);
+    expect(cars.c.speed[i]).toBe(0);
+    cars.c.cap[i] = Infinity;
+    for (let k = 0; k < 20; k++) stepTraffic(cars, n, 0.05, rng);
+    expect(cars.c.speed[i]).toBeGreaterThan(0);
+  });
+
   it("picks its way onward on entry, then moves on to it, carrying the distance over", () => {
     const n = net(), cars = createCars(), rng = new Rng(1);
     const i = spawnCar(cars, n, { model: 0, cell: 0, edge: 0, dir: 1, lane: 1, s: 99 }, rng);

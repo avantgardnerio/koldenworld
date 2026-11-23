@@ -42,7 +42,7 @@ import { businessSignBoxes, createSignLayer, streetSignBoxes, type SignLayer } f
 import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
-import { emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
+import { CAR_HALF, emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
   BUILDING_COLORS_RGB, BUILDING_WINDOWS, GROUND, PAINTS, CLASS_COLORS_RGB, fogRange, MASSING, SKY, SUN,
 } from "./style.ts";
@@ -200,6 +200,7 @@ async function start(): Promise<void> {
 
   const traffic = new TrafficView(1);
   const carInstances = emptyInstances();
+  const nearCars = new Float64Array(5 * 256);  // the traffic cars near the player's car, for its collisions
 
   async function loadCell(cell: CellId): Promise<CellGpu> {
     const token = cellToken(cell);
@@ -477,6 +478,9 @@ async function start(): Promise<void> {
       if (showCars) {
         // Horizontal distance to the cell's anchor (which sits at the ellipsoid, not at the ground or the camera).
         const near = (tc: TrafficCell) => Math.hypot(tc.model[12]!, tc.model[13]!);
+        // The traffic notices the player's car: slows behind it, and is solid to it.
+        const n = traffic.yieldTo(drive?.pose(vf).pos, nearCars);
+        drive?.setObstacles(nearCars, n, vf, CAR_HALF);
         traffic.update(dt, near, CAR_DISTANCE, 1.3 * CAR_DISTANCE, moving);
         traffic.instances(carInstances);
       } else {

@@ -16,8 +16,11 @@
 //   the path, facing from a point half a wheelbase behind to one half a
 //   wheelbase ahead, so it turns smoothly through bends and junctions alike.
 //   Path points on different cells' roads meet in the view frame.
+// - Cars notice the player's car (yieldTo): one with it ahead in its path
+//   slows to stop short of it, and the cars near it are handed back as
+//   rectangles for its collisions.
 
-import { createCars, NONE, removeCars, Rng, spawnCar, stepTraffic, type Cars, type RoadNet } from "@game/sim";
+import { BRAKING, createCars, NONE, removeCars, Rng, spawnCar, stepTraffic, type Cars, type RoadNet } from "@game/sim";
 import {
   edgeLanes, junctionReach, laneGeometry, lanePoint, turnPoint, VEHICLE_MODELS,
   type LaneGeometry, type RoadGraph, type VehiclePlacements,
@@ -27,6 +30,14 @@ import type { CarInstances } from "./car-layer.ts";
 const STEP = 1 / 30;     // s
 const MAX_STEPS = 6;     // per frame: a stalled tab doesn't try to catch up
 const HALF_WHEELBASE = 1.35;  // m
+/**
+ * Yielding to the player's car: a car stops this far short of it (m, bumper to bumper, a car being CAR_LENGTH long),
+ * looking this far either side of its own line (m, about a lane), at cars this near (m) and in cells this near (m).
+ */
+export const YIELD = { gap: 4, half: 2.2, near: 80, cells: 1500 };
+const CAR_LENGTH = 4.7;
+/** A traffic car's rectangle for collisions: half length, half width (m). */
+export const CAR_HALF = [2.35, 1.0] as const;
 
 export interface TrafficCell {
   slot: number;
@@ -155,6 +166,35 @@ export class TrafficView implements RoadNet {
       this.simTime += STEP;
       this.acc -= STEP;
     }
+  }
+
+  /**
+   * Cars notice the player's car (`me`, in the view frame; undefined: there's none): a car with it ahead in its path
+   * (in front, within YIELD.half of its line) is capped to the speed it can still stop at YIELD.gap short of it; every
+   * other car's cap is lifted. The cars within YIELD.near of it are written into `near` (center x, y, z, forward x, y,
+   * view frame; as many as fit); returns how many.
+   */
+  yieldTo(me: readonly number[] | undefined, near: Float64Array): number {
+    const { cap, cell } = this.cars.c;
+    cap.fill(Infinity, 0, this.cars.count);
+    if (!me) return 0;
+    const { rear, mid, front } = this;
+    let n = 0;
+    for (let i = 0; i < this.cars.count; i++) {
+      const m = this.slots[cell[i]!]?.model;
+      if (!m || Math.hypot(m[12]! - me[0]!, m[13]! - me[1]!) > YIELD.cells) continue;
+      this.pathPoint(i, 0, mid);
+      const dx = me[0]! - mid[0]!, dy = me[1]! - mid[1]!;
+      if (Math.hypot(dx, dy) > YIELD.near) continue;
+      this.pathPoint(i, -HALF_WHEELBASE, rear);
+      this.pathPoint(i, HALF_WHEELBASE, front);
+      const fl = Math.hypot(front[0]! - rear[0]!, front[1]! - rear[1]!) || 1;
+      const fx = (front[0]! - rear[0]!) / fl, fy = (front[1]! - rear[1]!) / fl;
+      const ahead = dx * fx + dy * fy, aside = Math.abs(dx * fy - dy * fx);
+      if (ahead > 0 && aside < YIELD.half) cap[i] = Math.sqrt(2 * BRAKING * Math.max(0, ahead - CAR_LENGTH - YIELD.gap));
+      if (5 * n + 5 <= near.length) near.set([mid[0]!, mid[1]!, mid[2]!, fx, fy], 5 * n++);
+    }
+    return n;
   }
 
   /** Writes the poses of cars in visible cells into per-model instance arrays, in the view frame. */

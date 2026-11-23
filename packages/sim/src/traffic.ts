@@ -7,7 +7,9 @@
 //
 // Speed comes from the road, not the driver: the speed limit in the rightmost
 // lane, 10 mph faster for each lane to its left, as people actually drive.
-// Cars accelerate and brake toward that at fixed rates.
+// Cars accelerate and brake toward that at fixed rates, never above their cap:
+// what something ahead of them (the player's car) allows, set from outside
+// each step (Infinity: nothing ahead).
 //
 // A car knows the road it came from and the one it takes next (decision 30):
 // the way onward is picked when it enters a road, so the renderer can draw it
@@ -41,6 +43,7 @@ export const CAR = {
   speed: Float32Array,  // m/s
   length: Float32Array, // m, the current edge's (copied on entry, so the batch pass needs no lookups)
   target: Float32Array, // m/s, the current lane's
+  cap: Float32Array,    // m/s, what's ahead allows (Infinity: nothing); set from outside
   pcell: Uint16Array,   // the road it came from (NONE: none)
   pedge: Uint32Array,
   pdir: Int8Array,
@@ -96,6 +99,7 @@ export function spawnCar(cars: Cars, net: RoadNet, a: CarStart, rng: Rng): numbe
   c.s[i] = a.s;
   c.length[i] = net.length(a.cell, a.edge);
   c.target[i] = laneSpeed(net.speedLimit(a.cell, a.edge), lanes, c.lane[i]!);
+  c.cap[i] = Infinity;
   c.pcell[i] = NONE;
   planNext(cars, net, i, rng);
   return i;
@@ -133,11 +137,11 @@ function planNext(cars: Cars, net: RoadNet, i: number, rng: Rng): void {
 
 export function stepTraffic(cars: Cars, net: RoadNet, dt: number, rng: Rng): void {
   // Batch: speed toward the lane's target, then distance. Every car, no branching on state.
-  const { speed, target, s, length } = cars.c;
+  const { speed, target, cap, s, length } = cars.c;
   const n = cars.count, up = ACCELERATION * dt, down = -BRAKING * dt;
   for (let i = 0; i < n; i++) {
     const v = speed[i]!;
-    const nv = v + Math.min(up, Math.max(down, target[i]! - v));
+    const nv = Math.max(0, v + Math.min(up, Math.max(down, Math.min(target[i]!, cap[i]!) - v)));
     speed[i] = nv;
     s[i]! += nv * dt;
   }

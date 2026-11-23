@@ -3,8 +3,9 @@
 // at the car once it's REANCHOR m away, so the frame stays flat enough). Its
 // world: the ground's height from the loaded cells (by lat/lon), and the walls
 // of the fine cells under its box (each cell's wall grid, queried in that
-// cell's frame). The camera chases it, following its heading with a lag, so
-// a slide shows.
+// cell's frame), and the traffic cars near it (setObstacles: each car's
+// rectangle as four more walls). The camera chases it, following its heading
+// with a lag, so a slide shows.
 
 import {
   CELL_LEVEL, cellFrame, cellFromLatLon, ecefToGeodetic, ecefToLocal, enuFrame, frameToFrame, geodeticToEcef, localToEcef,
@@ -33,6 +34,8 @@ export class Drive {
   private toCell = new Map<CellId, { to: ArrayLike<number>; from: ArrayLike<number> }>();
   private world: VehicleWorld;
   private w: DriveWorld;
+  private obstacles = new Float64Array(0);  // traffic cars' edges: x0, y0, x1, y1 each, in the car's frame
+  private obstacleCount = 0;
 
   /** Starts at rest at a point, facing `heading` (radians counterclockwise from east). */
   constructor(lat: number, lon: number, heading: number, w: DriveWorld) {
@@ -55,6 +58,27 @@ export class Drive {
     const d = Math.atan2(Math.sin(this.car.heading - this.yaw), Math.cos(this.car.heading - this.yaw));
     this.yaw += d * Math.min(1, CHASE.lag * dt);
     if (Math.hypot(this.car.x, this.car.y) > REANCHOR) this.reanchor();
+  }
+
+  /**
+   * The traffic cars near the car (as TrafficView.yieldTo writes them: center x, y, z and forward x, y, in `view`) become
+   * walls: each a rectangle `half` long and wide, its four edges.
+   */
+  setObstacles(near: Float64Array, n: number, view: Frame, half: readonly [number, number]): void {
+    if (this.obstacles.length < 16 * n) this.obstacles = new Float64Array(16 * n);
+    const m = frameToFrame(view, this.anchor);
+    for (let k = 0; k < n; k++) {
+      const [cx, cy] = transformPoint(m, [near[5 * k]!, near[5 * k + 1]!, near[5 * k + 2]!]);
+      const [fx, fy] = [m[0]! * near[5 * k + 3]! + m[4]! * near[5 * k + 4]!, m[1]! * near[5 * k + 3]! + m[5]! * near[5 * k + 4]!];
+      const fl = Math.hypot(fx, fy) || 1;
+      const [ux, uy, sx, sy] = [(fx / fl) * half[0], (fy / fl) * half[0], (-fy / fl) * half[1], (fx / fl) * half[1]];
+      const corners = [[ux + sx, uy + sy], [-ux + sx, -uy + sy], [-ux - sx, -uy - sy], [ux - sx, uy - sy]];
+      for (let e = 0; e < 4; e++) {
+        const [a, b] = [corners[e]!, corners[(e + 1) % 4]!];
+        this.obstacles.set([cx + a[0]!, cy + a[1]!, cx + b[0]!, cy + b[1]!], 16 * k + 4 * e);
+      }
+    }
+    this.obstacleCount = 4 * n;
   }
 
   /** km/h, for the HUD. */
@@ -87,8 +111,13 @@ export class Drive {
     return ecefToGeodetic(localToEcef(this.anchor, [x, y, 0]));
   }
 
-  /** The walls of every loaded fine cell under a box, in the car's frame. */
+  /** The walls of every loaded fine cell under a box, and the traffic cars' edges in it, in the car's frame. */
   private walls(x0: number, y0: number, x1: number, y1: number, visit: (ax: number, ay: number, bx: number, by: number) => void) {
+    const o = this.obstacles;
+    for (let s = 0; s < this.obstacleCount; s++) {
+      const [ax, ay, bx, by] = [o[4 * s]!, o[4 * s + 1]!, o[4 * s + 2]!, o[4 * s + 3]!];
+      if (Math.max(ax, bx) >= x0 && Math.min(ax, bx) <= x1 && Math.max(ay, by) >= y0 && Math.min(ay, by) <= y1) visit(ax, ay, bx, by);
+    }
     const cells = new Set<CellId>();
     for (const [x, y] of [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] as const) {
       const { lat, lon } = this.geodetic(x, y);
