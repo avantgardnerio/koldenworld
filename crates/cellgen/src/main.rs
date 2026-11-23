@@ -1,4 +1,5 @@
 mod aeroways;
+mod areas;
 mod buildings;
 mod cell;
 mod clip;
@@ -9,6 +10,7 @@ mod extract;
 mod faces;
 mod fetch;
 mod geodesy;
+mod geofabrik;
 mod geom;
 mod graph;
 mod ground_arrow;
@@ -39,6 +41,7 @@ const USAGE: &str = "usage:
   cellgen fetch <token | lat,lon>               an area's raw OSM (Overpass, cached in data/osm/s2/), parsed: counts
   cellgen extract <token | lat,lon>             an area's roads, buildings, water, airports, points of interest: counts
   cellgen import <token | lat,lon>              an area's OSM (fetched if need be) into Postgres: rows upserted, deleted
+  cellgen region <lat,lon> [--download]          the Geofabrik region holding a point (its extract, downloaded once)
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
 The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
@@ -318,6 +321,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{} imported in {:.1?}", c.token, started.elapsed());
             println!("  upserted: {:?}", counts.upserted);
             println!("  deleted:  {:?}", counts.deleted);
+            Ok(())
+        }
+        Some("region") => {
+            let (lat, lon) = args.get(1).and_then(|a| a.split_once(',')).ok_or(USAGE)?;
+            let (lat, lon): (f64, f64) = (lat.trim().parse()?, lon.trim().parse()?);
+            let data = data_dir()?;
+            let download = flag("--download").is_some();
+            tokio::runtime::Runtime::new()?
+                .block_on(async {
+                    let index = geofabrik::index(&data).await?;
+                    let Some(r) = index.region(lat, lon) else {
+                        println!("no Geofabrik region holds {lat},{lon}");
+                        return Ok(());
+                    };
+                    let mut chain = vec![index.id[r].clone()];
+                    let mut p = index.parent[r];
+                    while let Some(q) = p {
+                        chain.push(index.id[q].clone());
+                        p = index.parent[q];
+                    }
+                    println!("{lat},{lon}: {} ({})", chain.join(" < "), index.pbf[r]);
+                    if download {
+                        let path = geofabrik::pbf(&data, &index, r, |m| println!("{m}")).await?;
+                        let size = tokio::fs::metadata(&path).await?.len();
+                        println!("{} ({} MB)", path.display(), size / 1_000_000);
+                    }
+                    Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+                })
+                .map_err(|e| e.to_string())?;
             Ok(())
         }
         Some("serve") => {

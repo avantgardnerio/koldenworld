@@ -235,3 +235,10 @@ A running log. Newest last. Each entry: what we chose, what we didn't, and why.
 - **Draping** puts each cross-section at the highest ground under the road and its sidewalks, so the ground never pokes through a sidewalk; fill skirts hang from the sidewalks' outer edges.
 - **Rejected for now:** drawing OSM's separately mapped footways where they are (often a grass strip from the curb in Denver): they'd need matching to their streets to avoid doubling up, and the curb-side strip reads clearly from the road.
 - **Not yet:** corner fillets and curb ramps, tree lawns between curb and sidewalk, footpaths away from roads, crosswalk paint, driveways cutting the curb.
+
+## 34. OSM import in Rust (cellgen), on demand; supersedes the TS import (13, 23)
+
+- **Chosen:** fetching, parsing, interpreting and importing OSM moved into the Rust cell generator (`crates/cellgen`: fetch.rs, osm.rs, extract.rs, import.rs, areas.rs), rule for rule from the TS extractors and with the same SQL; the TS `osm-import` package, `cli fetch-osm`/`import`/`import-pbf` and the db import functions are deleted. `cellgen serve` imports a cell's download areas (level-12 S2 cells, from Overpass, one download at a time) before building it, and answers `GET /ensure/<area>` for the TS cell server, which still builds fine cells' roads, buildings and terrain from PostGIS. Points of interest are new (`pois`).
+- **Why:** one place for OSM interpretation now that the ground is built in Rust; the TS import was the last thing keeping the Node packages that parsed OSM. Rust parses an area in 20–55 ms and extracts it in 2–13 ms (TS: 12–80 ms to extract).
+- **Checked:** the Rust extractors match the TS ones (counts and sums) on four areas, and re-importing an area the TS had imported leaves every row identical.
+- **Open:** Overpass is slow for teleporting (20–45 s per area). Geofabrik regions download too slowly to fetch on demand (`cellgen region` finds and downloads one); a local planet or continent, preprocessed into areas, is the likely answer. Decision 23's bulk import is gone with the TS code; data already imported stays.

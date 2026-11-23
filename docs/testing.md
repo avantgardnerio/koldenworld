@@ -12,13 +12,11 @@ Everything except `viewer` runs in Node with the same code as the browser. Claud
 
 ## CLI (sketch)
 
-Run as `npm run cli -- <command>`. Existing today: `fetch-osm`, `migrate`, `import`, `export`. The rest are planned.
+Run as `npm run cli -- <command>`. Existing today: `migrate`, `cell`, `serve` (OSM is fetched and imported by `cellgen`: see osm-pipeline.md). The rest are planned.
 
 ```sh
-cli fetch-osm --zip 80205 --size 4    # one-time raw OSM download into data/
 cli migrate                           # apply pending SQL migrations
-cli import --zip 80205                # convert the snapshot into road_ways and buildings
-cli export --zip 80205                # road graph and buildings → data/export/80205/*.arrow, with stats
+cli cell --token 876c7edc             # build one cell's files (cellgen serve imports its OSM)
 cli run scenarios/straight-line.json  # run a scenario, print pass/fail and diffs
 cli replay recordings/crash.jsonl     # replay a recorded input log
 cli view --at 1200,-340 --radius 150  # print the text view

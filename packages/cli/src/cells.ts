@@ -1,7 +1,8 @@
 // Cells on demand (decision 22). Asking for a cell's files:
 //   1. makes sure OSM data covers the cell plus a margin: each level-FETCH_LEVEL
-//      cell around it is downloaded from Overpass once (one download at a time,
-//      to be polite), saved under data/osm/s2/ and imported into Postgres;
+//      cell around it is fetched and imported into Postgres once, by the Rust
+//      cell generator (GET /ensure/<token> on cellgen serve; CELLGEN_SERVER
+//      overrides http://127.0.0.1:5175);
 //   2. exports the cell (buildCell) from Postgres;
 //   3. caches the files under data/export/cells/<token>/.
 // Concurrent requests for the same cell or the same download share one promise.
@@ -9,15 +10,12 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fetchAreas, hasFetch, loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
-import type { OverpassResponse } from "@game/osm-import";
+import { loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
 import {
   BUILDINGS_VERSION, buildCell, carveWater, cellFromLatLon, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
   cellToken, geodeticToEcef, ROAD_GRAPH_VERSION, type CellFiles, type CellId,
 } from "@game/world";
 import { Elevation } from "./elevation.ts";
-import { downloadOverpass } from "./fetch-osm.ts";
-import { importSnapshot } from "./import.ts";
 import { DATA_DIR } from "./paths.ts";
 
 /** Download unit: about 2.3 km across, a few MB to ~15 MB of raw OSM in a downtown. */
@@ -27,7 +25,7 @@ const MARGIN_M = 300;
 const MANIFEST_VERSION = { cellVersion: CELL_VERSION, roadGraphVersion: ROAD_GRAPH_VERSION, buildingsVersion: BUILDINGS_VERSION };
 
 const cellsDir = path.join(DATA_DIR, "export", "cells");
-const rawDir = path.join(DATA_DIR, "osm", "s2");
+const cellgenServer = process.env.CELLGEN_SERVER ?? "http://127.0.0.1:5175";
 const fetchArea = (fetchCell: CellId) => `s2:${cellToken(fetchCell)}`;
 
 /** A lat/lon box around a cell's corners, grown by a margin in meters. */
@@ -108,9 +106,7 @@ export async function cachedCell(cell: CellId): Promise<CellFiles | null> {
 }
 
 export class CellService {
-  private queue: Promise<unknown> = Promise.resolve();  // downloads, one at a time
   private fetches = new Map<CellId, Promise<void>>();
-  private covered?: Promise<Set<string>>;  // areas already imported, loaded once
   private elevation: Elevation;
   private builds = new Map<CellId, Promise<CellFiles>>();
 
@@ -198,32 +194,10 @@ export class CellService {
     return p;
   }
 
+  /** Asks the Rust cell generator to fetch and import the area (it does each once, one download at a time). */
   private async fetch(fetchCell: CellId): Promise<void> {
-    const area = fetchArea(fetchCell);
-    this.covered ??= fetchAreas("s2:");
-    if ((await this.covered).has(area) || await hasFetch(area)) return;
-    const run = this.queue.then(() => this.download(fetchCell, area));
-    this.queue = run.catch(() => {});
-    await run;
-  }
-
-  private async download(fetchCell: CellId, area: string): Promise<void> {
     const token = cellToken(fetchCell);
-    const bbox = cellBox(fetchCell, 50);  // cell edges are great-circle arcs: pad past the corner box
-    this.log(`fetch ${token}: downloading from Overpass...`);
-    const t0 = performance.now();
-    const d = await downloadOverpass(bbox, this.log);
-    const fetchedAt = new Date().toISOString();
-    await mkdir(rawDir, { recursive: true });
-    await writeAtomic(path.join(rawDir, `${token}.json`), d.body);
-    await writeAtomic(path.join(rawDir, `${token}.meta.json`), JSON.stringify({
-      cell: token, level: FETCH_LEVEL, bbox, query: d.query, source: d.source, osmBaseTimestamp: d.osmBaseTimestamp,
-      fetchedAt, elements: d.elements, bytes: d.body.length, sha256: d.sha256,
-    }, null, 2) + "\n");
-    this.log(`fetch ${token}: ${d.elements} elements, ${(d.body.length / 1e6).toFixed(1)} MB in ` +
-             `${((performance.now() - t0) / 1000).toFixed(0)} s; importing`);
-    const raw = JSON.parse(d.body.toString("utf8")) as OverpassResponse;
-    await importSnapshot(raw.elements, { area, bbox, source: d.source, osmBaseTimestamp: d.osmBaseTimestamp, fetchedAt, sha256: d.sha256 },
-      (m) => this.log(`fetch ${token}: ${m}`));
+    const res = await fetch(`${cellgenServer}/ensure/${token}`);
+    if (!res.ok) throw new Error(`area ${token}: ${res.status} ${await res.text()}`);
   }
 }

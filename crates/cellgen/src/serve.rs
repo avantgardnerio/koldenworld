@@ -1,8 +1,10 @@
 //! The cell server: GET /cells/<token>/ground.arrow and /cells/<token>/ground_triangles.arrow (and a coarse tile's
 //! buildings.arrow and buildings_triangles.arrow), built on a miss and cached as files under data/rust-cells/<token>/:
 //! the inputs loaded at once (queries on pooled connections), then built on Tokio's blocking pool. Requests for a cell
-//! being built wait for that one build.
+//! being built wait for that one build. A fine cell or coarse tile first has the OSM areas it draws from imported
+//! (areas.rs); GET /ensure/<area token> does just that, for the TS cell server.
 
+use crate::areas::Areas;
 use crate::cell::{self, Cell};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
@@ -24,6 +26,7 @@ struct App {
     data: PathBuf,                                                 // data/ (dem/ under it)
     cache: PathBuf,                                                // data/rust-cells/
     pool: deadpool_postgres::Pool,                                 // Postgres connections
+    areas: Areas,                                                  // OSM areas imported on demand
     building: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, // a lock per cell being asked for
 }
 
@@ -33,16 +36,22 @@ pub fn serve(
     data: PathBuf,
     pool: deadpool_postgres::Pool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let app = Arc::new(App {
-        cache: data.join("rust-cells"),
-        data,
-        pool,
-        building: Mutex::default(),
-    });
-    let router = Router::new()
-        .route("/cells/{token}/{table}", get(table))
-        .with_state(app);
     tokio::runtime::Runtime::new()?.block_on(async {
+        let areas = Areas::new(data.clone(), pool.clone())
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        println!("{} OSM areas imported", areas.imported());
+        let app = Arc::new(App {
+            cache: data.join("rust-cells"),
+            data,
+            pool,
+            areas,
+            building: Mutex::default(),
+        });
+        let router = Router::new()
+            .route("/cells/{token}/{table}", get(table))
+            .route("/ensure/{token}", get(ensure))
+            .with_state(app);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         println!(
             "cell server on http://127.0.0.1:{port}/cells/<token>/{{{}}}",
@@ -51,6 +60,17 @@ pub fn serve(
         axum::serve(listener, router).await
     })?;
     Ok(())
+}
+
+/// An OSM download area imported (fetched first if need be), for the TS cell server.
+async fn ensure(State(app): State<Arc<App>>, Path(token): Path<String>) -> Response {
+    match app.areas.ensure(&token).await {
+        Ok(()) => (StatusCode::OK, "imported\n").into_response(),
+        Err(e) => {
+            eprintln!("area {token}: {e}");
+            (StatusCode::BAD_GATEWAY, format!("{e}\n")).into_response()
+        }
+    }
 }
 
 async fn table(
@@ -110,6 +130,10 @@ async fn table(
 async fn build(app: Arc<App>, c: Cell) -> Result<(), cell::LoadError> {
     let started = std::time::Instant::now();
     let options = cell::Options::for_level(c.level);
+    // Far tiles draw only terrain, land cover and water already there: no OSM fetched for 70 km at a time.
+    if c.level > cell::FAR_LEVEL {
+        app.areas.ensure_cell(&c).await?;
+    }
     let inputs = cell::Inputs::load(&app.pool, &app.data, &c, &options).await?;
     let loaded = started.elapsed();
     tokio::task::spawn_blocking(move || -> Result<(), cell::LoadError> {

@@ -27,7 +27,7 @@ export type RoadClass = (typeof ROAD_CLASSES)[number];
 /** Edge structure: index 0 follows the ground; bridges and tunnels run straight between their ends. */
 export const ROAD_STRUCTURES = ["ground", "bridge", "tunnel"] as const;
 
-/** What the graph needs from a stored road way (Postgres row, or osm-import's RoadWay). */
+/** What the graph needs from a stored road way (a Postgres row). */
 export interface RoadWayInput {
   osmWayId: number;
   nodeIds: number[];                     // direction of travel for one-way roads

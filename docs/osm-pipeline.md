@@ -1,57 +1,28 @@
 # OSM pipeline
 
-## Current: cells on demand (decision 22)
+## Current: OSM on demand, by the Rust cell generator
 
 ```
-viewer: cells within the horizon (level 13, nearest first)
-   │  GET /cells/<token>/<table>.arrow        (Vite proxies to the cell server: npm run server)
-   ▼
-cell server (packages/cli: server.ts, cells.ts)
-   ├─ cache hit: data/export/cells/<token>/*.arrow (manifest versions match) ─▶ respond
-   └─ miss:
-       1. download cells: every level-12 cell within the cell's reach + 300 m
-          not yet in osm_fetches (area "s2:<token>"):
-            Overpass (one download at a time, retried while busy)
-              ─▶ data/osm/s2/<token>.json + .meta.json  (gitignored raw snapshot)
-              ─▶ @game/osm-import ─▶ PostGIS (same import as below)
-       2. PostGIS road_ways + buildings in the cell's box + 300 m (plus ways sharing their nodes)
-            ─▶ @game/world buildCell: ownership, cell frame ─▶ Arrow IPC
-       3. write the cache (temp + rename, manifest last) ─▶ respond
+viewer: cells and tiles in view
+   │  GET /ground/<token>/…  (cellgen serve)     GET /cells/<token>.cell  (TS cell server: npm run server)
+   ▼                                              │  asks GET /ensure/<area> for each area it needs
+cellgen serve: before building a fine cell or coarse tile, every download area (level-12 S2 cell, ~4.5 km)
+   its load box touches, if not in osm_fetches (area "s2:<token>"):        (crates/cellgen: areas.rs)
+     fetch.rs   Overpass, one download at a time, retried while busy
+                  ─▶ data/osm/s2/<token>.json + .meta.json  (gitignored raw snapshot; cached)
+     osm.rs     parse [out:json] into columns (nodes, ways, relations; tags into one string table)
+     extract.rs roads, buildings, water, airports, points of interest (columns)
+     import.rs  one transaction ─▶ PostGIS
+   then builds from PostGIS (and the TS server builds its tables the same way).
 ```
 
-`npm run cli -- cell --token <token>` runs the same path for one cell, without a browser.
+By hand: `cellgen fetch <token | lat,lon>` (download and parse), `cellgen extract …` (counts), `cellgen import …` (into Postgres). `npm run cli -- cell --token <token>` builds one TS cell (cellgen serve must be running to import its areas).
 
-### Regional extracts (decision 23)
+Measured (Nov 2026): a downtown download area is 7–22 MB of raw OSM and takes 20–45 s from overpass-api.de (downtown Seattle: 43 s); parsing it takes 20–55 ms, extracting 2–13 ms, importing 0.2–0.5 s. Re-importing an area the TS import had written leaves every row identical.
 
-```
-Geofabrik .osm.pbf + .poly ─▶ data/osm/pbf/          (curl -L; md5 checked)
-   │  npm run cli -- import-pbf --file data/osm/pbf/colorado-latest.osm.pbf [--within lat,lon,km]
-   ▼
-@game/osm-import pbf.ts: nodes → sorted coordinate index; building relations; ways the extractors want
-   ─▶ bucket ways by level-12 cell ─▶ per cell: the same importSnapshot as an Overpass download
-   ─▶ osm_fetches area "s2:<token>" for every cell fully inside the .poly
-```
+### Regional extracts (later)
 
-Measured (Colorado, Nov 2026): 389 MB, 54 M nodes, 4.4 M ways; decoded in 6 s, 2.6 M ways kept; the 148 download cells within 15 km of downtown Denver imported in 5 s after a 17 s parse. The cell server checks `osm_fetches` first, so these cells never touch Overpass.
-
-Measured (downtown Denver, Nov 2026): a level-12 download is 7–38 MB of raw OSM and takes 20–45 s from overpass-api.de; the first cell needed 5 of them. A downtown level-13 cell is 391 edges and 2,212 buildings, about 250 KB of Arrow.
-
-### Zip codes (still available)
-
-```
-zip code ─▶ Census ZCTA gazetteer (data/census/) ─▶ center point ─▶ square bbox
-   │  npm run cli -- fetch-osm --zip 80205 --size 4     (once per area)
-   ▼
-Overpass API ─▶ data/osm/<zip>.json + <zip>.meta.json   (gitignored raw snapshot)
-   │  npm run cli -- import --zip 80205                 (repeatable, no network)
-   ▼
-@game/osm-import (pure TS): raw OSM → drivable ways, buildings (resolved attributes)
-   │  @game/db: one transaction
-   ▼
-PostGIS: osm_fetches, road_ways, buildings (upsert by OSM key; delete rows gone from the box)
-```
-
-The per-area export (`cli export --zip`) is gone: rows imported this way are exported through cells like any others.
+`cellgen region <lat,lon> [--download]` finds the deepest Geofabrik region holding a point (from their index, downloaded once) and downloads its `.osm.pbf` once into `data/osm/pbf/` (Washington state: 366 MB in 135 s). Too slow to fetch on a teleport; not wired into the server. A local planet (or continent), preprocessed into areas, is the way to make any place load at once.
 
 ## Target (later)
 
@@ -64,18 +35,13 @@ PostGIS ─▶ export (TS, Node): as now, plus an R-tree per cell and LOD levels
 
 For whole regions, Geofabrik extracts via osm2pgsql (or our converter reading `.pbf`) replace Overpass snapshots. The tables and everything downstream stay the same.
 
-## Choosing an area
-
-1. **Zip code → point.** The US Census ZCTA Gazetteer (public domain, ~33k rows) is downloaded once into `data/census/`. Its "internal point" is used as the center. For addresses or other countries, Nominatim (light use only, per its usage policy).
-2. **Point → bbox.** A fixed square around the point (`--size` in km). Zip boundaries are not used: rural zips can cover hundreds of km².
-3. **Overpass query:** everything in the box, plus the out-of-box nodes of ways that cross its edge, so every way's geometry is complete.
-
-## Import (osm-import + db)
+## Import (cellgen: extract.rs, import.rs)
 
 - Select drivable ways: `highway` in motorway…residential, living_street, service, road, and their `_link` variants; not `area=yes`.
 - Resolve one-way (explicit tags, implied for motorways and roundabouts), lanes per direction, speed limit (tag or US default by class). Geometry and node order are stored in the direction of travel for one-way roads.
 - Upsert into `road_ways` by `osm_way_id`. Then delete road ways that have a node inside the fetched box but were not in this fetch (deleted upstream, or no longer a road).
 - Record the fetch in `osm_fetches` (keyed by file sha256, so re-importing the same file is idempotent).
+- Sidewalk sides and bridges or tunnels aren't stored: they're resolved from each way's stored tags when it's loaded.
 
 ### Buildings
 
@@ -84,7 +50,9 @@ For whole regions, Geofabrik extracts via osm2pgsql (or our converter reading `.
 - Keyed by `(osm_type, osm_id)` (ways and relations have separate id spaces); geometry is always a MultiPolygon.
 - 80205: 16,694 buildings + 379 parts, none skipped; heights from `height` 6,716 (Denver's lidar import), levels 1,683, default 8,674. Tallest: 213 m.
 
-All OSM interpretation lives in TS so the server, CLI and tests share it.
+### Points of interest
+
+- Nodes, closed ways and multipolygons tagged `shop`, `amenity`, `office`, `tourism`, `craft`, `leisure` or `healthcare` with a `name` or `brand`; an area at its outer ring's centroid. Stored in `pois` (category: the key; kind: its value) with all their tags, keyed like buildings. Downtown Seattle's area: 2,425.
 
 ## Export
 

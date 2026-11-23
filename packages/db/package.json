@@ -9,7 +9,6 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@game/osm-import": "*",
     "@game/world": "*",
     "pg": "^8.23.1"
   }

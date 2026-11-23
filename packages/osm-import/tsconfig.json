@@ -1,5 +1,0 @@
-{
-  // Shared package: no DOM, no Node APIs.
-  "extends": "../../tsconfig.base.json",
-  "include": ["src"]
-}

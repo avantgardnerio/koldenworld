@@ -1,17 +1,9 @@
 import type { BuildingInput, HeightSource, OsmType, RoadClass, RoadWayInput } from "@game/world";
-import { roadSidewalks, roadStructure } from "@game/osm-import";
+type Tags = Record<string, string>;
 import pg from "pg";
 import { clientConfig, DATABASE_URL } from "./config.ts";
 
 export interface Bbox { south: number; west: number; north: number; east: number }
-
-export interface FetchInfo {
-  id: number;
-  area: string;
-  bbox: Bbox;
-  osmBaseTimestamp: string | null;
-  sha256: string;
-}
 
 async function withClient<T>(url: string, fn: (c: pg.Client) => Promise<T>): Promise<T> {
   const client = new pg.Client(clientConfig(url));
@@ -21,43 +13,6 @@ async function withClient<T>(url: string, fn: (c: pg.Client) => Promise<T>): Pro
   } finally {
     await client.end();
   }
-}
-
-/** Whether any snapshot has been imported for an area. */
-export function hasFetch(area: string, url = DATABASE_URL): Promise<boolean> {
-  return withClient(url, async (c) => {
-    const { rows } = await c.query("SELECT 1 FROM osm_fetches WHERE area = $1 LIMIT 1", [area]);
-    return rows.length > 0;
-  });
-}
-
-/** Every area with an imported snapshot whose name starts with a prefix. */
-export function fetchAreas(prefix: string, url = DATABASE_URL): Promise<Set<string>> {
-  return withClient(url, async (c) => {
-    const { rows } = await c.query<{ area: string }>("SELECT DISTINCT area FROM osm_fetches WHERE starts_with(area, $1)", [prefix]);
-    return new Set(rows.map((r) => r.area));
-  });
-}
-
-/** The most recently fetched snapshot for an area. */
-export function latestFetch(area: string, url = DATABASE_URL): Promise<FetchInfo> {
-  return withClient(url, async (c) => {
-    const { rows: [r] } = await c.query<{
-      id: string; area: string; south: number; west: number; north: number; east: number;
-      osm_base_timestamp: Date | null; sha256: string;
-    }>(
-      `SELECT id, area, ST_YMin(bbox) south, ST_XMin(bbox) west, ST_YMax(bbox) north, ST_XMax(bbox) east,
-              osm_base_timestamp, sha256
-       FROM osm_fetches WHERE area = $1 ORDER BY fetched_at DESC, id DESC LIMIT 1`, [area]);
-    if (!r) throw new Error(`no fetch recorded for area ${area}; run import first`);
-    return {
-      id: Number(r.id),
-      area: r.area,
-      bbox: { south: r.south, west: r.west, north: r.north, east: r.east },
-      osmBaseTimestamp: r.osm_base_timestamp?.toISOString() ?? null,
-      sha256: r.sha256,
-    };
-  });
 }
 
 /**
@@ -140,4 +95,60 @@ export function loadBuildings(bbox: Bbox, url = DATABASE_URL): Promise<BuildingI
       polygons: r.coords,
     }));
   });
+}
+
+// --- road tags: stored ways keep their tags; these resolve what the graph needs ---------------------
+
+/** Sidewalk bits (decision 33): which sides of a stored road way have one, looking along its stored node order. */
+const SIDEWALK_LEFT = 1, SIDEWALK_RIGHT = 2;
+
+/** Town streets: where untagged roads get sidewalks on both sides (at most 40 mph). */
+const SIDEWALK_CLASSES = new Set(["primary", "secondary", "tertiary", "unclassified", "residential", "living_street"]);
+const SIDEWALK_MAX_SPEED = 40 * 0.44704;
+
+/**
+ * Which sides of a road have a sidewalk, from sidewalk=*, sidewalk:left/right/both=*
+ * (a separately mapped sidewalk counts: it's drawn at the curb), or, untagged,
+ * by class and speed limit. Left and right are relative to the stored node
+ * order, which runs against the way for oneway=-1.
+ */
+function roadSidewalks(tags: Tags, speedLimitMps: number): number {
+  const yes = (v: string | undefined) => v === undefined ? undefined : !["no", "none"].includes(v);
+  let left: boolean | undefined, right: boolean | undefined;
+  const both = tags["sidewalk:both"] ?? tags.sidewalk;
+  if (both !== undefined) {
+    if (both === "left") [left, right] = [true, false];
+    else if (both === "right") [left, right] = [false, true];
+    else left = right = yes(both);
+  }
+  left = yes(tags["sidewalk:left"]) ?? left;
+  right = yes(tags["sidewalk:right"]) ?? right;
+  if (left === undefined && right === undefined) {
+    const town = SIDEWALK_CLASSES.has(tags.highway ?? "") && speedLimitMps <= SIDEWALK_MAX_SPEED + 0.01
+      && (tags.tunnel === undefined || tags.tunnel === "no" || tags.tunnel === "building_passage");
+    left = right = town;
+  }
+  if (onewayDirection(tags) === -1) [left, right] = [right, left];
+  return (left ? SIDEWALK_LEFT : 0) | (right ? SIDEWALK_RIGHT : 0);
+}
+
+/** Bridges and tunnels run straight between their ends instead of following the ground (decision 29). */
+function roadStructure(tags: Tags): "bridge" | "tunnel" | null {
+  if (tags.bridge !== undefined && tags.bridge !== "no") return "bridge";
+  // A building passage is a short gap under a building at ground level, not a tunnel through ground.
+  if (tags.tunnel !== undefined && tags.tunnel !== "no" && tags.tunnel !== "building_passage") return "tunnel";
+  return null;
+}
+
+/** 1 = one-way along node order, -1 = one-way against it, 0 = two-way. */
+function onewayDirection(tags: Tags): 1 | -1 | 0 {
+  switch (tags.oneway) {
+    case "yes": case "true": case "1": return 1;
+    case "-1": case "reverse": return -1;
+    case "no": case "false": case "0": case "reversible": case "alternating": return 0;
+  }
+  // Implied one-way when untagged.
+  if (tags.highway === "motorway" || tags.highway === "motorway_link") return 1;
+  if (tags.junction === "roundabout" || tags.junction === "circular") return 1;
+  return 0;
 }

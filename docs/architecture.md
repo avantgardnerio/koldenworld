@@ -27,22 +27,25 @@
 ```
 packages/
   sim/         pure step(), dynamic entity tables      ─┐ no DOM, no Node APIs:
-  world/       map tables, operators, spatial indexes   │ loads anywhere
-  osm-import/  raw OSM → map rows; way splitting       ─┘
+  world/       map tables, operators, spatial indexes  ─┘ loads anywhere
   viewer/      3D rendering, input, UI                  ← browser only
-  cli/         fetch, migrate, import, cell server;     ← Node only
+  cli/         migrate, cell server (fine cells' roads,  ← Node only
+               buildings, terrain);
                later scenarios, replays, text view, JSON-lines
   db/          Postgres access, migrations runner       ← Node only
+crates/
+  cellgen/     OSM fetch, parse, extract, import; the   ← Rust
+               ground (every tier), massing; tile server
 ```
 
-Existing today: `sim` (columnar tables with cursors, traffic), `world` (road graph, buildings, Arrow I/O, projection, WGS84 geodesy and ENU frames, S2 cells, road line, road surface and building meshes), `osm-import`, `db`, `cli`, `viewer` (WebGL2 road map, headless harness).
+Existing today: `sim` (columnar tables with cursors, traffic), `world` (road graph, buildings, Arrow I/O, projection, WGS84 geodesy and ENU frames, S2 cells, road lines and building meshes), `db`, `cli`, `viewer` (WebGL2 road map, headless harness).
 
 The shared packages are compiled without DOM type definitions, and a lint rule blocks Node-specific imports, so platform leaks fail the build.
 
 ## Data flow
 
 ```
-OSM snapshot ─▶ osm-import (TS) ─▶ PostGIS ─▶ export (TS) ─▶ cell blobs (typed arrays)
+OSM snapshot ─▶ cellgen import (Rust) ─▶ PostGIS ─▶ cellgen / TS export ─▶ cell blobs (typed arrays)
                                                         │  HTTP, immutable, cacheable
                                                         ▼
                                    getBlob(): fetch + HTTP cache (browser), files (Node)

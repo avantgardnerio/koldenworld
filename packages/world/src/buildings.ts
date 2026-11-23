@@ -21,7 +21,7 @@ export type HeightSource = (typeof HEIGHT_SOURCES)[number];
 export const OSM_TYPES = ["way", "relation"] as const;
 export type OsmType = (typeof OSM_TYPES)[number];
 
-/** What the table needs from a stored building (Postgres row, or osm-import's output). */
+/** What the table needs from a stored building (a Postgres row). */
 export interface BuildingInput {
   osmType: OsmType;
   osmId: number;
