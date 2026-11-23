@@ -30,11 +30,12 @@ import {
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
-import { fromYawPitch, MIN_ALTITUDE, NEAR, speed, viewProjection, yawPitch } from "./camera.ts";
+import { fromYawPitch, MIN_ALTITUDE, NEAR, viewProjection, yawPitch } from "./camera.ts";
 import { Drive } from "./drive.ts";
 import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
 import { createContrailLayer } from "./contrail-layer.ts";
 import { createCarModels, createCarRenderer, type CarInstances, type CarModels, type CarRenderer } from "./car-layer.ts";
+import { Instruments } from "./instruments.ts";
 import { PeopleView } from "./people-view.ts";
 import { createPersonRenderer, PERSON_STRIDE, type PersonInstances } from "./person-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
@@ -203,6 +204,9 @@ async function loadCarModels(gl: WebGL2RenderingContext): Promise<CarModels> {
 async function start(): Promise<void> {
   const canvas = document.querySelector("canvas")!;
   const hud = document.querySelector<HTMLElement>("#hud")!;
+  const instruments = new Instruments(document.querySelector<HTMLCanvasElement>("#instruments")!);
+  // The camera's motion, for the instruments: where it was last frame (ECEF), and its smoothed speed and climb.
+  let lastEcef: Vec3 | undefined, lastH = 0, groundSpeed = 0, climb = 0;
   const gl = canvas.getContext("webgl2", { antialias: true, stencil: true });
   if (!gl) throw new Error("WebGL2 is not available");
 
@@ -540,10 +544,22 @@ async function start(): Promise<void> {
     // Before the fine cell under the camera loads (or from high up, where none do), its coarse tile's height.
     const below = roughGroundAt(camera.lat, camera.lon);
     const agl = camera.h - below;
+    // Speed over the ground and climb, from how far the camera moved this frame, smoothed over ~0.2 s.
+    const ecef = geodeticToEcef(camera);
+    if (lastEcef && dt > 0) {
+      const k = Math.min(1, dt * 5), [dx, dy, dz] = [ecef[0] - lastEcef[0], ecef[1] - lastEcef[1], ecef[2] - lastEcef[2]];
+      const vz = (camera.h - lastH) / dt;
+      groundSpeed += (Math.sqrt(Math.max(0, dx * dx + dy * dy + dz * dz - (camera.h - lastH) ** 2)) / dt - groundSpeed) * k;
+      climb += (vz - climb) * k;
+    }
+    [lastEcef, lastH] = [ecef, camera.h];
+    const [yaw, pitch] = yawPitch(camera.rot);
+    instruments.draw(
+      { bearing: (-yaw * 180) / Math.PI, pitch, speed: groundSpeed, climb, altitude: camera.h, agl, ground: below, lat: camera.lat, lon: camera.lon },
+      drive && { kmh: drive.kmh, bearing: 90 - (drive.car.heading * 180) / Math.PI, wheel, pedal },
+    );
     const m = (t: number) => (t / 1e6).toFixed(2);
-    const percent = (v: number) => `${v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(0)}%`;
-    hud.textContent = (drive ? `driving ${Math.abs(drive.kmh).toFixed(0)} km/h · wheel ${percent(wheel)} · pedal ${percent(pedal)} (V: fly) · ` : "") + `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
-      `(${below.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
+    hud.textContent = `cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
       `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars · ${people} people (${m(personTriangles)} M tris) · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU · ` +
       `M tris: ground ${m(status.drawn.ground)}, buildings ${m(status.drawn.buildings)}, massing ${m(status.drawn.massing)}, cars ${m(status.drawn.cars)}`;
