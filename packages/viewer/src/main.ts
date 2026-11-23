@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -364,6 +364,8 @@ async function start(): Promise<void> {
   // People (P): rows of them walking the sidewalks.
   const personRenderer = createPersonRenderer(gl, personMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
   const personInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE * 64), count: 0 };
+  const womanRenderer = createPersonRenderer(gl, womanMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
+  const womanInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE * 64), count: 0 };
   // Vagrants: around the places that draw them, roaming anywhere.
   const vagrantRenderer = createPersonRenderer(gl, vagrantMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
   const vagrantInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE * 64), count: 0 };
@@ -558,8 +560,9 @@ async function start(): Promise<void> {
       // Horizontal distance to the cell's anchor, as for traffic.
       const near = (c: { model: Float32Array }) => Math.hypot(c.model[12]!, c.model[13]!);
       peopleView.update(dt, near, PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
-      peopleView.instances(personInstances);
+      peopleView.instances(personInstances, womanInstances);
       personTriangles = personRenderer.draw(f, SUN, ROAD_BIAS, personInstances);
+      personTriangles += womanRenderer.draw(f, SUN, ROAD_BIAS, womanInstances);
       vagrantView.update(dt, near, PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
       vagrantView.instances(vagrantInstances);
       personTriangles += vagrantRenderer.draw(f, SUN, ROAD_BIAS, vagrantInstances);

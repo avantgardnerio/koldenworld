@@ -53,7 +53,7 @@ describe("people view", () => {
     let last: Float32Array | undefined;
     for (let k = 0; k < 30 * 300; k++) {
       step(v, 1 / 30);
-      v.instances(out);
+      v.instances(out, out);  // men and women in one list
       expect(out.count).toBe(n);
       const now = out.data.slice(0, PERSON_STRIDE * n);
       if (last) {

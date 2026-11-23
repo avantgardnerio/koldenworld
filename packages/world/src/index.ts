@@ -47,7 +47,7 @@ export {
 } from "./aircraft.ts";
 export {
   ARM_X, ELBOW, HAND, HIP, KNEE, MUZZLE, PART, PATROL, PEOPLE_PALETTE, PERSON_HEIGHT, personMesh, pistolMesh, placePeople,
-  placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, SHOULDER, vagrantMesh, VAGRANTS,
+  placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, SHOULDER, vagrantMesh, VAGRANTS, womanMesh,
   type PeoplePlacements, type PersonMesh, type VagrantPlacements,
 } from "./people.ts";
 export {

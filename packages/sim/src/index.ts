@@ -1,5 +1,5 @@
 export {
-  createPeople, NO_CROSSING, PASSAGE, PERSON, removePeople, SIDEWALK_LEG, spawnPerson, stepPeople, WALK, WAY,
+  BODY, createPeople, NO_CROSSING, PASSAGE, PERSON, removePeople, SIDEWALK_LEG, spawnPerson, stepPeople, WALK, WAY,
   type People, type PersonStart, type SidewalkNet,
 } from "./people.ts";
 export {

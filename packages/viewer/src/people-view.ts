@@ -29,7 +29,7 @@
 //   populated cells, so the edge of the populated area is like a dead end.
 
 import {
-  createPeople, NO_CROSSING, PASSAGE, removePeople, Rng, spawnPerson, stepPeople, type People, type SidewalkNet,
+  BODY, createPeople, NO_CROSSING, PASSAGE, removePeople, Rng, spawnPerson, stepPeople, type People, type SidewalkNet,
 } from "@game/sim";
 import { offsetPoint, placePeople, SIDEWALK, sidewalkOffset, turnPoint } from "@game/world";
 import { PERSON_STRIDE, POSE, type PersonInstances } from "./person-layer.ts";
@@ -108,10 +108,10 @@ export class PeopleView implements SidewalkNet {
     if (moving) stepPeople(this.people, this, dt, this.rng);
   }
 
-  /** Writes everyone in visible cells into `out`, in the view frame. */
-  instances(out: PersonInstances): void {
+  /** Writes everyone in visible cells into `men` or `women` by their body, in the view frame. */
+  instances(men: PersonInstances, women: PersonInstances): void {
     const c = this.people.c, { p, q } = this;
-    out.count = 0;
+    men.count = women.count = 0;
     for (let i = 0; i < this.people.count; i++) {
       if (!this.slots.get(c.cell[i]!)?.visible) continue;
       let fx: number, fy: number;
@@ -124,7 +124,7 @@ export class PeopleView implements SidewalkNet {
         this.sidewalkPoint(c.cell[i]!, c.edge[i]!, c.dir[i]!, c.side[i]!, c.across[i]!, c.s[i]!, p);
         [fx, fy] = [p[3]!, p[4]!];
       }
-      const fl = Math.hypot(fx, fy) || 1;
+      const fl = Math.hypot(fx, fy) || 1, out = c.body[i] === BODY.woman ? women : men;
       if (PERSON_STRIDE * (out.count + 1) > out.data.length) {
         const grown = new Float32Array(out.data.length * 2);
         grown.set(out.data);

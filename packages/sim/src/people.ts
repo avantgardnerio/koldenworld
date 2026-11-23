@@ -35,6 +35,8 @@ export const WALK = {
 export const SIDEWALK_LEG = 0, PASSAGE = 1;
 /** In xcell: the passage crosses no road. */
 export const NO_CROSSING = 0xffff;
+/** A person's figure: a man's or a woman's, half and half. */
+export const BODY = { man: 0, woman: 1 } as const;
 
 export const PERSON = {
   cell: Uint16Array,    // the viewer's slot for the cell the edge belongs to
@@ -47,6 +49,7 @@ export const PERSON = {
   speed: Float32Array,  // m/s
   across: Float32Array, // m right of the sidewalk's middle, as they walk
   phase: Float32Array,  // radians, 0 .. 2π
+  body: Uint8Array,     // BODY: which figure they're drawn as
   xcell: Uint16Array,   // in a passage: the road crossed (NO_CROSSING: none), from its side xside
   xedge: Uint32Array,
   xside: Int8Array,
@@ -96,6 +99,7 @@ export function spawnPerson(people: People, net: SidewalkNet, a: PersonStart, rn
   c.speed[i] = WALK.speed + WALK.spread * (2 * rng.next() - 1);
   c.across[i] = WALK.keep;
   c.phase[i] = 2 * Math.PI * rng.next();
+  c.body[i] = rng.next() < 0.5 ? BODY.woman : BODY.man;
   return i;
 }
 

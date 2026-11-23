@@ -7,7 +7,8 @@
 // their pivots (thighs at the hips, shins at the knees, upper arms at the
 // shoulders, forearms at the elbows) with no skeleton: thighs, shins with
 // shoes, hips, torso, upper arms, forearms with hands, neck, head (an
-// eight-sided column) and hair. Each vertex knows its part (PART).
+// eight-sided column) and hair. A woman's has a skirt for hips, bare legs, a
+// bust and long hair. Each vertex knows its part (PART).
 //
 // It faces +y, with z up and its feet on z = 0, in meters, PERSON_HEIGHT tall.
 // Colors are swatches in PEOPLE_PALETTE, a 16 × 1 texture the uvs point at.
@@ -34,13 +35,22 @@ export const PART = {
   body: 0, leftLeg: 1, rightLeg: 2, leftArm: 3, rightArm: 4, leftShin: 5, rightShin: 6, leftForearm: 7, rightForearm: 8,
 } as const;
 
-const SWATCH = { skin: 0, shirt: 1, pants: 2, shoes: 3, hair: 4, coat: 5, worn: 6, beanie: 7, bundle: 8, jacket: 9 } as const;
-const PALETTE = ["#e8b98f", "#2f6fd6", "#3a3f4a", "#26282c", "#5a3a22", "#5b5a3c", "#4a4038", "#33343a", "#7a6a4f", "#d2402f"];
+const SWATCH = {
+  skin: 0, shirt: 1, pants: 2, shoes: 3, hair: 4, coat: 5, worn: 6, beanie: 7, bundle: 8, jacket: 9, blouse: 10, skirt: 11,
+} as const;
+const PALETTE = [
+  "#e8b98f", "#2f6fd6", "#3a3f4a", "#26282c", "#5a3a22", "#5b5a3c", "#4a4038", "#33343a", "#7a6a4f", "#d2402f",
+  "#c2557f", "#2c3447",
+];
 const PALETTE_SIZE = 16;
 
-/** What a figure wears: swatches for its top, legs and head, and whether it carries a bundle on its back. */
-interface Outfit { top: number; legs: number; head: number; bundle: boolean }
+/**
+ * What a figure wears: swatches for its top, legs and head, whether it carries a bundle on its back, and whether it's
+ * a woman's (a skirt over bare legs, long hair, a bust, a narrower waist and shoulders).
+ */
+interface Outfit { top: number; legs: number; head: number; bundle: boolean; woman?: boolean }
 const PEDESTRIAN: Outfit = { top: SWATCH.shirt, legs: SWATCH.pants, head: SWATCH.hair, bundle: false };
+const WOMAN: Outfit = { top: SWATCH.blouse, legs: SWATCH.skirt, head: SWATCH.hair, bundle: false, woman: true };
 const VAGRANT: Outfit = { top: SWATCH.coat, legs: SWATCH.worn, head: SWATCH.beanie, bundle: true };
 const PLAYER: Outfit = { top: SWATCH.jacket, legs: SWATCH.pants, head: SWATCH.hair, bundle: false };
 
@@ -140,6 +150,9 @@ export interface PersonMesh extends ModelMesh {
 
 /** A pedestrian, standing. */
 export const personMesh = (): PersonMesh => figure(PEDESTRIAN);
+
+/** A woman, standing: a blouse, a skirt to above the knee, long hair down her back. */
+export const womanMesh = (): PersonMesh => figure(WOMAN);
 
 /** A vagrant, standing: a drab coat and trousers, a beanie, a bundle on the back. */
 export const vagrantMesh = (): PersonMesh => figure(VAGRANT);
@@ -279,12 +292,14 @@ function figure(o: Outfit): PersonMesh {
   const mark = (part: number) => {
     while (parts.length < b.pos.length / 3) parts.push(part);
   };
+  // Under a skirt, bare legs.
+  const legs = o.woman ? SWATCH.skin : o.legs;
   for (const side of [1, -1]) {
     // A thigh; under it a shin (a touch narrower, overlapping it at the knee), its shoe sticking out forward.
     const [x0, x1] = side > 0 ? [0.02, 0.17] : [-0.17, -0.02];
-    b.box(x0, x1, -0.08, 0.08, KNEE - JOINT, HIP, o.legs);
+    b.box(x0, x1, -0.08, 0.08, KNEE - JOINT, HIP, legs);
     mark(side > 0 ? PART.rightLeg : PART.leftLeg);
-    b.box(x0 + 0.005, x1 - 0.005, -0.075, 0.075, 0.08, KNEE + JOINT, o.legs);
+    b.box(x0 + 0.005, x1 - 0.005, -0.075, 0.075, 0.08, KNEE + JOINT, legs);
     b.box(x0, x1, -0.09, 0.15, 0, 0.08, SWATCH.shoes);
     mark(side > 0 ? PART.rightShin : PART.leftShin);
     // An upper arm; under it a forearm (overlapping it at the elbow), its hand below.
@@ -295,14 +310,32 @@ function figure(o: Outfit): PersonMesh {
     b.box(a0 + 0.015, a1 - 0.015, -0.045, 0.045, HAND - 0.05, HAND + 0.05, SWATCH.skin);
     mark(side > 0 ? PART.rightForearm : PART.leftForearm);
   }
-  b.box(-0.18, 0.18, -0.09, 0.09, HIP - 0.05, 0.93, o.legs);
-  // The torso narrows to the shoulders.
+  if (o.woman) {
+    // A skirt from the waist, flaring to a hem above the knees, roomy enough for the thighs to swing in.
+    b.hexa(
+      [[-0.22, -0.17, 0.56], [0.22, -0.17, 0.56], [0.22, 0.17, 0.56], [-0.22, 0.17, 0.56]],
+      [[-0.17, -0.1, 1.0], [0.17, -0.1, 1.0], [0.17, 0.1, 1.0], [-0.17, 0.1, 1.0]],
+      o.legs,
+    );
+  } else b.box(-0.18, 0.18, -0.09, 0.09, HIP - 0.05, 0.93, o.legs);
+  // The torso narrows to the shoulders (a woman's a little more).
+  const [waist, shoulders] = o.woman ? [0.17, 0.14] : [0.19, 0.15];
   b.hexa(
-    [[-0.19, -0.1, 0.93], [0.19, -0.1, 0.93], [0.19, 0.1, 0.93], [-0.19, 0.1, 0.93]],
-    [[-0.15, -0.09, 1.46], [0.15, -0.09, 1.46], [0.15, 0.09, 1.46], [-0.15, 0.09, 1.46]],
+    [[-waist, -0.1, 0.93], [waist, -0.1, 0.93], [waist, 0.1, 0.93], [-waist, 0.1, 0.93]],
+    [[-shoulders, -0.09, 1.46], [shoulders, -0.09, 1.46], [shoulders, 0.09, 1.46], [-shoulders, 0.09, 1.46]],
     o.top,
   );
+  // A bust: a wedge on the chest, deepest at the bottom.
+  if (o.woman) {
+    b.hexa(
+      [[-0.13, 0.08, 1.16], [0.13, 0.08, 1.16], [0.13, 0.16, 1.16], [-0.13, 0.16, 1.16]],
+      [[-0.12, 0.08, 1.33], [0.12, 0.08, 1.33], [0.12, 0.115, 1.33], [-0.12, 0.115, 1.33]],
+      o.top,
+    );
+  }
   if (o.bundle) b.box(-0.14, 0.14, -0.27, -0.1, 1.0, 1.4, SWATCH.bundle);
+  // Long hair, down the back of the head to the shoulders.
+  if (o.woman) b.box(-0.12, 0.12, -0.15, -0.05, 1.36, 1.78, o.head);
   column(b, 0.06, 1.46, 1.51, SWATCH.skin);
   // The head, under hair; or under a beanie, pulled down and a little wider.
   const cap = o.head === SWATCH.beanie;
