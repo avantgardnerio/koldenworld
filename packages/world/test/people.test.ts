@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildRoadGraph, enuFrame, enuProjection, enuUnprojection, HIP, PART, PERSON_HEIGHT, personMesh, placePeople, SHOULDER, vagrantMesh,
+  buildRoadGraph, ELBOW, enuFrame, enuProjection, enuUnprojection, HIP, KNEE, PART, PERSON_HEIGHT, personMesh, placePeople,
+  SHOULDER, vagrantMesh,
   type RoadWayInput,
 } from "../src/index.ts";
 
@@ -49,17 +50,28 @@ describe("person model", () => {
     expect(Math.max(...ys)).toBeGreaterThan(-Math.min(...ys));
   });
 
-  it("knows each vertex's part: legs below the hips, arms about the shoulders, on their own sides", () => {
+  it("knows each vertex's part: thighs from hip to knee, shins below, arms likewise at the elbow, on their own sides", () => {
     const m = personMesh();
     expect(m.parts.length).toBe(m.positions.length / 3);
     const seen = new Set<number>();
+    // Each limb half's extent in z: from just past its lower joint (or the ground, or the hand) up to just past its upper.
+    const span: Record<number, [number, number]> = {
+      [PART.leftLeg]: [KNEE - 0.05, HIP], [PART.rightLeg]: [KNEE - 0.05, HIP],
+      [PART.leftShin]: [0, KNEE + 0.05], [PART.rightShin]: [0, KNEE + 0.05],
+      [PART.leftArm]: [ELBOW - 0.05, SHOULDER + 0.1], [PART.rightArm]: [ELBOW - 0.05, SHOULDER + 0.1],
+      [PART.leftForearm]: [0.8, ELBOW + 0.05], [PART.rightForearm]: [0.8, ELBOW + 0.05],
+    };
+    const left = [PART.leftLeg, PART.leftShin, PART.leftArm, PART.leftForearm] as number[];
+    const right = [PART.rightLeg, PART.rightShin, PART.rightArm, PART.rightForearm] as number[];
     for (let v = 0; v < m.parts.length; v++) {
       const [x, z] = [m.positions[3 * v]!, m.positions[3 * v + 2]!], p = m.parts[v]!;
       seen.add(p);
-      if (p === PART.leftLeg || p === PART.rightLeg) expect(z).toBeLessThanOrEqual(HIP + 1e-6);
-      if (p === PART.leftArm || p === PART.rightArm) expect(z).toBeLessThanOrEqual(SHOULDER + 0.1);
-      if (p === PART.leftLeg || p === PART.leftArm) expect(x).toBeLessThan(0);
-      if (p === PART.rightLeg || p === PART.rightArm) expect(x).toBeGreaterThan(0);
+      if (span[p]) {
+        expect(z, `part ${p}`).toBeGreaterThanOrEqual(span[p][0] - 1e-6);
+        expect(z, `part ${p}`).toBeLessThanOrEqual(span[p][1] + 1e-6);
+      }
+      if (left.includes(p)) expect(x).toBeLessThan(0);
+      if (right.includes(p)) expect(x).toBeGreaterThan(0);
     }
     expect([...seen].sort()).toEqual(Object.values(PART).sort());
   });

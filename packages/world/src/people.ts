@@ -4,9 +4,10 @@
 // draw them: shelters, soup kitchens, outreach, by charityWeight). Pure.
 //
 // The figure is rigid parts, so it can be animated by swinging them about
-// their pivots (legs at the hips, arms at the shoulders) with no skeleton:
-// legs, hips, torso, arms with hands, neck, head (an eight-sided column) and
-// hair. Each vertex knows its part (PART).
+// their pivots (thighs at the hips, shins at the knees, upper arms at the
+// shoulders, forearms at the elbows) with no skeleton: thighs, shins with
+// shoes, hips, torso, upper arms, forearms with hands, neck, head (an
+// eight-sided column) and hair. Each vertex knows its part (PART).
 //
 // It faces +y, with z up and its feet on z = 0, in meters, PERSON_HEIGHT tall.
 // Colors are swatches in PEOPLE_PALETTE, a 16 × 1 texture the uvs point at.
@@ -19,10 +20,17 @@ import { ROAD_CLASSES, type RoadClass, type RoadGraph } from "./road-graph.ts";
 import { rng } from "./vehicles.ts";
 
 export const PERSON_HEIGHT = 1.8;
-/** Where the legs and arms swing from: the hips' and shoulders' height, m. */
-export const HIP = 0.85, SHOULDER = 1.38;
-/** The parts that move on their own; left and right as the figure sees them (left is −x). */
-export const PART = { body: 0, leftLeg: 1, rightLeg: 2, leftArm: 3, rightArm: 4 } as const;
+/** Where the legs and arms swing from (the hips' and shoulders' height) and bend (the knees' and elbows'), m. */
+export const HIP = 0.85, SHOULDER = 1.38, KNEE = 0.47, ELBOW = 1.19;
+/** How far a limb's two halves overlap either side of the joint, m, so bending opens no gap. */
+const JOINT = 0.03;
+/**
+ * The parts that move on their own; left and right as the figure sees them (left is −x). Legs and arms are the
+ * thighs and upper arms; the shins and forearms hang from them.
+ */
+export const PART = {
+  body: 0, leftLeg: 1, rightLeg: 2, leftArm: 3, rightArm: 4, leftShin: 5, rightShin: 6, leftForearm: 7, rightForearm: 8,
+} as const;
 
 const SWATCH = { skin: 0, shirt: 1, pants: 2, shoes: 3, hair: 4, coat: 5, worn: 6, beanie: 7, bundle: 8 } as const;
 const PALETTE = ["#e8b98f", "#2f6fd6", "#3a3f4a", "#26282c", "#5a3a22", "#5b5a3c", "#4a4038", "#33343a", "#7a6a4f"];
@@ -141,16 +149,20 @@ function figure(o: Outfit): PersonMesh {
     while (parts.length < b.pos.length / 3) parts.push(part);
   };
   for (const side of [1, -1]) {
-    // A leg, its shoe sticking out forward.
+    // A thigh; under it a shin (a touch narrower, overlapping it at the knee), its shoe sticking out forward.
     const [x0, x1] = side > 0 ? [0.02, 0.17] : [-0.17, -0.02];
-    b.box(x0, x1, -0.08, 0.08, 0.08, HIP, o.legs);
-    b.box(x0, x1, -0.09, 0.15, 0, 0.08, SWATCH.shoes);
+    b.box(x0, x1, -0.08, 0.08, KNEE - JOINT, HIP, o.legs);
     mark(side > 0 ? PART.rightLeg : PART.leftLeg);
-    // An arm, its hand below.
+    b.box(x0 + 0.005, x1 - 0.005, -0.075, 0.075, 0.08, KNEE + JOINT, o.legs);
+    b.box(x0, x1, -0.09, 0.15, 0, 0.08, SWATCH.shoes);
+    mark(side > 0 ? PART.rightShin : PART.leftShin);
+    // An upper arm; under it a forearm (overlapping it at the elbow), its hand below.
     const [a0, a1] = side > 0 ? [0.19, 0.29] : [-0.29, -0.19];
-    b.box(a0, a1, -0.06, 0.06, 0.96, 1.44, o.top);
-    b.box(a0 + 0.015, a1 - 0.015, -0.045, 0.045, 0.86, 0.96, SWATCH.skin);
+    b.box(a0, a1, -0.06, 0.06, ELBOW - JOINT, 1.44, o.top);
     mark(side > 0 ? PART.rightArm : PART.leftArm);
+    b.box(a0 + 0.005, a1 - 0.005, -0.055, 0.055, 0.96, ELBOW + JOINT, o.top);
+    b.box(a0 + 0.015, a1 - 0.015, -0.045, 0.045, 0.86, 0.96, SWATCH.skin);
+    mark(side > 0 ? PART.rightForearm : PART.leftForearm);
   }
   b.box(-0.18, 0.18, -0.09, 0.09, HIP - 0.05, 0.93, o.legs);
   // The torso narrows to the shoulders.

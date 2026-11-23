@@ -3,23 +3,27 @@
 // view frame, as the cars') and a walk: its phase (radians; a full turn is
 // two steps), gait (0 standing, 1 walking, more running) and pose (POSE).
 //
-// The walk swings rigid parts, no skeleton: each leg about the hip by
-// ±LEG_SWING·gait·sin(phase), the left and right opposite; each arm about the
-// shoulder opposite its own side's leg, by ARM_SWING. The figure drops by as
-// much as the swung leg rises (hip × (1 − cos angle)), so its feet stay on the
-// ground. Sitting, the legs point straight ahead and the figure sits on the
+// The walk swings rigid parts, no skeleton: each thigh about the hip by
+// ±LEG_SWING·gait·sin(phase), the left and right opposite; each upper arm
+// about the shoulder opposite its own side's leg, by ARM_SWING. A shin bends
+// back at the knee as its leg swings forward (up to KNEE_BEND·gait), lifting
+// the foot clear; the elbows stay a little bent walking and bend toward a
+// right angle running. The figure drops by as much as the straight standing
+// leg rises (hip × (1 − cos angle)), so its feet stay on the ground. Sitting, the legs point straight ahead and the figure sits on the
 // ground; lying, it lies on its back, head behind where it faced; shouting,
 // both arms wave over its head; staggering, the body sways side to side
 // about the feet, a sway each step. Same
 // lighting and fog as the cars (car-layer's fragment shader). Holds GPU
 // handles only.
 
-import { HIP, PART, SHOULDER, type PersonMesh } from "@game/world";
+import { ELBOW, HIP, KNEE, PART, SHOULDER, type PersonMesh } from "@game/world";
 import { compile, FRAGMENT } from "./car-layer.ts";
 import type { Frame } from "./flat-layer.ts";
 
 /** Radians at full gait. */
 const LEG_SWING = 0.45, ARM_SWING = 0.35;
+/** Radians: the most a knee bends at a walk (more running); the elbows' bend at a walk, and how much more running. */
+const KNEE_BEND = 0.9, ELBOW_BEND = 0.15, ELBOW_RUN = 1.1;
 /** Floats per instance: position, forward, phase, gait, pose. */
 export const PERSON_STRIDE = 9;
 /** How a figure holds itself: upright, sitting, lying, shouting (arms up, waving), staggering (swaying side to side). */
@@ -53,28 +57,42 @@ vec3 turn(vec3 n, float a) {
   return vec3(n.x, n.y * c - n.z * s, n.y * s + n.z * c);
 }
 void main() {
-  float leg = ${LEG_SWING.toFixed(3)} * i_walk.y * sin(i_walk.x);  // the left leg's angle; the right's is −leg
-  int part = int(a_part + 0.5);
-  float a = 0.0, h = 0.0;
-  if (part == ${PART.leftLeg}) { a = leg; h = ${HIP.toFixed(3)}; }
-  else if (part == ${PART.rightLeg}) { a = -leg; h = ${HIP.toFixed(3)}; }
-  else if (part == ${PART.leftArm}) { a = -leg * ${(ARM_SWING / LEG_SWING).toFixed(3)}; h = ${SHOULDER.toFixed(3)}; }
-  else if (part == ${PART.rightArm}) { a = leg * ${(ARM_SWING / LEG_SWING).toFixed(3)}; h = ${SHOULDER.toFixed(3)}; }
-  float pose = i_walk.z;
-  bool legs = part == ${PART.leftLeg} || part == ${PART.rightLeg}, arms = part == ${PART.leftArm} || part == ${PART.rightArm};
+  float ph = i_walk.x, gait = i_walk.y, pose = i_walk.z;
   bool sit = pose > 0.5 && pose < 1.5, lie = pose > 1.5 && pose < 2.5, shout = pose > 2.5 && pose < 3.5, stagger = pose > 3.5;
+  float leg = ${LEG_SWING.toFixed(3)} * gait * sin(ph);  // the left thigh's angle; the right's is −leg
+  // Each side's joints (x left, y right): thigh and upper arm swing, knee and elbow bend. A knee bends as its leg
+  // swings forward; elbows bend a little walking and toward a right angle running.
+  vec2 thigh = vec2(leg, -leg);
+  vec2 knee = ${KNEE_BEND.toFixed(3)} * gait * max(vec2(cos(ph), -cos(ph)), 0.0);
+  vec2 arm = vec2(-leg, leg) * ${(ARM_SWING / LEG_SWING).toFixed(3)};
+  vec2 elbow = vec2(${ELBOW_BEND.toFixed(3)} + ${ELBOW_RUN.toFixed(3)} * clamp(gait - 1.0, 0.0, 1.0));
   if (sit) {
     // Sitting: legs straight out ahead, hands on the knees.
-    if (legs) { a = 1.571; h = ${HIP.toFixed(3)}; }
-    if (arms) { a = 0.5; h = ${SHOULDER.toFixed(3)}; }
+    thigh = vec2(1.571);
+    knee = vec2(0.0);
+    arm = vec2(0.5);
+    elbow = vec2(0.5);
   }
-  if (shout && arms) {
+  if (shout) {
     // Shouting: both arms up over the head, waving, out of step with each other.
-    a = 2.7 + 0.4 * sin(2.0 * i_walk.x + (part == ${PART.leftArm} ? 0.0 : 3.14));
-    h = ${SHOULDER.toFixed(3)};
+    arm = 2.7 + 0.4 * vec2(sin(2.0 * ph), sin(2.0 * ph + 3.14));
+    elbow = vec2(0.3);
   }
-  vec3 p = swing(a_pos, a, h);
-  vec3 n = turn(a_normal, a);
+  int part = int(a_part + 0.5);
+  bool left = part == ${PART.leftLeg} || part == ${PART.leftShin} || part == ${PART.leftArm} || part == ${PART.leftForearm};
+  bool shin = part == ${PART.leftShin} || part == ${PART.rightShin};
+  bool forearm = part == ${PART.leftForearm} || part == ${PART.rightForearm};
+  bool legs = shin || part == ${PART.leftLeg} || part == ${PART.rightLeg};
+  bool arms = forearm || part == ${PART.leftArm} || part == ${PART.rightArm};
+  // This side's joints.
+  float th = left ? thigh.x : thigh.y, kn = left ? knee.x : knee.y, ar = left ? arm.x : arm.y, el = left ? elbow.x : elbow.y;
+  vec3 p = a_pos, n = a_normal;
+  // A shin bends back at the knee, then swings with its thigh at the hip; a forearm bends forward at the elbow, then
+  // swings with its upper arm at the shoulder.
+  if (shin) { p = swing(p, -kn, ${KNEE.toFixed(3)}); n = turn(n, -kn); }
+  if (legs) { p = swing(p, th, ${HIP.toFixed(3)}); n = turn(n, th); }
+  if (forearm) { p = swing(p, el, ${ELBOW.toFixed(3)}); n = turn(n, el); }
+  if (arms) { p = swing(p, ar, ${SHOULDER.toFixed(3)}); n = turn(n, ar); }
   if (sit) p.z -= ${(HIP - SEAT).toFixed(3)};
   else if (lie) {
     // Lying on the back: the whole figure tipped over backward about its heels, then up off the ground by its back.
