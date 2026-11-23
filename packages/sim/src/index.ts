@@ -3,6 +3,9 @@ export {
   type People, type PersonStart, type SidewalkNet,
 } from "./people.ts";
 export { Rng } from "./rng.ts";
+export {
+  createVagrants, removeVagrants, ROAM, spawnVagrant, STATE, stepVagrants, VAGRANT, type RoamWorld, type Vagrants,
+} from "./vagrants.ts";
 export { Table, type Columns, type Cursor, type Schema } from "./table.ts";
 export {
   ACCELERATION, BRAKING, CAR, CAR_LENGTH, createCars, GAP, LANE_BONUS, laneSpeed, MPH, nextLane, NONE, removeCars, spawnCar, stepTraffic,

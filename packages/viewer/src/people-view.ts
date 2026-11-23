@@ -32,7 +32,7 @@ import {
   createPeople, NO_CROSSING, PASSAGE, removePeople, Rng, spawnPerson, stepPeople, type People, type SidewalkNet,
 } from "@game/sim";
 import { offsetPoint, placePeople, SIDEWALK, sidewalkOffset, turnPoint } from "@game/world";
-import { PERSON_STRIDE, type PersonInstances } from "./person-layer.ts";
+import { PERSON_STRIDE, POSE, type PersonInstances } from "./person-layer.ts";
 import type { TrafficCell } from "./traffic-view.ts";
 
 /** The weight of a way on that goes back along the road they came by (others: 1). */
@@ -131,7 +131,7 @@ export class PeopleView implements SidewalkNet {
         out.data = grown;
       }
       const o = PERSON_STRIDE * out.count++, d = out.data;
-      d.set([p[0]!, p[1]!, p[2]!, fx / fl, fy / fl, 0, c.phase[i]!, 1], o);
+      d.set([p[0]!, p[1]!, p[2]!, fx / fl, fy / fl, 0, c.phase[i]!, 1, POSE.upright], o);
     }
   }
 

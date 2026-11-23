@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildRoadGraph, enuFrame, enuProjection, enuUnprojection, HIP, PART, PERSON_HEIGHT, personMesh, placePeople, SHOULDER,
+  buildRoadGraph, enuFrame, enuProjection, enuUnprojection, HIP, PART, PERSON_HEIGHT, personMesh, placePeople, SHOULDER, vagrantMesh,
   type RoadWayInput,
 } from "../src/index.ts";
 
@@ -62,5 +62,16 @@ describe("person model", () => {
       if (p === PART.rightLeg || p === PART.rightArm) expect(x).toBeGreaterThan(0);
     }
     expect([...seen].sort()).toEqual(Object.values(PART).sort());
+  });
+});
+
+describe("vagrant model", () => {
+  it("is a person in other clothes, with a bundle on the back", () => {
+    const [p, v] = [personMesh(), vagrantMesh()];
+    expect(v.parts.length).toBe(v.positions.length / 3);
+    const zs = [...v.positions].filter((_, i) => i % 3 === 2), ys = [...v.positions].filter((_, i) => i % 3 === 1);
+    expect(Math.max(...zs)).toBeCloseTo(PERSON_HEIGHT, 6);
+    expect(Math.min(...ys)).toBeLessThan(Math.min(...[...p.positions].filter((_, i) => i % 3 === 1)) - 0.1);
+    expect([...v.uvs]).not.toEqual([...p.uvs].concat(new Array(v.uvs.length - p.uvs.length).fill(0)));
   });
 });

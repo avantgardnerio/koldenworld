@@ -46,7 +46,8 @@ export {
   type AircraftKind, type AircraftReport,
 } from "./aircraft.ts";
 export {
-  HIP, PART, PEOPLE_PALETTE, PERSON_HEIGHT, personMesh, placePeople, SHOULDER, type PeoplePlacements, type PersonMesh,
+  HIP, PART, PEOPLE_PALETTE, PERSON_HEIGHT, personMesh, placePeople, placeVagrants, SHOULDER, vagrantMesh, VAGRANTS,
+  type PeoplePlacements, type PersonMesh, type VagrantPlacements,
 } from "./people.ts";
 export {
   edgeArcLengths, edgeLanes, junctionReach, laneGeometry, laneOffset, lanePoint, offsetPoint, placeVehicles, turnPoint, VEHICLE_MODELS, VEHICLE_SCALE,
@@ -55,7 +56,7 @@ export {
 export { groundFromArrow, type CellGround } from "./ground-arrow.ts";
 export { clipConvex, pitchedRoof, type PitchedRoof, type RoofFace, type RoofShape } from "./roofs.ts";
 export {
-  ASSIGN_DISTANCE, buildPois, emptyPois, POI_CATEGORIES, poisFromArrow, poisToArrow, type PoiCategory, type PoiInput,
+  ASSIGN_DISTANCE, buildingBounds, buildPois, charityWeight, emptyPois, inBuilding, POI_CATEGORIES, poisFromArrow, poisToArrow, type PoiCategory, type PoiInput,
   type Pois,
 } from "./pois.ts";
 export { businessSigns, SIGN, type BusinessSign } from "./businesses.ts";

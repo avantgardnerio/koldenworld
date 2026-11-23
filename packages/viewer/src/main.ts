@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, placeVagrants, vagrantMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -37,6 +37,7 @@ import { createContrailLayer } from "./contrail-layer.ts";
 import { createCarModels, createCarRenderer, type CarInstances, type CarModels, type CarRenderer } from "./car-layer.ts";
 import { Instruments } from "./instruments.ts";
 import { PeopleView } from "./people-view.ts";
+import { VagrantView, type RoamCell } from "./vagrant-view.ts";
 import { createPersonRenderer, PERSON_STRIDE, type PersonInstances } from "./person-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
@@ -188,6 +189,7 @@ interface CellGpu {
   buildings?: SolidLayer;
   signs?: SignLayer;
   walls?: WallGrid;      // a fine cell's building walls, for the driven car's collisions
+  vagrants?: RoamCell;   // a fine cell with places that draw vagrants, in their sim
   counts: { nodes: number; edges: number; surfaceTriangles: number; buildings: number; buildingTriangles: number };
 }
 
@@ -213,6 +215,7 @@ async function start(): Promise<void> {
   const traffic = new TrafficView(1);
   const carInstances = emptyInstances();
   const peopleView = new PeopleView(1);
+  const vagrantView = new VagrantView(2);
   const nearCars = new Float64Array(5 * 256);  // the traffic cars near the player's car, for its collisions
 
   async function loadCell(cell: CellId): Promise<CellGpu> {
@@ -269,8 +272,16 @@ async function start(): Promise<void> {
     // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
     const flat = Math.max(groundReach, reach(c.graph.points, 2) + 20, reach(c.buildings.points, 2));
     for (let i = 0; i < c.buildings.count; i++) z1 = Math.max(z1, c.buildings.base[i]! + c.buildings.height[i]!);
-    // Where the cell's cars and people start.
+    // Where the cell's cars, people and vagrants start.
     const seed = Number(BigInt.asUintN(32, cell ^ (cell >> 32n)));
+    const walls = wallGrid(c.buildings), unproject = enuUnprojection(frame);
+    const roam: RoamCell = {
+      model, walls, visible: false, placements: placeVagrants(c.pois, c.buildings, seed ^ 0x85ebca6b),
+      ground: (x, y) => {
+        const [lon, lat] = unproject(x, y);
+        return terrainHeightAt(cell, terrain, lat, lon);
+      },
+    };
     return {
       frame,
       coarse: false,
@@ -291,7 +302,8 @@ async function start(): Promise<void> {
         })),
         ...businessSignBoxes(shops.signs),
       ]),
-      walls: wallGrid(c.buildings),
+      walls,
+      vagrants: roam.placements.count > 0 ? vagrantView.add(roam) : undefined,
       counts: {
         ...counts, nodes: c.graph.nodes.count, edges: c.graph.edges.count,
         buildings: c.buildings.count, buildingTriangles: tris.indices.length / 3,
@@ -308,6 +320,7 @@ async function start(): Promise<void> {
         peopleView.remove(g.traffic);
         traffic.remove(g.traffic);
       }
+      if (g.vagrants) vagrantView.remove(g.vagrants);
     },
     onChange: () => {
       updateStatus();
@@ -346,6 +359,9 @@ async function start(): Promise<void> {
   // People (P): rows of them walking the sidewalks.
   const personRenderer = createPersonRenderer(gl, personMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
   const personInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE * 64), count: 0 };
+  // Vagrants: around the places that draw them, roaming anywhere.
+  const vagrantRenderer = createPersonRenderer(gl, vagrantMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
+  const vagrantInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE * 64), count: 0 };
   const contrails = emptyContrails();
   const contrailLayer = showPlanes ? createContrailLayer(gl) : undefined;
   air.onUpdate = () => wake();
@@ -459,6 +475,7 @@ async function start(): Promise<void> {
       const seen = sphereVisible(planes, m[12]! + m[8]! * cz, m[13]! + m[9]! * cz, m[14]! + m[10]! * cz, g.radius);
       if (seen) visible.push(g);
       if (g.traffic) g.traffic.visible = seen;
+      if (g.vagrants) g.vagrants.visible = seen;
     });
     status.cells.drawn = visible.length;
     // The ground first (airports are part of it), then buildings; everything depth-tested.
@@ -513,9 +530,13 @@ async function start(): Promise<void> {
     let personTriangles = 0;
     if (showPeople) {
       // Horizontal distance to the cell's anchor, as for traffic.
-      peopleView.update(dt, (tc) => Math.hypot(tc.model[12]!, tc.model[13]!), PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
+      const near = (c: { model: Float32Array }) => Math.hypot(c.model[12]!, c.model[13]!);
+      peopleView.update(dt, near, PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
       peopleView.instances(personInstances);
       personTriangles = personRenderer.draw(f, SUN, ROAD_BIAS, personInstances);
+      vagrantView.update(dt, near, PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
+      vagrantView.instances(vagrantInstances);
+      personTriangles += vagrantRenderer.draw(f, SUN, ROAD_BIAS, vagrantInstances);
     }
     if (planeRenderer) {
       const now = performance.now() / 1000;
@@ -561,7 +582,7 @@ async function start(): Promise<void> {
     const m = (t: number) => (t / 1e6).toFixed(2);
     hud.textContent = `cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
-      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars · ${people} people (${m(personTriangles)} M tris) · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU · ` +
+      `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars · ${people} people + ${vagrantView.vagrants.count} vagrants (${m(personTriangles)} M tris) · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU · ` +
       `M tris: ground ${m(status.drawn.ground)}, buildings ${m(status.drawn.buildings)}, massing ${m(status.drawn.massing)}, cars ${m(status.drawn.cars)}`;
   };
 
@@ -593,7 +614,7 @@ async function start(): Promise<void> {
       // Input just stopped: the pose goes to the URL.
       if (steering) history.replaceState(null, "", formatGlobeHash(camera));
       steering = false;
-      if (!(moving && carRenderer) && air.count === 0 && !(walking && peopleView.people.count > 0)) {
+      if (!(moving && carRenderer) && air.count === 0 && !(walking && peopleView.people.count + vagrantView.vagrants.count > 0)) {
         running = false;
         return;
       }

@@ -1,4 +1,4 @@
-import type { BuildingInput, HeightSource, OsmType, PoiCategory, PoiInput, RoadClass, RoadWayInput } from "@game/world";
+import { charityWeight, type BuildingInput, type HeightSource, type OsmType, type PoiCategory, type PoiInput, type RoadClass, type RoadWayInput } from "@game/world";
 type Tags = Record<string, string>;
 import pg from "pg";
 import { clientConfig, DATABASE_URL } from "./config.ts";
@@ -102,12 +102,14 @@ export function loadPois(bbox: Bbox, url = DATABASE_URL): Promise<PoiInput[]> {
   return withClient(url, async (c) => {
     const { rows } = await c.query<{
       osm_id: string; category: PoiCategory; kind: string; name: string | null; brand: string | null; lon: number; lat: number;
+      tags: Record<string, string>;
     }>(
-      `SELECT osm_id::text, category, kind, name, brand, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM pois
+      `SELECT osm_id::text, category, kind, name, brand, ST_X(geom) AS lon, ST_Y(geom) AS lat, tags FROM pois
        WHERE geom && ST_MakeEnvelope($1, $2, $3, $4, 4326) ORDER BY osm_type, osm_id`,
       [bbox.west, bbox.south, bbox.east, bbox.north]);
     return rows.map((r) => ({
       osmId: Number(r.osm_id), category: r.category, kind: r.kind, name: r.name, brand: r.brand, lon: r.lon, lat: r.lat,
+      charity: charityWeight(r.category, r.kind, r.tags),
     }));
   });
 }
