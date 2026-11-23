@@ -9,8 +9,16 @@
 // on, so the car slides). The heading turns at speed × tan(steer) / wheelbase
 // (a bicycle model); steering is rate-limited, and limited more at speed.
 //
-// The ground: the car sits on the heights under its four wheels (height,
-// pitch, roll). Walls: the car is a rectangle; against each wall segment
+// The ground: on it, the car sits on the heights under its four wheels
+// (height, pitch, roll) and moves up and down with them. It leaves the ground
+// where the ground falls away faster than the car can follow (its own
+// vertical speed beats the ground's by more than LIFT: a crest at speed, a
+// ramp, an edge; smaller changes, like the terrain's triangle edges, the
+// suspension soaks up). In the air: gravity, drag and nothing else, so no
+// throttle, brakes, grip or steering; it keeps its pitch. It lands where it
+// meets the ground again, a hard landing scrubbing some speed.
+//
+// Walls: the car is a rectangle; against each wall segment
 // near it, the separating axis test finds the shallowest way out; the car is
 // pushed out along it, its velocity into the wall bounced back a little and
 // along the wall scrubbed.
@@ -27,6 +35,8 @@ export interface Vehicle {
   pitch: number;      // radians, nose up positive
   roll: number;       // radians, right side up positive
   stopped: number;    // s it has been stopped with the brake held (reverse after REVERSE_DELAY)
+  vz: number;         // m/s, up positive
+  air: number;        // s in the air (0: on the ground)
 }
 
 export interface DriveInput {
@@ -51,13 +61,16 @@ export const VEHICLE = {
   grip: 9, slideGrip: 1.2,                             // 1/s: how fast sideways speed dies
   bounce: 0.15, scrub: 0.25,                           // hitting a wall: velocity into it kept, reversed; along it lost
   gravity: 9.81,
+  lift: 2.5,                                           // m/s: by this much the car's vertical speed must beat the ground's to leave it
+  landingScrub: 0.03,                                  // per m/s of landing impact: the share of speed lost (at most a third)
 };
 const MAX_STEP = 1 / 120;
 
 /** A car at rest at a point, facing `heading`. */
 export function placeVehicle(x: number, y: number, heading: number, world: VehicleWorld): Vehicle {
-  const v: Vehicle = { x, y, z: 0, heading, vx: 0, vy: 0, steer: 0, pitch: 0, roll: 0, stopped: 0 };
-  settle(v, world);
+  const v: Vehicle = { x, y, z: 0, heading, vx: 0, vy: 0, steer: 0, pitch: 0, roll: 0, stopped: 0, vz: 0, air: 0 };
+  const g = ground(v, world);
+  [v.z, v.pitch, v.roll] = [g.z, g.pitch, g.roll];
   return v;
 }
 
@@ -75,7 +88,25 @@ function substep(v: Vehicle, input: DriveInput, dt: number, world: VehicleWorld)
   const [fx, fy] = [Math.cos(v.heading), Math.sin(v.heading)];
   let forward = v.vx * fx + v.vy * fy;
   let side = -v.vx * fy + v.vy * fx;
+  // In the air the wheels still turn, but nothing else works: drag only.
+  if (v.air > 0) {
+    steerWheels(v, input, forward, dt);
+    forward -= C.drag * forward * Math.abs(forward) * dt;
+    side -= C.drag * side * Math.abs(side) * dt;
+  } else {
+    [forward, side] = onTheGround(v, input, forward, side, dt);
+  }
+  v.vx = forward * fx - side * fy;
+  v.vy = forward * fy + side * fx;
+  v.x += v.vx * dt;
+  v.y += v.vy * dt;
+  collide(v, world);
+  rise(v, world, dt);
+}
 
+/** The ground's forces on the forward and sideways speeds, and the heading's turn; the new speeds. */
+function onTheGround(v: Vehicle, input: DriveInput, forward: number, side: number, dt: number): [number, number] {
+  const C = VEHICLE;
   // Forward: throttle, or brake (down to a stop, then reverse once stopped a moment); drag, engine braking, the slope.
   const t = Math.max(-1, Math.min(1, input.throttle));
   const toward = (target: number, rate: number) => {
@@ -104,29 +135,62 @@ function substep(v: Vehicle, input: DriveInput, dt: number, world: VehicleWorld)
   // Sideways: grip pulls it toward nothing.
   side *= Math.exp(-(input.handbrake ? C.slideGrip : C.grip) * dt);
 
-  // Steering: toward the input, less at speed, at a limited rate; the heading follows.
+  // Steering: the wheels turn; the heading follows them.
+  steerWheels(v, input, forward, dt);
+  v.heading += (forward * Math.tan(v.steer) / C.wheelbase) * dt;
+  return [forward, side];
+}
+
+/** The front wheels toward the input: less at speed, at a limited rate. */
+function steerWheels(v: Vehicle, input: DriveInput, forward: number, dt: number): void {
+  const C = VEHICLE;
   const target = -Math.max(-1, Math.min(1, input.steer)) * C.maxSteer / (1 + Math.abs(forward) / C.steerFalloff);
   const ds = target - v.steer;
   v.steer += Math.sign(ds) * Math.min(Math.abs(ds), C.steerRate * dt);
-  v.heading += (forward * Math.tan(v.steer) / C.wheelbase) * dt;
-
-  v.vx = forward * fx - side * fy;
-  v.vy = forward * fy + side * fx;
-  v.x += v.vx * dt;
-  v.y += v.vy * dt;
-  collide(v, world);
-  settle(v, world);
 }
 
-/** Sits the car on the ground under its four wheels. */
-function settle(v: Vehicle, world: VehicleWorld): void {
+/**
+ * Up and down: on the ground, the car follows it, unless the ground falls away faster than it can (then it takes off);
+ * in the air, gravity, until it meets the ground again (a hard landing scrubs speed).
+ */
+function rise(v: Vehicle, world: VehicleWorld, dt: number): void {
+  const C = VEHICLE;
+  const g = ground(v, world);
+  const vz = v.vz - C.gravity * dt;  // where gravity alone takes it
+  const z = v.z + vz * dt;
+  if (v.air > 0) {
+    if (z > g.z) {
+      [v.z, v.vz] = [z, vz];
+      v.air += dt;
+      return;
+    }
+    // Landing: as hard as it came down onto the ground's own slope.
+    const impact = Math.max(0, (g.z - v.z) / dt - vz);
+    const keep = 1 - Math.min(1 / 3, C.landingScrub * impact);
+    [v.vx, v.vy] = [v.vx * keep, v.vy * keep];
+  } else {
+    const groundVz = (g.z - v.z) / dt;
+    if (vz - groundVz > C.lift) {
+      // The ground falls away faster than the car can follow: airborne, keeping its pitch.
+      [v.z, v.vz, v.air] = [z, vz, dt];
+      return;
+    }
+  }
+  // On the ground: on its four wheels, moving with it.
+  [v.vz, v.z, v.pitch, v.roll, v.air] = [(g.z - v.z) / dt, g.z, g.pitch, g.roll, 0];
+}
+
+/** The ground under the car's four wheels: their mean height, and the pitch and roll they give. */
+function ground(v: Vehicle, world: VehicleWorld): { z: number; pitch: number; roll: number } {
   const [fx, fy] = [Math.cos(v.heading), Math.sin(v.heading)];
   const [hl, ht] = [VEHICLE.wheelbase / 2, VEHICLE.track / 2];
   const front = world.height(v.x + fx * hl, v.y + fy * hl), back = world.height(v.x - fx * hl, v.y - fy * hl);
   const left = world.height(v.x - fy * ht, v.y + fx * ht), right = world.height(v.x + fy * ht, v.y - fx * ht);
-  v.z = (front + back + left + right) / 4;
-  v.pitch = Math.atan2(front - back, VEHICLE.wheelbase);
-  v.roll = Math.atan2(left - right, VEHICLE.track);
+  return {
+    z: (front + back + left + right) / 4,
+    pitch: Math.atan2(front - back, VEHICLE.wheelbase),
+    roll: Math.atan2(left - right, VEHICLE.track),
+  };
 }
 
 /** Pushes the car out of every wall it overlaps (a few passes), bouncing and scrubbing its velocity. */

@@ -18,6 +18,38 @@ describe("vehicle", () => {
     expect(forwardSpeed(v)).toBeGreaterThanOrEqual(-VEHICLE.reverseMax);
   });
 
+  it("jumps off a ramp, can't steer in the air, and lands", () => {
+    // Flat to x = 10, a 20% ramp up to x = 20 (2 m high), then a 2 m drop back to flat.
+    const ramp: VehicleWorld = { height: (x) => 1600 + (x > 10 && x < 20 ? (x - 10) * 0.2 : 0), walls: () => {} };
+    const v = placeVehicle(0, 0, 0, ramp);
+    [v.vx, v.vy] = [25, 0];
+    let flew = 0, headingInAir = NaN, turned = 0, top = 0;
+    run(3, () => {
+      stepVehicle(v, { throttle: 1, steer: v.x > 20 ? 1 : 0, handbrake: false }, 1 / 60, ramp);  // steer hard once off the ramp
+      if (v.air > 0) {
+        flew++;
+        if (Number.isNaN(headingInAir)) headingInAir = v.heading;
+        turned = Math.max(turned, Math.abs(v.heading - headingInAir));
+        top = Math.max(top, v.z - ramp.height(v.x, v.y));
+      }
+    });
+    expect(flew).toBeGreaterThan(20);      // over a third of a second in the air
+    expect(top).toBeGreaterThan(2);        // higher than the drop
+    expect(turned).toBe(0);                // the wheels turned, the car didn't
+    expect(v.air).toBe(0);                 // landed
+    expect(v.z).toBeCloseTo(1600, 6);
+    expect(Math.abs(v.heading)).toBeGreaterThan(0.05);  // and steers again on the ground
+  });
+
+  it("stays on the ground over gentle bumps at speed", () => {
+    const bumps: VehicleWorld = { height: (x) => 1600 + 0.3 * Math.sin(x / 8), walls: () => {} };
+    const v = placeVehicle(0, 0, 0, bumps);
+    [v.vx, v.vy] = [20, 0];
+    let flew = 0;
+    run(3, () => { stepVehicle(v, go, 1 / 60, bumps); if (v.air > 0) flew++; });
+    expect(flew).toBe(0);
+  });
+
   it("brakes hard to a stop, waits, then backs up; slows off the throttle", () => {
     const v = placeVehicle(0, 0, 0, flat);
     [v.vx, v.vy] = [20, 0];
