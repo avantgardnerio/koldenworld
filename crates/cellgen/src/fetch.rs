@@ -10,7 +10,7 @@ use std::time::Duration;
 
 /// The level of the cells OSM data is fetched by.
 pub const FETCH_LEVEL: u32 = 12;
-const OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
+pub const OVERPASS_URL: &str = "https://overpass-api.de/api/interpreter";
 const USER_AGENT: &str = "game-osm-fetch/0.2 (hobby project; one-time area download)";
 /// Padding around a cell's box, m.
 const PAD: f64 = 50.0;
@@ -93,7 +93,7 @@ fn paths(data: &Path, token: &str) -> (PathBuf, PathBuf) {
 }
 
 /// A cell's lon/lat box (west, south, east, north), PAD m wider each way.
-fn padded_box(c: &Cell) -> [f64; 4] {
+pub fn padded_box(c: &Cell) -> [f64; 4] {
     let [west, south, east, north] = s2::lat_lon_bounds(c.face, c.square, 0.0);
     let dlat = PAD / 111_320.0;
     let dlon = PAD / (111_320.0 * ((south + north) / 2.0).to_radians().cos());

@@ -322,6 +322,7 @@ dependencies = [
  "robust",
  "serde",
  "serde_json",
+ "sha2",
  "tiff",
  "tiny-skia",
  "tokio",
@@ -1358,6 +1359,8 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "serde_core",
+ "serde_json",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ mod geodesy;
 mod geom;
 mod graph;
 mod ground_arrow;
+mod import;
 mod landcover;
 mod markings;
 mod mesh;
@@ -37,6 +38,7 @@ const USAGE: &str = "usage:
                                                 a tile's buildings merged into massing: target/buildings.png
   cellgen fetch <token | lat,lon>               an area's raw OSM (Overpass, cached in data/osm/s2/), parsed: counts
   cellgen extract <token | lat,lon>             an area's roads, buildings, water, airports, points of interest: counts
+  cellgen import <token | lat,lon>              an area's OSM (fetched if need be) into Postgres: rows upserted, deleted
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
 The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
@@ -286,6 +288,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
             println!("  points of interest, e.g.: {}", sample.join(", "));
+            Ok(())
+        }
+        Some("import") => {
+            let what = args.get(1).ok_or(USAGE)?;
+            let c = match what.split_once(',') {
+                Some((lat, lon)) => fetch::fetch_cell(lat.trim().parse()?, lon.trim().parse()?),
+                None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
+            };
+            let data = data_dir()?;
+            let pool = pool(&db)?;
+            let started = std::time::Instant::now();
+            let counts = tokio::runtime::Runtime::new()?
+                .block_on(async {
+                    let raw = fetch::fetch(&data, &c, |m| println!("{m}")).await?;
+                    let osm = osm::parse(&raw)?;
+                    let x = extract::extract(&osm);
+                    let area = format!("s2:{}", c.token);
+                    let snapshot = import::Snapshot {
+                        area: &area,
+                        bbox: fetch::padded_box(&c),
+                        source: fetch::OVERPASS_URL,
+                        raw: &raw,
+                    };
+                    let mut db = pool.get().await?;
+                    import::import(&mut db, &snapshot, &osm, &x).await
+                })
+                .map_err(|e| e.to_string())?;
+            println!("{} imported in {:.1?}", c.token, started.elapsed());
+            println!("  upserted: {:?}", counts.upserted);
+            println!("  deleted:  {:?}", counts.deleted);
             Ok(())
         }
         Some("serve") => {
