@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, enuFrame, localToEcef, ecefToGeodetic, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -35,6 +35,7 @@ import { Drive } from "./drive.ts";
 import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
 import { createContrailLayer } from "./contrail-layer.ts";
 import { createCarModels, createCarRenderer, type CarInstances, type CarModels, type CarRenderer } from "./car-layer.ts";
+import { createPersonRenderer, PERSON_STRIDE, type PersonInstances } from "./person-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
@@ -107,6 +108,10 @@ const MOUSE_WHEEL = 1 / 400, MOUSE_PEDAL = 1 / 300;
 const CAR_LOD_DISTANCE = 250;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
 const CAR_DISTANCE = 1500;
+/** P drops a person this far (m) in front of the camera. */
+const PERSON_AHEAD = 6;
+/** Walk cycles (two steps each) per second. */
+const WALK_CADENCE = 0.9;
 
 const params = new URLSearchParams(location.search);
 const fixedRadius = params.has("radius") ? Number(params.get("radius")) : undefined;
@@ -325,6 +330,11 @@ async function start(): Promise<void> {
   const planeRenderer = showPlanes
     ? createCarRenderer(gl, createCarModels(gl, aircraftMeshes(), new ImageData(new Uint8ClampedArray(AIRCRAFT_PALETTE), 16, 1)))
     : undefined;
+  // A person (P): one figure standing where it was dropped, facing back the way the camera looked.
+  // For now it walks on the spot.
+  const personRenderer = createPersonRenderer(gl, personMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
+  const personInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE), count: 0 };
+  let person: { lat: number; lon: number; heading: number; phase: number } | undefined;
   const contrails = emptyContrails();
   const contrailLayer = showPlanes ? createContrailLayer(gl) : undefined;
   air.onUpdate = () => wake();
@@ -489,6 +499,16 @@ async function start(): Promise<void> {
       if (drive) addCar(carInstances, PLAYER_MODEL, drive.pose(vf));
       carTriangles = carRenderer.draw(f, SUN, ROAD_BIAS, carInstances);
     }
+    if (person) {
+      // On the ground under it (which may have loaded since), its heading turned into the view frame.
+      const at = enuFrame({ lat: person.lat, lon: person.lon, h: 0 });
+      const pos = ecefToLocal(vf, geodeticToEcef({ lat: person.lat, lon: person.lon, h: groundAt(person.lat, person.lon) }));
+      const [o, a] = [[0, 0, 0], [Math.cos(person.heading), Math.sin(person.heading), 0]].map((p) => ecefToLocal(vf, localToEcef(at, p as Vec3)));
+      person.phase = (person.phase + 2 * Math.PI * WALK_CADENCE * dt) % (2 * Math.PI);
+      personInstances.data.set([...pos, a![0] - o![0], a![1] - o![1], a![2] - o![2], person.phase, 1]);
+      personInstances.count = 1;
+      personRenderer.draw(f, SUN, ROAD_BIAS, personInstances);
+    }
     if (planeRenderer) {
       const now = performance.now() / 1000;
       air.refresh(camera.lat, camera.lon, now);
@@ -552,7 +572,7 @@ async function start(): Promise<void> {
       // Input just stopped: the pose goes to the URL.
       if (steering) history.replaceState(null, "", formatGlobeHash(camera));
       steering = false;
-      if (!(moving && carRenderer) && air.count === 0) {
+      if (!(moving && carRenderer) && air.count === 0 && !person) {
         running = false;
         return;
       }
@@ -589,8 +609,18 @@ async function start(): Promise<void> {
     }
   });
 
+  // P: drop a person on the ground PERSON_AHEAD m in front of the camera, facing it.
   addEventListener("keydown", (e) => {
-    if (e.code !== "KeyG" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.code !== "KeyP" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    const heading = yawPitch(camera.rot)[0] + Math.PI / 2;
+    const at = enuFrame({ lat: camera.lat, lon: camera.lon, h: 0 });
+    const { lat, lon } = ecefToGeodetic(localToEcef(at, [PERSON_AHEAD * Math.cos(heading), PERSON_AHEAD * Math.sin(heading), 0]));
+    person = { lat, lon, heading: heading + Math.PI, phase: 0 };
+    wake();
+  });
+
+  addEventListener("keydown", (e) => {
+    if (e.code !== "KeyG"|| e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     status.graphOverlay = !status.graphOverlay;
     const url = new URL(location.href);
     if (status.graphOverlay) url.searchParams.set("graph", "1");

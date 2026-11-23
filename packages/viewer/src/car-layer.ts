@@ -38,7 +38,8 @@ void main() {
   v_uv = a_uv;
 }`;
 
-const FRAGMENT = `#version 300 es
+/** Lit by the sun, fogged; double-sided. Shared with the people (person-layer). */
+export const FRAGMENT = `#version 300 es
 precision highp float;
 uniform sampler2D u_tex;
 uniform vec3 u_eye;
@@ -58,7 +59,7 @@ void main() {
   color = vec4(mix(c, u_sky, smoothstep(u_fog.x, u_fog.y, d)), 1.0);
 }`;
 
-function compile(gl: WebGL2RenderingContext, type: GLenum, source: string): WebGLShader {
+export function compile(gl: WebGL2RenderingContext, type: GLenum, source: string): WebGLShader {
   const s = gl.createShader(type)!;
   gl.shaderSource(s, source);
   gl.compileShader(s);

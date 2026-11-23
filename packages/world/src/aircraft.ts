@@ -41,8 +41,8 @@ export const AIRCRAFT_PALETTE: Uint8Array = (() => {
 
 type V3 = [number, number, number];
 
-/** Flat-shaded triangles: three vertices each, one swatch per face. */
-class Builder {
+/** Flat-shaded triangles: three vertices each, one swatch per face (of a 16-swatch palette). */
+export class Builder {
   pos: number[] = [];
   nrm: number[] = [];
   uv: number[] = [];

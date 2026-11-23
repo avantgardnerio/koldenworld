@@ -45,6 +45,7 @@ export {
   AIRCRAFT_KINDS, AIRCRAFT_PALETTE, aircraftKind, aircraftMesh, aircraftMeshes, parseAircraft, tailColor, TAIL_COLORS,
   type AircraftKind, type AircraftReport,
 } from "./aircraft.ts";
+export { HIP, PART, PEOPLE_PALETTE, PERSON_HEIGHT, personMesh, SHOULDER, type PersonMesh } from "./people.ts";
 export {
   edgeArcLengths, edgeLanes, junctionReach, laneGeometry, laneOffset, lanePoint, placeVehicles, turnPoint, VEHICLE_MODELS, VEHICLE_SCALE,
   type LaneGeometry, type VehicleModel, type VehiclePlacements,
