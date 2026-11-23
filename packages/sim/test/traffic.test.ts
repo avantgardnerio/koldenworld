@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createCars, LANE_BONUS, MPH, nextLane, NONE, removeCars, Rng, spawnCar, stepTraffic, type RoadNet } from "../src/index.ts";
+import {
+  CAR_LENGTH, createCars, GAP, LANE_BONUS, MPH, nextLane, NONE, removeCars, Rng, spawnCar, stepTraffic, type RoadNet,
+} from "../src/index.ts";
 
 // A tiny network in one cell (0): a one-way loop of four 100 m edges (0→1→2→3→0, two lanes,
 // 30 mph), and a two-way 50 m spur (edge 4, one lane each way) from node 0 to a dead end.
@@ -53,6 +55,32 @@ describe("traffic", () => {
     cars.c.cap[i] = Infinity;
     for (let k = 0; k < 20; k++) stepTraffic(cars, n, 0.05, rng);
     expect(cars.c.speed[i]).toBeGreaterThan(0);
+  });
+
+  it("queues behind a stopped car in its lane, keeping the gap", () => {
+    const n = net(), cars = createCars(), rng = new Rng(1);
+    const ahead = spawnCar(cars, n, { model: 0, cell: 0, edge: 1, dir: 1, lane: 1, s: 60 }, rng);
+    const behind = spawnCar(cars, n, { model: 0, cell: 0, edge: 1, dir: 1, lane: 1, s: 0 }, rng);
+    const other = spawnCar(cars, n, { model: 0, cell: 0, edge: 1, dir: 1, lane: 0, s: 0 }, rng);  // the next lane over
+    cars.c.cap[ahead] = 0;  // stopped (something in front of it)
+    for (let k = 0; k < 200; k++) stepTraffic(cars, n, 0.05, rng);
+    expect(cars.c.speed[behind]).toBe(0);
+    const gap = cars.c.s[ahead]! - cars.c.s[behind]! - CAR_LENGTH;
+    expect(gap).toBeGreaterThanOrEqual(GAP - 0.01);
+    expect(gap).toBeLessThan(GAP + 1);
+    expect(cars.c.edge[other]).not.toBe(1);  // the other lane drove on past
+  });
+
+  it("follows the car on the road it turns onto, across the junction", () => {
+    const n = net(), cars = createCars(), rng = new Rng(1);
+    // Edge 1 leads onto edge 2 (the loop); a stopped car 3 m into edge 2, in the lane the follower takes.
+    const behind = spawnCar(cars, n, { model: 0, cell: 0, edge: 1, dir: 1, lane: 1, s: 0 }, rng);
+    const ahead = spawnCar(cars, n, { model: 0, cell: 0, edge: 2, dir: 1, lane: cars.c.nlane[behind]!, s: 3 }, rng);
+    cars.c.cap[ahead] = 0;
+    for (let k = 0; k < 300; k++) stepTraffic(cars, n, 0.05, rng);
+    expect(cars.c.edge[behind]).toBe(1);  // stopped short of the junction
+    expect(cars.c.speed[behind]).toBe(0);
+    expect(100 - cars.c.s[behind]! + 3 - CAR_LENGTH).toBeGreaterThanOrEqual(GAP - 0.01);
   });
 
   it("picks its way onward on entry, then moves on to it, carrying the distance over", () => {

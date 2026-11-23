@@ -2,14 +2,17 @@
 //
 // A car is on (cell, edge) travelling in direction dir (+1 from → to, −1
 // to → from), in a lane counted from the left of its direction (0 is next to
-// the center line), `s` meters past the node it entered at. Cars drive
-// through each other for now: no following, no right of way.
+// the center line), `s` meters past the node it entered at.
 //
 // Speed comes from the road, not the driver: the speed limit in the rightmost
 // lane, 10 mph faster for each lane to its left, as people actually drive.
-// Cars accelerate and brake toward that at fixed rates, never above their cap:
-// what something ahead of them (the player's car) allows, set from outside
-// each step (Infinity: nothing ahead).
+// Cars accelerate and brake toward that at fixed rates, never above their cap
+// (what something ahead of them, the player's car, allows: set from outside
+// each step; Infinity for nothing ahead), nor faster than lets them stop GAP
+// behind the car ahead in their lane if it braked as hard as it could (the
+// leader: the next car along the same road, direction and lane, or the first
+// on the road and lane it takes next). No right of way at junctions yet:
+// crossing traffic passes through.
 //
 // A car knows the road it came from and the one it takes next (decision 30):
 // the way onward is picked when it enters a road, so the renderer can draw it
@@ -29,6 +32,8 @@ export const MPH = 0.44704;               // m/s
 export const LANE_BONUS = 10 * MPH;       // per lane left of the rightmost
 export const ACCELERATION = 2.5;          // m/s²
 export const BRAKING = 4;                 // m/s²
+export const CAR_LENGTH = 4.7;            // m, bumper to bumper
+export const GAP = 2;                     // m, kept behind the car ahead when stopped
 
 /** In pcell / ncell: no road before (a car that started here) or after (it leaves at the end). */
 export const NONE = 0xffff;
@@ -136,12 +141,13 @@ function planNext(cars: Cars, net: RoadNet, i: number, rng: Rng): void {
 }
 
 export function stepTraffic(cars: Cars, net: RoadNet, dt: number, rng: Rng): void {
-  // Batch: speed toward the lane's target, then distance. Every car, no branching on state.
+  // Batch: speed toward the lane's target (no faster than the car ahead allows), then distance.
   const { speed, target, cap, s, length } = cars.c;
   const n = cars.count, up = ACCELERATION * dt, down = -BRAKING * dt;
+  const follow = following(cars, dt);
   for (let i = 0; i < n; i++) {
     const v = speed[i]!;
-    const nv = Math.max(0, v + Math.min(up, Math.max(down, Math.min(target[i]!, cap[i]!) - v)));
+    const nv = Math.max(0, v + Math.min(up, Math.max(down, Math.min(target[i]!, cap[i]!, follow[i]!) - v)));
     speed[i] = nv;
     s[i]! += nv * dt;
   }
@@ -172,4 +178,46 @@ export function stepTraffic(cars: Cars, net: RoadNet, dt: number, rng: Rng): voi
       planNext(cars, net, i, rng);
     }
   }
+}
+
+// Scratch for following, grown as needed: the cars in lane order, their lanes' keys, each car's speed limit.
+let order = new Uint32Array(0);
+let keys = new Float64Array(0);
+let limit = new Float32Array(0);
+
+/** A lane as one number: (cell, edge, direction, lane), exact in a double (16 + 32 + 1 + 4 bits). */
+const laneKey = (cell: number, edge: number, dir: number, lane: number) => ((cell * 2 ** 32 + edge) * 2 + (dir > 0 ? 1 : 0)) * 16 + lane;
+
+/**
+ * Each car's speed limit from the car ahead in its lane: the fastest it can go and still stop GAP behind it if it
+ * braked as hard as it could, √(v_ahead² + 2·BRAKING·(gap − GAP)); Infinity with nothing ahead. Ahead: the next car
+ * along the same road, direction and lane, or for the last one, the first car on the road and lane it takes next.
+ * The gap is as it will be after this step at today's speed, so a step's travel doesn't eat into GAP.
+ */
+function following(cars: Cars, dt: number): Float32Array {
+  const n = cars.count, c = cars.c;
+  if (order.length < n) [order, keys, limit] = [new Uint32Array(2 * n), new Float64Array(2 * n), new Float32Array(2 * n)];
+  for (let i = 0; i < n; i++) {
+    order[i] = i;
+    keys[i] = laneKey(c.cell[i]!, c.edge[i]!, c.dir[i]!, c.lane[i]!);
+  }
+  const sorted = order.subarray(0, n).sort((a, b) => keys[a]! - keys[b]! || c.s[a]! - c.s[b]!);
+  // Where each lane's cars start in that order: the first car on a lane is the one behind looks for.
+  const first = new Map<number, number>();
+  for (let k = n - 1; k >= 0; k--) first.set(keys[sorted[k]!]!, sorted[k]!);
+  let i = 0;
+  const allow = (ahead: number, gap: number) =>
+    Math.sqrt(c.speed[ahead]! ** 2 + 2 * BRAKING * Math.max(0, gap - c.speed[i]! * dt - CAR_LENGTH - GAP));
+  for (let k = 0; k < n; k++) {
+    i = sorted[k]!;
+    const next = sorted[k + 1];
+    if (k + 1 < n && keys[next!] === keys[i]) {
+      limit[i] = allow(next!, c.s[next!]! - c.s[i]!);
+      continue;
+    }
+    // The last on its lane: the first car where it goes next.
+    const onward = c.ncell[i] === NONE ? undefined : first.get(laneKey(c.ncell[i]!, c.nedge[i]!, c.ndir[i]!, c.nlane[i]!));
+    limit[i] = onward === undefined || onward === i ? Infinity : allow(onward, c.length[i]! - c.s[i]! + c.s[onward]!);
+  }
+  return limit;
 }
