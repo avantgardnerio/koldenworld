@@ -2,7 +2,9 @@
 // is uploaded once; every frame the cars' poses (position and forward vector,
 // already in the view frame) are written into one instance buffer per model.
 // Colors come from the kit's shared palette texture. Models are double-sided (as the kit marks
-// them), nudged toward the camera like the roads they stand on.
+// them), nudged toward the camera like the roads they stand on. Past a renderer's LOD distance a
+// model is drawn as its stand-in instead: a body and a cabin, two boxes from its bounding box (24
+// triangles, not ~1,400), in the swatch its largest triangles use.
 // Holds GPU handles only.
 
 import type { ModelMesh } from "@game/world";
@@ -64,9 +66,12 @@ function compile(gl: WebGL2RenderingContext, type: GLenum, source: string): WebG
   return s;
 }
 
+type GpuMesh = { vbo: WebGLBuffer[]; ibo: WebGLBuffer; count: number; triangles: number };
+
 export interface CarModels {
-  /** One VAO-ready mesh per model index; the texture they share. */
-  meshes: { vbo: WebGLBuffer[]; ibo: WebGLBuffer; count: number; triangles: number }[];
+  /** One VAO-ready mesh per model index, and its far stand-in; the texture they share. */
+  meshes: GpuMesh[];
+  standIns: GpuMesh[];
   texture: WebGLTexture;
   program: WebGLProgram;
 }
@@ -80,7 +85,7 @@ export function createCarModels(gl: WebGL2RenderingContext, models: ModelMesh[],
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`program: ${gl.getProgramInfoLog(p)}`);
 
-  const meshes = models.map((m) => {
+  const upload = (m: ModelMesh): GpuMesh => {
     const vbo = [m.positions, m.normals, m.uvs].map((data) => {
       const b = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, b);
@@ -91,7 +96,9 @@ export function createCarModels(gl: WebGL2RenderingContext, models: ModelMesh[],
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.indices, gl.STATIC_DRAW);
     return { vbo, ibo, count: m.indices.length, triangles: m.indices.length / 3 };
-  });
+  };
+  const meshes = models.map(upload);
+  const standIns = models.map((m) => upload(standIn(m)));
 
   // A palette of flat color swatches: nearest sampling keeps swatches from bleeding into each other.
   const texture = gl.createTexture();
@@ -102,7 +109,61 @@ export function createCarModels(gl: WebGL2RenderingContext, models: ModelMesh[],
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  return { meshes, texture, program: p };
+  return { meshes, standIns, texture, program: p };
+}
+
+/** A model's far stand-in: a body (the bounding box's lower 55%) and a cabin above it (inset), in its main swatch. */
+export function standIn(m: ModelMesh): ModelMesh {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < m.positions.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      lo[k] = Math.min(lo[k]!, m.positions[i + k]!);
+      hi[k] = Math.max(hi[k]!, m.positions[i + k]!);
+    }
+  }
+  // The swatch of the largest triangle: the body's color, for a car.
+  let best = 0, uv: [number, number] = [0, 0];
+  for (let t = 0; t < m.indices.length; t += 3) {
+    const [a, b, c] = [m.indices[t]!, m.indices[t + 1]!, m.indices[t + 2]!].map((v) => 3 * v);
+    const e = [0, 1, 2].map((k) => m.positions[b! + k]! - m.positions[a! + k]!);
+    const g = [0, 1, 2].map((k) => m.positions[c! + k]! - m.positions[a! + k]!);
+    const area = Math.hypot(e[1]! * g[2]! - e[2]! * g[1]!, e[2]! * g[0]! - e[0]! * g[2]!, e[0]! * g[1]! - e[1]! * g[0]!);
+    if (area > best) [best, uv] = [area, [m.uvs[(2 * a!) / 3]!, m.uvs[(2 * a!) / 3 + 1]!]];
+  }
+  const [w, l, h] = [0, 1, 2].map((k) => hi[k]! - lo[k]!);
+  const split = lo[2]! + 0.55 * h!;
+  const boxes: [number[], number[]][] = [
+    [[lo[0]!, lo[1]!, lo[2]!], [hi[0]!, hi[1]!, split]],
+    [[lo[0]! + 0.12 * w!, lo[1]! + 0.25 * l!, split], [hi[0]! - 0.12 * w!, hi[1]! - 0.2 * l!, hi[2]!]],
+  ];
+  const positions: number[] = [], normals: number[] = [], uvs: number[] = [], indices: number[] = [];
+  for (const [a, b] of boxes) {
+    // Six faces, four corners each, counterclockwise from outside.
+    for (const [axis, side] of [[0, -1], [0, 1], [1, -1], [1, 1], [2, -1], [2, 1]] as const) {
+      const [u, v] = [(axis + 1) % 3, (axis + 2) % 3];
+      const at = (du: number, dv: number) => {
+        const p = [0, 0, 0];
+        p[axis] = side < 0 ? a[axis]! : b[axis]!;
+        p[u] = du ? b[u]! : a[u]!;
+        p[v] = dv ? b[v]! : a[v]!;
+        return p;
+      };
+      const first = positions.length / 3;
+      const corners = side > 0 ? [at(0, 0), at(1, 0), at(1, 1), at(0, 1)] : [at(0, 0), at(0, 1), at(1, 1), at(1, 0)];
+      for (const p of corners) {
+        positions.push(...p);
+        const n = [0, 0, 0];
+        n[axis] = side;
+        normals.push(...n);
+        uvs.push(...uv);
+      }
+      indices.push(first, first + 1, first + 2, first, first + 2, first + 3);
+    }
+  }
+  return {
+    positions: Float32Array.from(positions), normals: Float32Array.from(normals), uvs: Float32Array.from(uvs),
+    indices: Uint32Array.from(indices),
+  };
 }
 
 export interface CarInstances {
@@ -117,14 +178,17 @@ export interface CarRenderer {
 
 const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
-/** Moving cars: one instance buffer per model, refilled every frame. */
-export function createCarRenderer(gl: WebGL2RenderingContext, models: CarModels): CarRenderer {
+/**
+ * Moving cars: one instance buffer per model, refilled every frame. Cars farther than `lodDistance` m from the eye
+ * are drawn as their model's stand-in.
+ */
+export function createCarRenderer(gl: WebGL2RenderingContext, models: CarModels, lodDistance = Infinity): CarRenderer {
   const p = models.program;
   const u = (name: string) => gl.getUniformLocation(p, name);
   const uView = u("u_view"), uModel = u("u_model"), uEye = u("u_eye"), uBias = u("u_bias"), uTex = u("u_tex");
   const uSky = u("u_sky"), uFog = u("u_fog"), uSun = u("u_sun");
 
-  const perModel = models.meshes.map((mesh) => {
+  const bind = (mesh: GpuMesh) => {
     const ibuf = gl.createBuffer();
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
@@ -142,7 +206,10 @@ export function createCarRenderer(gl: WebGL2RenderingContext, models: CarModels)
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.ibo);
     gl.bindVertexArray(null);
     return { vao, ibuf, mesh };
-  });
+  };
+  const near = models.meshes.map(bind), far = models.standIns.map(bind);
+  // Each model's instances split by distance, reused every frame.
+  let nearData = new Float32Array(0), farData = new Float32Array(0);
 
   return {
     draw(f, sun, bias, cars) {
@@ -159,15 +226,29 @@ export function createCarRenderer(gl: WebGL2RenderingContext, models: CarModels)
       gl.uniform1i(uTex, 0);
       gl.depthFunc(gl.LEQUAL);
       let tris = 0;
-      perModel.forEach(({ vao, ibuf, mesh }, m) => {
-        const n = cars.count[m]!;
+      const lod2 = lodDistance * lodDistance;
+      const drawSet = ({ vao, ibuf, mesh }: (typeof near)[number], data: Float32Array, n: number) => {
         if (n === 0) return;
         gl.bindBuffer(gl.ARRAY_BUFFER, ibuf);
-        gl.bufferData(gl.ARRAY_BUFFER, cars.data[m]!.subarray(0, 6 * n), gl.DYNAMIC_DRAW);
+        gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, 6 * n), gl.DYNAMIC_DRAW);
         gl.bindVertexArray(vao);
         gl.drawElementsInstanced(gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0, n);
         tris += mesh.triangles * n;
-      });
+      };
+      for (let m = 0; m < near.length; m++) {
+        const n = cars.count[m]!, data = cars.data[m]!;
+        if (n === 0) continue;
+        if (nearData.length < 6 * n) [nearData, farData] = [new Float32Array(12 * n), new Float32Array(12 * n)];
+        let nn = 0, nf = 0;
+        for (let i = 0; i < n; i++) {
+          const o = 6 * i;
+          const dx = data[o]! - f.eye[0], dy = data[o + 1]! - f.eye[1], dz = data[o + 2]! - f.eye[2];
+          if (dx * dx + dy * dy + dz * dz > lod2) farData.set(data.subarray(o, o + 6), 6 * nf++);
+          else nearData.set(data.subarray(o, o + 6), 6 * nn++);
+        }
+        drawSet(near[m]!, nearData, nn);
+        drawSet(far[m]!, farData, nf);
+      }
       gl.bindVertexArray(null);
       return tris;
     },

@@ -96,6 +96,8 @@ const MAX_DT = 0.1;  // s; a stalled tab must not teleport the camera
 const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 1975, rot: fromYawPitch(0, -35 * Math.PI / 180) };
 /** Cars and planes drawn this far toward the camera from the ground they're on (m, plus 0.1% of distance). */
 const ROAD_BIAS = 0.3;
+/** Cars farther than this (m) from the camera are drawn as simple stand-ins (~20 px long there). */
+const CAR_LOD_DISTANCE = 250;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
 const CAR_DISTANCE = 1500;
 
@@ -374,7 +376,7 @@ async function start(): Promise<void> {
   // Vehicle models load alongside the first cells; traffic starts once they're in.
   let carRenderer: CarRenderer | undefined;
   loadCarModels(gl).then((m: CarModels) => {
-    carRenderer = createCarRenderer(gl, m);
+    carRenderer = createCarRenderer(gl, m, CAR_LOD_DISTANCE);
     status.carModels = VEHICLE_MODELS.length;
     if (moving) wake();
     else if (!running) render();
