@@ -325,13 +325,12 @@ function figure(o: Outfit): PersonMesh {
     [[-shoulders, -0.09, 1.46], [shoulders, -0.09, 1.46], [shoulders, 0.09, 1.46], [-shoulders, 0.09, 1.46]],
     o.top,
   );
-  // A bust: a wedge on the chest, deepest at the bottom.
+  // A bust on the chest: a short slope in under it to its fullest, a longer one up into the chest; no point.
   if (o.woman) {
-    b.hexa(
-      [[-0.13, 0.08, 1.16], [0.13, 0.08, 1.16], [0.13, 0.16, 1.16], [-0.13, 0.16, 1.16]],
-      [[-0.12, 0.08, 1.33], [0.12, 0.08, 1.33], [0.12, 0.115, 1.33], [-0.12, 0.115, 1.33]],
-      o.top,
-    );
+    const ring = (z: number, hw: number, depth: number): Vec3[] => [[-hw, 0.08, z], [hw, 0.08, z], [hw, depth, z], [-hw, depth, z]];
+    const [under, fullest, top] = [ring(1.15, 0.12, 0.125), ring(1.21, 0.13, 0.145), ring(1.33, 0.12, 0.105)];
+    b.hexa(under, fullest, o.top);
+    b.hexa(fullest, top, o.top);
   }
   if (o.bundle) b.box(-0.14, 0.14, -0.27, -0.1, 1.0, 1.4, SWATCH.bundle);
   // Long hair, down the back of the head to the shoulders.
