@@ -26,14 +26,15 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, businessSigns, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
-  type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
+  type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
-import { fromYawPitch, MIN_ALTITUDE, NEAR, speed, viewProjection } from "./camera.ts";
+import { fromYawPitch, MIN_ALTITUDE, NEAR, speed, viewProjection, yawPitch } from "./camera.ts";
+import { Drive } from "./drive.ts";
 import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
 import { createContrailLayer } from "./contrail-layer.ts";
-import { createCarModels, createCarRenderer, type CarModels, type CarRenderer } from "./car-layer.ts";
+import { createCarModels, createCarRenderer, type CarInstances, type CarModels, type CarRenderer } from "./car-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
@@ -98,6 +99,10 @@ const DEFAULT_CAMERA: GlobeCamera = { lat: 39.7444, lon: -104.9896, h: 1975, rot
 const ROAD_BIAS = 0.3;
 /** Coarse tiles' massing is drawn only within this distance (m): past it a 15 m building is about a pixel tall. */
 const MASSING_DISTANCE = 12_000;
+/** The car the player drives (V): a sedan, as the traffic draws one. */
+const PLAYER_MODEL = VEHICLE_MODELS.indexOf("sedan");
+/** Driving with the mouse: the wheel's full lock is this many px of movement away (1/px), the pedal's full travel this many. */
+const MOUSE_WHEEL = 1 / 400, MOUSE_PEDAL = 1 / 300;
 /** Cars farther than this (m) from the camera are drawn as simple stand-ins (~20 px long there). */
 const CAR_LOD_DISTANCE = 250;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
@@ -173,6 +178,7 @@ interface CellGpu {
   graph?: FlatLayer;
   buildings?: SolidLayer;
   signs?: SignLayer;
+  walls?: WallGrid;      // a fine cell's building walls, for the driven car's collisions
   counts: { nodes: number; edges: number; surfaceTriangles: number; buildings: number; buildingTriangles: number };
 }
 
@@ -269,6 +275,7 @@ async function start(): Promise<void> {
         })),
         ...businessSignBoxes(shops.signs),
       ]),
+      walls: wallGrid(c.buildings),
       counts: {
         ...counts, nodes: c.graph.nodes.count, edges: c.graph.edges.count,
         buildings: c.buildings.count, buildingTriangles: tris.indices.length / 3,
@@ -466,11 +473,16 @@ async function start(): Promise<void> {
     }
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
     let carTriangles = 0;
-    if (carRenderer && showCars) {
-      // Horizontal distance to the cell's anchor (which sits at the ellipsoid, not at the ground or the camera).
-      const near = (tc: TrafficCell) => Math.hypot(tc.model[12]!, tc.model[13]!);
-      traffic.update(dt, near, CAR_DISTANCE, 1.3 * CAR_DISTANCE, moving);
-      traffic.instances(carInstances);
+    if (carRenderer && (showCars || drive)) {
+      if (showCars) {
+        // Horizontal distance to the cell's anchor (which sits at the ellipsoid, not at the ground or the camera).
+        const near = (tc: TrafficCell) => Math.hypot(tc.model[12]!, tc.model[13]!);
+        traffic.update(dt, near, CAR_DISTANCE, 1.3 * CAR_DISTANCE, moving);
+        traffic.instances(carInstances);
+      } else {
+        carInstances.count.fill(0);
+      }
+      if (drive) addCar(carInstances, PLAYER_MODEL, drive.pose(vf));
       carTriangles = carRenderer.draw(f, SUN, ROAD_BIAS, carInstances);
     }
     if (planeRenderer) {
@@ -500,7 +512,8 @@ async function start(): Promise<void> {
     const below = roughGroundAt(camera.lat, camera.lon);
     const agl = camera.h - below;
     const m = (t: number) => (t / 1e6).toFixed(2);
-    hud.textContent = `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
+    const percent = (v: number) => `${v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(0)}%`;
+    hud.textContent = (drive ? `driving ${Math.abs(drive.kmh).toFixed(0)} km/h · wheel ${percent(wheel)} · pedal ${percent(pedal)} (V: fly) · ` : "") + `${camera.lat.toFixed(5)}, ${camera.lon.toFixed(5)} · ${agl.toFixed(0)} m above ground ` +
       `(${below.toFixed(0)} m) · ${speed({ pos: [0, 0, agl], rot: camera.rot }, false).toFixed(0)} m/s (Shift ×4) · cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
       `${c.loading + c.queued ? ` +${c.loading + c.queued} loading` : ""}${c.failed ? `, ${c.failed} failed` : ""} ` +
       `within ${(status.radius / 1000).toFixed(1)} km · ${cars} cars · ${air.count} aircraft · ${fps > 0 ? fps.toFixed(0) : "–"} fps, ${cpuMs.toFixed(1)} ms CPU · ` +
@@ -519,6 +532,18 @@ async function start(): Promise<void> {
     last = now;
     if (raw > 0) fps = fps === 0 ? 1 / raw : 0.9 * fps + 0.1 / raw;
     const input = keys.take();
+    if (drive) {
+      // Driving: the mouse (captured) is an analog wheel (left–right; it stays where it's left) and pedal (forward:
+      // throttle, back: brake, then reverse); W/S and A/D add to them; Space is the handbrake. The camera chases.
+      const clamp = (v: number) => Math.max(-1, Math.min(1, v));
+      wheel = clamp(wheel + input.look[0] * MOUSE_WHEEL);
+      pedal = clamp(pedal - input.look[1] * MOUSE_PEDAL);
+      drive.step({ throttle: clamp(pedal + input.move[1]), steer: clamp(wheel + input.move[0]), handbrake: input.move[2] > 0 }, dt);
+      camera = drive.camera();
+      render(dt);
+      requestAnimationFrame(frame);
+      return;
+    }
     if (isIdle(input)) {
       // Input just stopped: the pose goes to the URL.
       if (steering) history.replaceState(null, "", formatGlobeHash(camera));
@@ -541,6 +566,24 @@ async function start(): Promise<void> {
     requestAnimationFrame(frame);
   };
   const keys = attachInput(canvas, wake);
+
+  // V: drive a car from the ground under the camera, facing its way; V again: fly on from the chase camera.
+  let drive: Drive | undefined;
+  let wheel = 0, pedal = 0;  // the mouse's steering wheel and pedal, −1..1
+  addEventListener("keydown", (e) => {
+    if (e.code !== "KeyV" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    wheel = pedal = 0;
+    if (drive) {
+      drive = undefined;
+      history.replaceState(null, "", formatGlobeHash(camera));
+    } else {
+      drive = new Drive(camera.lat, camera.lon, yawPitch(camera.rot)[0] + Math.PI / 2, {
+        groundAt,
+        walls: (cell) => streamer.get(cell)?.walls,
+      });
+      wake();
+    }
+  });
 
   addEventListener("keydown", (e) => {
     if (e.code !== "KeyG" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -575,3 +618,15 @@ start().catch((err: unknown) => {
   status.error = err instanceof Error ? err.message : String(err);
   console.error(err);
 });
+
+/** Adds one car (position and forward direction, in the view frame) to a model's instances. */
+function addCar(out: CarInstances, model: number, { pos, fwd }: { pos: Vec3; fwd: Vec3 }): void {
+  let data = out.data[model]!;
+  const o = 6 * out.count[model]!++;
+  if (o + 6 > data.length) {
+    const grown = new Float32Array(data.length * 2);
+    grown.set(data);
+    out.data[model] = data = grown;
+  }
+  data.set([pos[0], pos[1], pos[2], fwd[0], fwd[1], fwd[2]], o);
+}

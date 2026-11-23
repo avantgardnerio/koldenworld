@@ -56,3 +56,4 @@ export {
   type Pois,
 } from "./pois.ts";
 export { businessSigns, SIGN, type BusinessSign } from "./businesses.ts";
+export { BUCKET, queryWalls, wallGrid, type WallGrid } from "./wall-grid.ts";

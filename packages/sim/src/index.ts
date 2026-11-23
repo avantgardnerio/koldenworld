@@ -4,3 +4,6 @@ export {
   ACCELERATION, BRAKING, CAR, createCars, LANE_BONUS, laneSpeed, MPH, nextLane, NONE, removeCars, spawnCar, stepTraffic,
   type CarStart, type Cars, type RoadNet,
 } from "./traffic.ts";
+export {
+  forwardSpeed, placeVehicle, rectangleSegment, stepVehicle, VEHICLE, type DriveInput, type Vehicle, type VehicleWorld,
+} from "./vehicle.ts";
