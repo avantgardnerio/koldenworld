@@ -19,13 +19,14 @@ in vec4 a_normal;     // x, y, z, and how occluded (0..1: walls darken toward th
 in uint a_mat;
 in float a_shade;
 in vec4 a_facade;     // m along the wall from its first bay, m above its bottom, the bays' width, the wall's height
-in float a_floor;     // floor height, dm; 0: no windows
+in float a_floor;     // floor height, dm (0: no windows), + 128 for a shop's ground floor
 in uint a_paint;      // index into u_paints; 0: the material's color
 uniform vec3 u_paints[${MAX_MATERIALS}];
 uniform vec4 u_windows[${MAX_MATERIALS}];  // per material: bay width, window width, sill, window height (m); 0: none
 out vec3 v_world;
 out vec4 v_facade;
 out float v_floor;
+out float v_shop;
 out vec4 v_window;
 out vec3 v_normal;
 out vec3 v_color;
@@ -38,7 +39,8 @@ void main() {
   v_occluded = a_normal.w;
   v_color = (a_paint > 0u ? u_paints[a_paint] : u_colors[a_mat]) * (0.9 + 0.2 * a_shade);
   v_facade = a_facade;
-  v_floor = a_floor * 0.1;
+  v_shop = a_floor >= 128.0 ? 1.0 : 0.0;
+  v_floor = mod(a_floor, 128.0) * 0.1;
   v_window = u_windows[a_mat];
 }`;
 
@@ -54,6 +56,7 @@ in vec3 v_color;
 in float v_occluded;
 in vec4 v_facade;
 in float v_floor;
+in float v_shop;
 in vec4 v_window;
 out vec4 color;
 const vec3 GLASS = vec3(0.13, 0.17, 0.22);
@@ -65,6 +68,12 @@ void main() {
   float fh = v_floor, bay = v_window.x;
   if (fh > 0.0 && bay > 0.0) {
     float ww = v_window.y, sill = v_window.z, wh = min(v_window.w, fh - sill - 0.3);
+    // A shop's ground floor: a shopfront, glass nearly bay to bay, from just off the ground to under its sign.
+    if (v_shop > 0.5 && v_facade.y < fh) {
+      ww = 0.86 * bay;
+      sill = 0.35;
+      wh = fh - 0.8 - sill;
+    }
     float u = v_facade.x, v = v_facade.y, span = v_facade.z, top = v_facade.w;
     float floors = floor(top / fh + 0.01);
     float inside = step(0.0, u) * step(u, span) * step(v, floors * fh);

@@ -30,7 +30,8 @@ export {
 } from "./buildings.ts";
 export { buildingsFromArrow, buildingsToArrow } from "./buildings-arrow.ts";
 export {
-  AO_BAND, BUILDING_MATERIALS, buildingMesh, CREASE, idShade, ROOF_PAINTS, WALL_PAINTS, WINDOW_STYLES, type BuildingMesh,
+  AO_BAND, BUILDING_MATERIALS, buildingMesh, CREASE, floorHeight, idShade, ROOF_PAINTS, SHOPFRONT, WALL_PAINTS, WINDOW_STYLES,
+  type BuildingMesh,
   type WindowStyle,
 } from "./building-mesh.ts";
 export type { FileMetadata } from "./arrow-util.ts";
@@ -50,3 +51,8 @@ export {
 } from "./vehicles.ts";
 export { groundFromArrow, type CellGround } from "./ground-arrow.ts";
 export { clipConvex, pitchedRoof, type PitchedRoof, type RoofFace, type RoofShape } from "./roofs.ts";
+export {
+  ASSIGN_DISTANCE, buildPois, emptyPois, POI_CATEGORIES, poisFromArrow, poisToArrow, type PoiCategory, type PoiInput,
+  type Pois,
+} from "./pois.ts";
+export { businessSigns, SIGN, type BusinessSign } from "./businesses.ts";

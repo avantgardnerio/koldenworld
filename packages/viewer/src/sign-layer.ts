@@ -1,14 +1,16 @@
-// Street name signs (decision 35): a pole and two green blades per sign, the
-// street names written on both faces of each blade. One mesh per cell, its
-// blade texts drawn into one canvas atlas; lit and fogged like the buildings.
-// Holds GPU handles only.
+// Signs as boxes with text: street name signs (decision 35: a pole and two
+// green blades, the names on both faces of each blade) and business signs (a
+// colored panel on a wall, its name on the front). One mesh per cell, every
+// distinct color and text drawn into one canvas atlas; lit and fogged like the
+// buildings. Holds GPU handles only.
 
-import type { StreetSign } from "@game/world";
+import { SIGN, type BusinessSign, type StreetSign } from "@game/world";
+import { businessColor } from "./style.ts";
 import type { Frame } from "./flat-layer.ts";
 
 const POLE = { height: 3.0, half: 0.04 };
 const BLADE = { length: 0.95, height: 0.2, half: 0.012, at: [2.85, 2.6] };  // heights of the two blades' centers
-const SLOT = { w: 256, h: 48 }, COLS = 4, MAX_ROWS = 80;  // atlas: COLS × rows text slots, row 0 holds the plain colors
+const SLOT = { w: 256, h: 48 }, COLS = 8, MAX_ROWS = 85;  // atlas: COLS × rows slots, one per color and text
 
 const VERTEX = `#version 300 es
 uniform mat4 u_view;
@@ -61,74 +63,114 @@ function compile(gl: WebGL2RenderingContext, type: GLenum, source: string): WebG
 
 let program: WebGLProgram | undefined;
 
-/** A cell's signs as one mesh, or undefined when it has none. */
-export function createSignLayer(gl: WebGL2RenderingContext, signs: StreetSign[]): SignLayer | undefined {
-  if (signs.length === 0) return undefined;
-  // The atlas: row 0 has the pole's gray and the blades' green; each blade text gets a slot below.
-  const blades = signs.flatMap((s) => s.blades).slice(0, COLS * (MAX_ROWS - 1));
-  const rows = 1 + Math.ceil(blades.length / COLS);
+/**
+ * A box (a sign's pole, blade or panel): its center, unit axes (along, across, up) and half sizes along them, its color,
+ * and optional text on its across faces: both (a street sign's blade, read from either side) or the front (+across:
+ * a business sign on a wall, read from outside).
+ */
+export interface TextBox {
+  center: number[];
+  axes: [number[], number[], number[]];
+  half: [number, number, number];
+  color: string;
+  text?: string;
+  textColor?: string;
+  border?: string;   // a frame inside the text face's edge
+  faces?: "both" | "front";
+}
+
+const GREEN = "#1f6b3a";
+
+/** Street signs as boxes: a gray pole, and green blades with white names. */
+export function streetSignBoxes(signs: StreetSign[]): TextBox[] {
+  const up = [0, 0, 1], boxes: TextBox[] = [];
+  for (const s of signs) {
+    boxes.push({ center: [s.x, s.y, s.z + POLE.height / 2], axes: [[1, 0, 0], [0, 1, 0], up], half: [POLE.half, POLE.half, POLE.height / 2], color: "#8d9096" });
+    s.blades.forEach((b, i) => {
+      const along = [Math.cos(b.dir), Math.sin(b.dir), 0], across = [-Math.sin(b.dir), Math.cos(b.dir), 0];
+      boxes.push({
+        center: [s.x + along[0]! * BLADE.length / 2, s.y + along[1]! * BLADE.length / 2, s.z + BLADE.at[i]!],
+        axes: [along, across, up], half: [BLADE.length / 2, BLADE.half, BLADE.height / 2],
+        color: GREEN, text: b.text, textColor: "#ffffff", border: "#ffffff", faces: "both",
+      });
+    });
+  }
+  return boxes;
+}
+
+/** Business signs as boxes: a panel on the wall in its business's color, its name in white on the front. */
+export function businessSignBoxes(signs: BusinessSign[]): TextBox[] {
+  return signs.map((s) => {
+    const along = [Math.cos(s.dir), Math.sin(s.dir), 0], out = [Math.sin(s.dir), -Math.cos(s.dir), 0];
+    return {
+      center: [s.x, s.y, s.z], axes: [along, out, [0, 0, 1]], half: [s.width / 2, SIGN.thick / 2, SIGN.height / 2],
+      color: businessColor(s.category, s.kind), text: s.text, textColor: "#ffffff", faces: "front",
+    };
+  });
+}
+
+/** A cell's signs (boxes, some with text) as one mesh, or undefined when it has none. */
+export function createSignLayer(gl: WebGL2RenderingContext, boxes: TextBox[]): SignLayer | undefined {
+  if (boxes.length === 0) return undefined;
+  // The atlas: a slot per distinct look (color, text): filled with the color, the text written on it.
+  const slots = new Map<string, number>();
+  const key = (b: TextBox) => `${b.color}|${b.text ?? ""}|${b.textColor ?? ""}|${b.border ?? ""}`;
+  const looks: TextBox[] = [];
+  for (const b of boxes) {
+    if (!slots.has(key(b)) && looks.length < COLS * MAX_ROWS) {
+      slots.set(key(b), looks.length);
+      looks.push(b);
+    }
+  }
+  const rows = Math.ceil(looks.length / COLS);
   const canvas = document.createElement("canvas");
   canvas.width = SLOT.w * COLS;
   canvas.height = SLOT.h * rows;
   const ctx = canvas.getContext("2d")!;
-  const GREEN = "#1f6b3a";
-  ctx.fillStyle = "#8d9096";
-  ctx.fillRect(0, 0, SLOT.w, SLOT.h);
-  ctx.fillStyle = GREEN;
-  ctx.fillRect(SLOT.w, 0, SLOT.w, SLOT.h);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  blades.forEach((b, i) => {
-    const x = (i % COLS) * SLOT.w, y = (1 + Math.floor(i / COLS)) * SLOT.h;
-    ctx.fillStyle = GREEN;
+  looks.forEach((b, i) => {
+    const x = (i % COLS) * SLOT.w, y = Math.floor(i / COLS) * SLOT.h;
+    ctx.fillStyle = b.color;
     ctx.fillRect(x, y, SLOT.w, SLOT.h);
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x + 3, y + 3, SLOT.w - 6, SLOT.h - 6);
+    if (b.border) {
+      ctx.strokeStyle = b.border;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 3, y + 3, SLOT.w - 6, SLOT.h - 6);
+    }
+    if (!b.text) return;
     let size = 30;
     ctx.font = `bold ${size}px system-ui, sans-serif`;
     while (ctx.measureText(b.text).width > SLOT.w - 20 && size > 12) ctx.font = `bold ${--size}px system-ui, sans-serif`;
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = b.textColor ?? "#ffffff";
     ctx.fillText(b.text, x + SLOT.w / 2, y + SLOT.h / 2 + 1);
   });
   const W = canvas.width, H = canvas.height;
-  const texel = (col: number) => [(col * SLOT.w + SLOT.w / 2) / W, (SLOT.h / 2) / H] as const;
   const slot = (i: number) => {
-    const x = (i % COLS) * SLOT.w, y = (1 + Math.floor(i / COLS)) * SLOT.h;
-    return { u0: x / W, u1: (x + SLOT.w) / W, v0: y / H, v1: (y + SLOT.h) / H };
+    const x = (i % COLS) * SLOT.w, y = Math.floor(i / COLS) * SLOT.h;
+    return { u0: x / W, u1: (x + SLOT.w) / W, v0: y / H, v1: (y + SLOT.h) / H, plain: [(x + 1.5) / W, (y + 1.5) / H] };
   };
 
-  // Boxes as triangles: a center, three unit axes (along, across, up) and half sizes along them.
   const pos: number[] = [], nrm: number[] = [], uv: number[] = [];
   const quad = (p: number[][], n: number[], t: number[][]) => {
     for (const k of [0, 1, 2, 0, 2, 3]) { pos.push(...p[k]!); nrm.push(...n); uv.push(...t[k]!); }
   };
-  const box = (c: number[], ax: number[][], h: number[], face: (side: number) => number[][] | undefined, plain: readonly [number, number]) => {
-    const at = (s: number[]) => c.map((v, i) => v + ax[0]![i]! * h[0]! * s[0]! + ax[1]![i]! * h[1]! * s[1]! + ax[2]![i]! * h[2]! * s[2]!);
-    const flat = [[...plain], [...plain], [...plain], [...plain]];
-    // ±across faces may carry text; the rest are plain.
+  for (const b of boxes) {
+    const look = slots.get(key(b));
+    if (look === undefined) continue;  // the atlas is full
+    const t = slot(look), [c, ax, h] = [b.center, b.axes, b.half];
+    const at = (s: number[]) => c.map((v, i) => v + ax[0][i]! * h[0] * s[0]! + ax[1][i]! * h[1] * s[1]! + ax[2][i]! * h[2] * s[2]!);
+    const flat = [t.plain, t.plain, t.plain, t.plain];
+    // ±across faces may carry text: read left to right from either side (both), or from the front only.
+    const face = (side: number) => !b.text ? flat
+      : b.faces === "front" ? (side > 0 ? [[t.u0, t.v1], [t.u1, t.v1], [t.u1, t.v0], [t.u0, t.v0]] : flat)
+      : [[t.u1, t.v1], [t.u0, t.v1], [t.u0, t.v0], [t.u1, t.v0]];
     for (const side of [1, -1]) {
       const pts = [[-side, side, -1], [side, side, -1], [side, side, 1], [-side, side, 1]].map(at);
-      quad(pts, ax[1]!.map((v) => v * side), face(side) ?? flat);
+      quad(pts, ax[1].map((v) => v * side), face(side));
     }
-    for (const side of [1, -1]) quad([[side, -1, -1], [side, 1, -1], [side, 1, 1], [side, -1, 1]].map(at), ax[0]!.map((v) => v * side), flat);
-    for (const side of [1, -1]) quad([[-1, -1, side], [1, -1, side], [1, 1, side], [-1, 1, side]].map(at), ax[2]!.map((v) => v * side), flat);
-  };
-  const up = [0, 0, 1];
-  let k = 0;
-  for (const s of signs) {
-    box([s.x, s.y, s.z + POLE.height / 2], [[1, 0, 0], [0, 1, 0], up], [POLE.half, POLE.half, POLE.height / 2], () => undefined, texel(0));
-    s.blades.forEach((b, i) => {
-      const along = [Math.cos(b.dir), Math.sin(b.dir), 0], across = [-Math.sin(b.dir), Math.cos(b.dir), 0];
-      const c = [s.x + along[0]! * BLADE.length / 2, s.y + along[1]! * BLADE.length / 2, s.z + BLADE.at[i]!];
-      const t = k < blades.length ? slot(k) : undefined;
-      k++;
-      // Text reads left to right from either side: the far side's u runs the other way.
-      const face = (side: number) => !t ? undefined : side > 0
-        ? [[t.u1, t.v1], [t.u0, t.v1], [t.u0, t.v0], [t.u1, t.v0]]
-        : [[t.u1, t.v1], [t.u0, t.v1], [t.u0, t.v0], [t.u1, t.v0]];
-      box(c, [along, across, up], [BLADE.length / 2, BLADE.half, BLADE.height / 2], face, texel(1));
-    });
+    for (const side of [1, -1]) quad([[side, -1, -1], [side, 1, -1], [side, 1, 1], [side, -1, 1]].map(at), ax[0].map((v) => v * side), flat);
+    for (const side of [1, -1]) quad([[-1, -1, side], [1, -1, side], [1, 1, side], [-1, 1, side]].map(at), ax[2].map((v) => v * side), flat);
   }
 
   if (!program) {

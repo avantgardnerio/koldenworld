@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, buildingMesh, businessSigns, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame,
 } from "@game/world";
@@ -37,7 +37,7 @@ import { createCarModels, createCarRenderer, type CarModels, type CarRenderer } 
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
-import { createSignLayer, type SignLayer } from "./sign-layer.ts";
+import { businessSignBoxes, createSignLayer, streetSignBoxes, type SignLayer } from "./sign-layer.ts";
 import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
@@ -243,7 +243,9 @@ async function start(): Promise<void> {
     const counts = { ...zero, surfaceTriangles: mesh.indices.length / 3 };
     if (!c) return { frame, coarse: false, missing: true, ...sphere(groundReach), model, terrain, ground: layer, counts };
     const lines = roadLineMesh(c.graph);
-    const tris = buildingMesh(c.buildings);
+    // Businesses: shopfronts on their buildings' ground floors, and a sign each.
+    const shops = businessSigns(c.buildings, c.pois);
+    const tris = buildingMesh(c.buildings, shops.shopfront);
     // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
     const flat = Math.max(groundReach, reach(c.graph.points, 2) + 20, reach(c.buildings.points, 2));
     for (let i = 0; i < c.buildings.count; i++) z1 = Math.max(z1, c.buildings.base[i]! + c.buildings.height[i]!);
@@ -259,11 +261,14 @@ async function start(): Promise<void> {
       traffic: c.graph.edges.count === 0 ? undefined
         : traffic.add(c.graph, placeVehicles(c.graph, Number(BigInt.asUintN(32, cell ^ (cell >> 32n)))), model),
       buildings: createSolidLayer(gl!, tris, BUILDING_COLORS_RGB, BUILDING_WINDOWS, PAINTS),
-      // Street name signs at the intersections this cell owns.
-      signs: createSignLayer(gl!, streetSigns(c.graph, (x, y) => {
-        const [lon, lat] = enuUnprojection(frame)(x, y);
-        return cellFromLatLon(lat, lon, CELL_LEVEL) === cell;
-      })),
+      // Street name signs at the intersections this cell owns, and its businesses' signs.
+      signs: createSignLayer(gl!, [
+        ...streetSignBoxes(streetSigns(c.graph, (x, y) => {
+          const [lon, lat] = enuUnprojection(frame)(x, y);
+          return cellFromLatLon(lat, lon, CELL_LEVEL) === cell;
+        })),
+        ...businessSignBoxes(shops.signs),
+      ]),
       counts: {
         ...counts, nodes: c.graph.nodes.count, edges: c.graph.edges.count,
         buildings: c.buildings.count, buildingTriangles: tris.indices.length / 3,

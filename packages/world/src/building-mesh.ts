@@ -36,7 +36,7 @@ export interface BuildingMesh {
   material: Uint8Array;     // group × 2 + (1 for roof), group from BUILDING_GROUPS
   shade: Uint8Array;        // per-building variation 0..255, stable per OSM id
   facade: Float32Array;     // per vertex: m along the wall from its first bay, m above its bottom, bays' width, wall height
-  floor: Uint8Array;        // per vertex: floor height, dm; 0: no windows
+  floor: Uint8Array;        // per vertex: floor height, dm (0: no windows), + SHOPFRONT for a shop's ground floor
   paint: Uint8Array;        // per vertex: index into the viewer's PAINTS; 0: the material's color
   indices: Uint32Array;
 }
@@ -63,6 +63,11 @@ export const WINDOW_STYLES: Record<BuildingGroup, WindowStyle | null> = {
   other: { bay: 3.2, width: 1.4, sill: 0.9, height: 1.5, floor: 3.2 },
 };
 
+/** In a wall vertex's floor byte: its ground floor is a shopfront (big glass). */
+export const SHOPFRONT = 128;
+/** Floor height (m) of a building with no window style (a garage, a shed). */
+const PLAIN_FLOOR = 3.5;
+
 /** A part on top of another smaller than this (m²) is equipment, not rooms: no windows. */
 const EQUIPMENT_AREA = 40;
 const NO_WINDOW_ROOFS = new Set(["dome", "onion"]);
@@ -81,7 +86,8 @@ export function idShade(osmId: number): number {
   return (h ^ (h >>> 13)) & 255;
 }
 
-export function buildingMesh(b: Buildings): BuildingMesh {
+/** shopfront: per building row, 1 where it has businesses (its ground floor becomes a shopfront). */
+export function buildingMesh(b: Buildings, shopfront?: Uint8Array): BuildingMesh {
   const totalPoints = b.points.length / 2;
   // Room for 6 vertices per wall (with its dark band) and one per roof point; grown if pitched roofs need more.
   let vertexCap = 7 * totalPoints + 64, indexCap = 16 * totalPoints + 64;
@@ -110,10 +116,10 @@ export function buildingMesh(b: Buildings): BuildingMesh {
   };
 
   // Where on its façade a wall vertex is (see the top), and its building's floor height; nothing for a roof.
-  const at = { u: 0, v: 0, span: 0, wall: 0, floor: 0, paint: 0 };
+  const at = { u: 0, v: 0, span: 0, wall: 0, floor: 0, paint: 0, shop: false };
   const vertex = (x: number, y: number, z: number, nx: number, ny: number, nz: number, mat: number, sh: number, ao = 0) => {
     facade.set([at.u, at.v, at.span, at.wall], 4 * v);
-    floorDm[v] = Math.round(at.floor * 10);
+    floorDm[v] = Math.round(at.floor * 10) | (at.shop && at.floor > 0 ? SHOPFRONT : 0);
     paints[v] = at.paint;
     positions[3 * v] = x;
     positions[3 * v + 1] = y;
@@ -180,6 +186,7 @@ export function buildingMesh(b: Buildings): BuildingMesh {
     // top of its dark band.
     const band = Math.min(top, bottom + AO_BAND);
     const style = windows(b, i, groups[b.kind[i]!]!);
+    at.shop = shopfront?.[i] === 1;
     const wall = top - bottom;
     at.paint = wallPaint;
     const outlines: Float64Array[] = [];
@@ -306,9 +313,14 @@ function windows(b: Buildings, i: number, group: number): WindowStyle | null {
   if (!style || wall < 2.5 || NO_WINDOW_ROOFS.has(ROOF_SHAPES[b.roofShape[i]!]!)) return null;
   const r = b.ringStart[i]!, a = b.pointStart[r]!, e = b.pointStart[r + 1]!;
   if (b.isPart[i] && b.minHeight[i]! > 0 && Math.abs(signedArea2(b.points, a, e)) / 2 < EQUIPMENT_AREA) return null;
+  return { ...style, floor: floorHeight(b, i) };
+}
+
+/** A building's floor height, m: from building:levels where tagged, else its group's (as its windows use). */
+export function floorHeight(b: Buildings, i: number): number {
   const floors = b.levels[i]! - b.minLevel[i]!;
-  const floor = floors >= 1 ? Math.min(8, Math.max(2.4, wall / floors)) : style.floor;
-  return { ...style, floor };
+  if (floors >= 1) return Math.min(8, Math.max(2.4, (b.height[i]! - b.minHeight[i]!) / floors));
+  return WINDOW_STYLES[buildingGroup(b.kinds[b.kind[i]!]!)]?.floor ?? PLAIN_FLOOR;
 }
 
 /** Each edge's outward unit normal (x, y) of a ring of n points from `a`; a zero-length edge takes the next one's. */

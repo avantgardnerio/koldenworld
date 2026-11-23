@@ -10,7 +10,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { loadBuildings, loadRoadWays, loadWater, type Bbox } from "@game/db";
+import { loadBuildings, loadPois, loadRoadWays, loadWater, type Bbox } from "@game/db";
 import {
   BUILDINGS_VERSION, buildCell, carveWater, cellFromLatLon, drapeCell, groundSampler, enuUnprojection, type CellContents, CELL_TABLES, CELL_VERSION, cellCenter, cellCorners, cellLevel, cellsWithin, cellToArrow,
   cellToken, geodeticToEcef, ROAD_GRAPH_VERSION, type CellFiles, type CellId,
@@ -148,11 +148,12 @@ export class CellService {
     await Promise.all(fetchCellsFor(cell).map((f) => this.ensureFetched(f)));
     lap("deps");
     const box = cellBox(cell, MARGIN_M);
-    const [ways, buildingInputs] = await Promise.all([
+    const [ways, buildingInputs, pois] = await Promise.all([
       loadRoadWays(box).then((w) => { lap("roads"); return w; }),
       loadBuildings(box).then((b) => { lap("buildings"); return b; }),
+      loadPois(box).then((p) => { lap("pois"); return p; }),
     ]);
-    const flat = buildCell(cell, ways, buildingInputs);
+    const flat = buildCell(cell, ways, buildingInputs, pois);
     lap("build");
     // Objects reach into neighbors and are placed on the neighbors' terrain lattices, which need
     // elevation (and water, for carving) over those whole cells.

@@ -69,3 +69,11 @@ export const SUN: [number, number, number] = (() => {
 export function fogRange(loadRadius: number): [start: number, end: number] {
   return [0.75 * loadRadius, loadRadius];
 }
+
+/** Business sign colors: food and drink by kind, the rest by category; white names on them. */
+const FOOD = new Set(["cafe", "restaurant", "fast_food", "bar", "pub", "ice_cream", "food_court", "biergarten"]);
+const CATEGORY_COLORS: Record<string, string> = {
+  shop: "#a8322e", amenity: "#2c5d8a", office: "#2e3b55", tourism: "#6b3577", craft: "#7a5524",
+  leisure: "#2c6a48", healthcare: "#1f7a80",
+};
+export const businessColor = (category: string, kind: string) => FOOD.has(kind) ? "#5b3a22" : CATEGORY_COLORS[category] ?? "#444444";

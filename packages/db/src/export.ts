@@ -1,4 +1,4 @@
-import type { BuildingInput, HeightSource, OsmType, RoadClass, RoadWayInput } from "@game/world";
+import type { BuildingInput, HeightSource, OsmType, PoiCategory, PoiInput, RoadClass, RoadWayInput } from "@game/world";
 type Tags = Record<string, string>;
 import pg from "pg";
 import { clientConfig, DATABASE_URL } from "./config.ts";
@@ -93,6 +93,21 @@ export function loadBuildings(bbox: Bbox, url = DATABASE_URL): Promise<BuildingI
       minLevel: r.min_level !== null && Number.isFinite(parseFloat(r.min_level)) ? parseFloat(r.min_level) : null,
       roofShape: r.roof_shape,
       polygons: r.coords,
+    }));
+  });
+}
+
+/** Points of interest in the box, ordered by OSM key so output is reproducible. */
+export function loadPois(bbox: Bbox, url = DATABASE_URL): Promise<PoiInput[]> {
+  return withClient(url, async (c) => {
+    const { rows } = await c.query<{
+      osm_id: string; category: PoiCategory; kind: string; name: string | null; brand: string | null; lon: number; lat: number;
+    }>(
+      `SELECT osm_id::text, category, kind, name, brand, ST_X(geom) AS lon, ST_Y(geom) AS lat FROM pois
+       WHERE geom && ST_MakeEnvelope($1, $2, $3, $4, 4326) ORDER BY osm_type, osm_id`,
+      [bbox.west, bbox.south, bbox.east, bbox.north]);
+    return rows.map((r) => ({
+      osmId: Number(r.osm_id), category: r.category, kind: r.kind, name: r.name, brand: r.brand, lon: r.lon, lat: r.lat,
     }));
   });
 }

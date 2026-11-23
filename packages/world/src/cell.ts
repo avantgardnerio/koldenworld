@@ -15,6 +15,7 @@ import { buildBuildings, BUILDINGS_VERSION, type BuildingInput, type Buildings }
 import { ecefToLocal, geodeticToEcef, type Frame, type Vec3 } from "./geodesy.ts";
 import { enuProjection } from "./projection.ts";
 import { flatTerrain, terrainFromArrow, terrainToArrow, type CellTerrain } from "./terrain.ts";
+import { buildPois, emptyPois, poisFromArrow, poisToArrow, type PoiInput, type Pois } from "./pois.ts";
 import { roadGraphFromArrow, roadGraphToArrow } from "./road-graph-arrow.ts";
 import { buildRoadGraph, ROAD_GRAPH_VERSION, type RoadGraph, type RoadWayInput } from "./road-graph.ts";
 import {
@@ -26,7 +27,7 @@ import {
 export const CELL_LEVEL = 13;
 
 /** Bump when a cell's contents change for the same input (ownership rules, layout). */
-export const CELL_VERSION = 9;
+export const CELL_VERSION = 10;
 
 export interface CellContents {
   cell: CellId;
@@ -34,6 +35,7 @@ export interface CellContents {
   graph: RoadGraph;
   buildings: Buildings;
   terrain: CellTerrain;  // flat (h = 0) until draped
+  pois: Pois;            // points of interest in the cell's buildings
 }
 
 /** A point owning a building: the area centroid of its first outer ring (lon, lat). */
@@ -59,17 +61,19 @@ export function ownerPoint(b: BuildingInput): [lon: number, lat: number] {
  * cell with some margin, and include every way sharing a node with those ways,
  * so ways are cut at the same nodes as in the neighbors' exports.
  */
-export function buildCell(cell: CellId, ways: RoadWayInput[], buildings: BuildingInput[]): CellContents {
+export function buildCell(cell: CellId, ways: RoadWayInput[], buildings: BuildingInput[], pois: PoiInput[] = []): CellContents {
   const level = cellLevel(cell);
   const owns = (lon: number, lat: number) => cellFromLatLon(lat, lon, level) === cell;
   const frame = cellFrame(cell);
   const project = enuProjection(frame);
+  const owned = buildBuildings(buildings.filter((b) => owns(...ownerPoint(b))), project);
   return {
     cell,
     frame,
     graph: buildRoadGraph(ways, project, owns),
-    buildings: buildBuildings(buildings.filter((b) => owns(...ownerPoint(b))), project),
+    buildings: owned,
     terrain: flatTerrain(),
+    pois: buildPois(pois, owned, project),
   };
 }
 
@@ -78,8 +82,9 @@ export interface CellFiles {
   edges: Uint8Array;
   buildings: Uint8Array;
   terrain: Uint8Array;
+  pois: Uint8Array;
 }
-export const CELL_TABLES = ["nodes", "edges", "buildings", "terrain"] as const satisfies readonly (keyof CellFiles)[];
+export const CELL_TABLES = ["nodes", "edges", "buildings", "terrain", "pois"] as const satisfies readonly (keyof CellFiles)[];
 
 /**
  * A cell's files as one blob, to send in one response (a browser has 6 connections per host, and
@@ -120,6 +125,7 @@ export function cellToArrow(c: CellContents, metadata: FileMetadata = {}): CellF
   };
   return {
     ...roadGraphToArrow(c.graph, meta), buildings: buildingsToArrow(c.buildings, meta), terrain: terrainToArrow(c.terrain, meta),
+    pois: poisToArrow(c.pois, meta),
   };
 }
 
@@ -128,7 +134,7 @@ export function cellFromArrow(files: CellFiles): CellContents & { metadata: File
   const { buildings } = buildingsFromArrow(files.buildings);
   if (typeof metadata.cell !== "string") throw new Error("cell files have no cell token in their metadata");
   const cell = cellFromToken(metadata.cell);
-  return { cell, frame: cellFrame(cell), graph, buildings, terrain: terrainFromArrow(files.terrain), metadata };
+  return { cell, frame: cellFrame(cell), graph, buildings, terrain: terrainFromArrow(files.terrain), pois: poisFromArrow(files.pois), metadata };
 }
 
 // --- around a point -------------------------------------------------------------
