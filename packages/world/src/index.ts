@@ -46,7 +46,7 @@ export {
   type AircraftKind, type AircraftReport,
 } from "./aircraft.ts";
 export {
-  ELBOW, HIP, KNEE, PART, PEOPLE_PALETTE, PERSON_HEIGHT, personMesh, placePeople, placeVagrants, SHOULDER, vagrantMesh, VAGRANTS,
+  ELBOW, HIP, KNEE, PART, PEOPLE_PALETTE, PERSON_HEIGHT, personMesh, placePeople, placeVagrants, playerMesh, SHOULDER, vagrantMesh, VAGRANTS,
   type PeoplePlacements, type PersonMesh, type VagrantPlacements,
 } from "./people.ts";
 export {

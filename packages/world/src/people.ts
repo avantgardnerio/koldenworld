@@ -32,14 +32,15 @@ export const PART = {
   body: 0, leftLeg: 1, rightLeg: 2, leftArm: 3, rightArm: 4, leftShin: 5, rightShin: 6, leftForearm: 7, rightForearm: 8,
 } as const;
 
-const SWATCH = { skin: 0, shirt: 1, pants: 2, shoes: 3, hair: 4, coat: 5, worn: 6, beanie: 7, bundle: 8 } as const;
-const PALETTE = ["#e8b98f", "#2f6fd6", "#3a3f4a", "#26282c", "#5a3a22", "#5b5a3c", "#4a4038", "#33343a", "#7a6a4f"];
+const SWATCH = { skin: 0, shirt: 1, pants: 2, shoes: 3, hair: 4, coat: 5, worn: 6, beanie: 7, bundle: 8, jacket: 9 } as const;
+const PALETTE = ["#e8b98f", "#2f6fd6", "#3a3f4a", "#26282c", "#5a3a22", "#5b5a3c", "#4a4038", "#33343a", "#7a6a4f", "#d2402f"];
 const PALETTE_SIZE = 16;
 
 /** What a figure wears: swatches for its top, legs and head, and whether it carries a bundle on its back. */
 interface Outfit { top: number; legs: number; head: number; bundle: boolean }
 const PEDESTRIAN: Outfit = { top: SWATCH.shirt, legs: SWATCH.pants, head: SWATCH.hair, bundle: false };
 const VAGRANT: Outfit = { top: SWATCH.coat, legs: SWATCH.worn, head: SWATCH.beanie, bundle: true };
+const PLAYER: Outfit = { top: SWATCH.jacket, legs: SWATCH.pants, head: SWATCH.hair, bundle: false };
 
 /** RGBA, 16 × 1: the texture the figure's uvs point at. */
 export const PEOPLE_PALETTE: Uint8Array = (() => {
@@ -140,6 +141,9 @@ export const personMesh = (): PersonMesh => figure(PEDESTRIAN);
 
 /** A vagrant, standing: a drab coat and trousers, a beanie, a bundle on the back. */
 export const vagrantMesh = (): PersonMesh => figure(VAGRANT);
+
+/** The player on foot: a pedestrian in a red jacket, to stand out. */
+export const playerMesh = (): PersonMesh => figure(PLAYER);
 
 function figure(o: Outfit): PersonMesh {
   const b = new Builder();

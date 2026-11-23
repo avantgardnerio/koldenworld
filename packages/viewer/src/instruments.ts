@@ -10,6 +10,7 @@
 //   and of 8,000 m/s both read).
 // - Driving: a speedometer (km/h; R in reverse) with the heading above it,
 //   and the wheel (left–right) and pedal (throttle up, brake down) beside it.
+// - On foot: nothing but a hint now and then (what F does).
 //
 // Drawn as light lines with a dark outline, so they read over sky and ground.
 
@@ -49,8 +50,8 @@ export class Instruments {
     this.ctx = canvas.getContext("2d")!;
   }
 
-  /** Clears, sized to the window; then draws one set of instruments (or none). */
-  draw(flight?: FlightData, drive?: DriveData): void {
+  /** Clears, sized to the window; then draws one set of instruments (or none), and a hint at the bottom if there is one. */
+  draw(flight?: FlightData, drive?: DriveData, hint?: string): void {
     const { canvas, ctx } = this, dpr = devicePixelRatio;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
@@ -63,6 +64,7 @@ export class Instruments {
     ctx.lineJoin = "round";
     if (drive) this.dashboard(w, h, drive);
     else if (flight) this.hud(w, h, flight);
+    if (hint) this.text(hint, w / 2, h - 70, 15, "center");
   }
 
   // --- flying ------------------------------------------------------------------------
@@ -173,7 +175,7 @@ export class Instruments {
     const px = cx + r + 30, ph = r * 1.4;
     this.stroke([[px, cy - ph / 2], [px, cy + ph / 2]], 1);
     if (d.pedal !== 0) this.stroke([[px, cy], [px, cy - (d.pedal * ph) / 2]], 6, d.pedal > 0 ? ACCENT : BRAKE);
-    this.text("V: fly", cx + r + 30, h - 18, 11, "center");
+    this.text("F: get out · V: fly", cx + r + 30, h - 18, 11, "center");
   }
 
   // --- drawing -----------------------------------------------------------------------

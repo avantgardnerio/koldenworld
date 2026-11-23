@@ -3,6 +3,7 @@ export {
   type People, type PersonStart, type SidewalkNet,
 } from "./people.ts";
 export { Rng } from "./rng.ts";
+export { placeWalker, stepWalker, WALKER, walkerGait, type WalkInput, type Walker } from "./walker.ts";
 export {
   createVagrants, removeVagrants, ROAM, spawnVagrant, STATE, stepVagrants, VAGRANT, type RoamWorld, type Vagrants,
 } from "./vagrants.ts";

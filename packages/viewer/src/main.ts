@@ -26,12 +26,14 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, placeVagrants, vagrantMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, placeVagrants, playerMesh, vagrantMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, NEAR, viewProjection, yawPitch } from "./camera.ts";
 import { Drive } from "./drive.ts";
+import type { LoadedWorld } from "./local-world.ts";
+import { OnFoot } from "./on-foot.ts";
 import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
 import { createContrailLayer } from "./contrail-layer.ts";
 import { createCarModels, createCarRenderer, type CarInstances, type CarModels, type CarRenderer } from "./car-layer.ts";
@@ -362,6 +364,9 @@ async function start(): Promise<void> {
   // Vagrants: around the places that draw them, roaming anywhere.
   const vagrantRenderer = createPersonRenderer(gl, vagrantMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
   const vagrantInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE * 64), count: 0 };
+  // The player on foot.
+  const playerRenderer = createPersonRenderer(gl, playerMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
+  const playerInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE), count: 0 };
   const contrails = emptyContrails();
   const contrailLayer = showPlanes ? createContrailLayer(gl) : undefined;
   air.onUpdate = () => wake();
@@ -512,20 +517,26 @@ async function start(): Promise<void> {
     }
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
     let carTriangles = 0;
-    if (carRenderer && (showCars || drive)) {
+    if (carRenderer && (showCars || drive || foot)) {
       if (showCars) {
         // Horizontal distance to the cell's anchor (which sits at the ellipsoid, not at the ground or the camera).
         const near = (tc: TrafficCell) => Math.hypot(tc.model[12]!, tc.model[13]!);
-        // The traffic notices the player's car: slows behind it, and is solid to it.
-        const n = traffic.yieldTo(drive?.pose(vf).pos, nearCars);
-        drive?.setObstacles(nearCars, n, vf, CAR_HALF);
+        // The traffic notices the player, in their car or on foot: slows behind them, and is solid to them.
+        const n = traffic.yieldTo((drive ?? foot)?.pose(vf).pos, nearCars);
+        (drive ?? foot)?.setObstacles(nearCars, n, vf, CAR_HALF);
         traffic.update(dt, near, CAR_DISTANCE, 1.3 * CAR_DISTANCE, moving);
         traffic.instances(carInstances);
       } else {
         carInstances.count.fill(0);
       }
       if (drive) addCar(carInstances, PLAYER_MODEL, drive.pose(vf));
+      const parked = foot?.carPose(vf);
+      if (parked) addCar(carInstances, PLAYER_MODEL, parked);
       carTriangles = carRenderer.draw(f, SUN, ROAD_BIAS, carInstances);
+    }
+    if (foot) {
+      foot.instance(vf, playerInstances);
+      playerRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
     }
     let personTriangles = 0;
     if (showPeople) {
@@ -576,8 +587,10 @@ async function start(): Promise<void> {
     [lastEcef, lastH] = [ecef, camera.h];
     const [yaw, pitch] = yawPitch(camera.rot);
     instruments.draw(
-      { bearing: (-yaw * 180) / Math.PI, pitch, speed: groundSpeed, climb, altitude: camera.h, agl, ground: below, lat: camera.lat, lon: camera.lon },
+      foot ? undefined
+        : { bearing: (-yaw * 180) / Math.PI, pitch, speed: groundSpeed, climb, altitude: camera.h, agl, ground: below, lat: camera.lat, lon: camera.lon },
       drive && { kmh: drive.kmh, bearing: 90 - (drive.car.heading * 180) / Math.PI, wheel, pedal },
+      foot && (foot.nearCar ? "F: get in" : foot.car ? undefined : "V: fly"),
     );
     const m = (t: number) => (t / 1e6).toFixed(2);
     hud.textContent = `cells ${c.drawn} drawn / ${c.ready - c.missing - c.coarse} + ${c.coarse} coarse` +
@@ -610,6 +623,14 @@ async function start(): Promise<void> {
       requestAnimationFrame(frame);
       return;
     }
+    if (foot) {
+      // On foot: WASD relative to the camera, Shift to run, Space to jump; the mouse turns the camera behind them.
+      foot.step(input, dt);
+      camera = foot.camera();
+      render(dt);
+      requestAnimationFrame(frame);
+      return;
+    }
     if (isIdle(input)) {
       // Input just stopped: the pose goes to the URL.
       if (steering) history.replaceState(null, "", formatGlobeHash(camera));
@@ -633,22 +654,37 @@ async function start(): Promise<void> {
   };
   const keys = attachInput(canvas, wake);
 
-  // V: drive a car from the ground under the camera, facing its way; V again: fly on from the chase camera.
+  // V: drive a car from the ground under the camera, facing its way; V again (driving or on foot): fly on from the
+  // camera. F: out of the car, on foot beside it; back in, near it; flying, on foot on the ground under the camera.
   let drive: Drive | undefined;
+  let foot: OnFoot | undefined;
   let wheel = 0, pedal = 0;  // the mouse's steering wheel and pedal, −1..1
+  const loaded: LoadedWorld = { groundAt, walls: (cell) => streamer.get(cell)?.walls };
   addEventListener("keydown", (e) => {
     if (e.code !== "KeyV" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     wheel = pedal = 0;
-    if (drive) {
-      drive = undefined;
+    if (drive || foot) {
+      drive = foot = undefined;
       history.replaceState(null, "", formatGlobeHash(camera));
     } else {
-      drive = new Drive(camera.lat, camera.lon, yawPitch(camera.rot)[0] + Math.PI / 2, {
-        groundAt,
-        walls: (cell) => streamer.get(cell)?.walls,
-      });
+      drive = new Drive(camera.lat, camera.lon, yawPitch(camera.rot)[0] + Math.PI / 2, loaded);
       wake();
     }
+  });
+  addEventListener("keydown", (e) => {
+    if (e.code !== "KeyF" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    wheel = pedal = 0;
+    if (drive) {
+      const car = drive.parked();
+      foot = new OnFoot(car.lat, car.lon, car.heading, loaded, car, CAR_HALF);
+      drive = undefined;
+    } else if (foot?.car && foot.nearCar) {
+      drive = Drive.from(foot.car, loaded);
+      foot = undefined;
+    } else if (!foot) {
+      foot = new OnFoot(camera.lat, camera.lon, yawPitch(camera.rot)[0] + Math.PI / 2, loaded);
+    }
+    wake();
   });
 
   addEventListener("keydown", (e) => {
