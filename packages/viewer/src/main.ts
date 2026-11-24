@@ -26,7 +26,8 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, interiorMesh, PROPS, PROPS_PALETTE, propMeshes, shopUnits, type Doors, type Units, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, furnish, interiorMesh, layoutFor, POI_CATEGORIES, PROPS, PROPS_PALETTE, propMeshes, shopUnits, type Doors,
+  type Furniture, type Layout, type Staff, type Units, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -37,13 +38,13 @@ import { OnFoot } from "./on-foot.ts";
 import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
 import { createContrailLayer } from "./contrail-layer.ts";
 import { createCarModels, createCarRenderer, type CarInstances, type CarModels, type CarRenderer } from "./car-layer.ts";
-import { heldGun, ITEMS } from "@game/sim";
+import { BODY, heldGun, ITEMS } from "@game/sim";
 import { gunshot } from "./audio.ts";
 import { createEffectsLayer, Effects } from "./effects-layer.ts";
 import { Instruments, type HandData } from "./instruments.ts";
 import { PeopleView } from "./people-view.ts";
 import { VagrantView, type RoamCell } from "./vagrant-view.ts";
-import { createPersonRenderer, PERSON_STRIDE, type PersonInstances } from "./person-layer.ts";
+import { createPersonRenderer, PERSON_STRIDE, POSE, type PersonInstances } from "./person-layer.ts";
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
@@ -215,7 +216,8 @@ interface CellGpu {
   doors?: Doors;         // a fine cell's businesses' doors, drawn as props in their doorways
   doorOpen?: Float32Array;  // per door: how far open, 0 (shut) .. 1 (slid aside into the wall)
   shopUnits?: Units;        // each door's share of its building, inside
-  interiors?: Map<number, SolidLayer>;  // by unit: its shell, built once the camera comes near its door
+  unitLayouts?: { layout: Layout; kind: string }[];  // per unit: how it's furnished, by its business's kind
+  interiors?: Map<number, Interior>;  // by unit: its shell, furniture and staff, built once the camera comes near its door
   unitOutlines?: FlatMesh;  // the graph overlay's shop units (each door's share of its building), uploaded on first use
   units?: FlatLayer;
   walls?: WallGrid;      // a fine cell's building walls, for the driven car's collisions
@@ -336,6 +338,10 @@ async function start(): Promise<void> {
       ]),
       doors: shops.doors, doorOpen: new Float32Array(shops.doors.count),
       shopUnits: units, interiors: new Map(),
+      unitLayouts: Array.from(units.door, (d) => {
+        const poi = shops.doors.poi[d]!, kind = c.pois.kinds[c.pois.kind[poi]!]!;
+        return { layout: layoutFor(POI_CATEGORIES[c.pois.category[poi]!]!, kind), kind };
+      }),
       unitOutlines: unitOutlines(units),
       walls,
       vagrants: roam.placements.count > 0 ? vagrantView.add(roam) : undefined,
@@ -350,7 +356,8 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 16,  // the cell server builds on a pool of workers
     dispose: (g) => {
-      [g.ground, g.graph, g.units, g.buildings, g.massing, g.signs, ...(g.interiors?.values() ?? [])].forEach((l) => l?.dispose());
+      [g.ground, g.graph, g.units, g.buildings, g.massing, g.signs, ...[...(g.interiors?.values() ?? [])].map((i) => i.shell)]
+        .forEach((l) => l?.dispose());
       if (g.traffic) {
         peopleView.remove(g.traffic);
         traffic.remove(g.traffic);
@@ -575,9 +582,12 @@ async function start(): Promise<void> {
         if (!inside) {
           const d = u.door[k]!, at = toView(g.model, g.doors.x[d]!, g.doors.y[d]!, g.doors.z[d]!);
           if (Math.hypot(at[0] - f.eye[0], at[1] - f.eye[1], at[2] - f.eye[2]) > INTERIOR_DISTANCE) continue;
-          g.interiors.set(k, inside = createSolidLayer(gl, interiorMesh(u, k, g.doors), INTERIOR_COLORS));
+          const { layout, kind } = g.unitLayouts![k]!;
+          inside = { shell: createSolidLayer(gl, interiorMesh(u, k, g.doors), INTERIOR_COLORS), ...furnish(u, k, g.doors, layout, kind) };
+          g.interiors.set(k, inside);
         }
-        drawn.buildings += inside.draw(f, g.model, SUN);
+        drawn.buildings += inside.shell.draw(f, g.model, SUN);
+        addFurniture(propInstances, inside.furniture, g.model);
       }
     }
     propRenderer.draw(f, SUN, 0, propInstances);
@@ -615,6 +625,8 @@ async function start(): Promise<void> {
       const near = (c: { model: Float32Array }) => Math.hypot(c.model[12]!, c.model[13]!);
       peopleView.update(dt, near, PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
       peopleView.instances(personInstances, womanInstances);
+      // Shops' staff, standing behind their counters.
+      for (const g of visible) for (const inside of g.interiors?.values() ?? []) addStaff(personInstances, womanInstances, inside.staff, g.model);
       personTriangles = personRenderer.draw(f, SUN, ROAD_BIAS, personInstances);
       personTriangles += womanRenderer.draw(f, SUN, ROAD_BIAS, womanInstances);
       vagrantView.update(dt, near, PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
@@ -831,6 +843,39 @@ function unitOutlines(u: Units): FlatMesh {
     }
   }
   return { positions, dims: 3, material: new Uint8Array(n), indices };
+}
+
+/** A shop's inside: its shell (floor, walls, ceiling), what's in it, and who works there. */
+interface Interior {
+  shell: SolidLayer;
+  furniture: Furniture;
+  staff: Staff;
+}
+
+/** A direction in a cell's frame, level, in the view frame. */
+function dirToView(m: Float32Array, x: number, y: number): Vec3 {
+  return [m[0]! * x + m[4]! * y, m[1]! * x + m[5]! * y, m[2]! * x + m[6]! * y];
+}
+
+/** A shop's furniture as props, in the view frame. */
+function addFurniture(out: CarInstances, fu: Furniture, model: Float32Array): void {
+  for (let k = 0; k < fu.count; k++) {
+    addCar(out, fu.prop[k]!, { pos: toView(model, fu.x[k]!, fu.y[k]!, fu.z[k]!), fwd: dirToView(model, fu.fx[k]!, fu.fy[k]!) });
+  }
+}
+
+/** A shop's staff, standing still, as men or women by their body, in the view frame. */
+function addStaff(men: PersonInstances, women: PersonInstances, s: Staff, model: Float32Array): void {
+  for (let k = 0; k < s.count; k++) {
+    const out = s.body[k] === BODY.woman ? women : men;
+    if (PERSON_STRIDE * (out.count + 1) > out.data.length) {
+      const grown = new Float32Array(out.data.length * 2);
+      grown.set(out.data);
+      out.data = grown;
+    }
+    const at = toView(model, s.x[k]!, s.y[k]!, s.z[k]!), fwd = dirToView(model, s.fx[k]!, s.fy[k]!);
+    out.data.set([...at, ...fwd, 0, 0, POSE.upright, 0], PERSON_STRIDE * out.count++);
+  }
 }
 
 /** A point in a cell's frame, in the view frame (`m`: the cell's frame → it, column-major). */

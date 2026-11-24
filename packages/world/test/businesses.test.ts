@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBuildings, buildingMesh, buildPois, businessSigns, enuFrame, enuProjection, enuUnprojection, poisFromArrow, poisToArrow,
-  charityWeight, DOOR, interiorMesh, placeVagrants, SHOPFRONT, shopUnits, SIGN, UNIT, VAGRANTS, wallGrid, type BuildingInput, type PoiInput,
+  charityWeight, DOOR, furnish, interiorMesh, layoutFor, placeVagrants, PROP, PROP_SIZE, PROPS, SHOPFRONT, shopUnits, SIGN,
+  UNIT, VAGRANTS, wallGrid, type Furniture, type BuildingInput, type PoiInput,
 } from "../src/index.ts";
 
 const toLonLat = enuUnprojection(enuFrame({ lat: 0, lon: 0, h: 0 }));
@@ -133,6 +134,45 @@ describe("businesses", () => {
     expect(areaFacing(m, [0, -1, 0])).toBeCloseTo(30 * (z1 - z0), 3);
     // (The side walls reach the outline's corners, past the door's wall, where it hides them.)
     expect(areaFacing(m, [1, 0, 0]) + areaFacing(m, [-1, 0, 0])).toBeCloseTo(2 * 20 * (z1 - z0), 3);
+  });
+
+  it("furnishes a shop by its kind: everything inside, clear of the way in, nothing overlapping", () => {
+    expect([layoutFor("amenity", "cafe"), layoutFor("amenity", "bank"), layoutFor("shop", "weapons"),
+      layoutFor("shop", "convenience"), layoutFor("shop", "clothes"), layoutFor("office", "lawyer")])
+      .toEqual(["tables", "counter", "counter", "aisles", "store", "counter"]);
+    const d = businessSigns(buildings, buildPois([poi(1, 10, 2, "Cafe")], buildings, origin)).doors;
+    const u = shopUnits(buildings, d), [dx] = [d.x[0]!];
+    const count = (fu: Furniture, p: keyof typeof PROP) => fu.prop.filter((x) => x === PROP[p]).length;
+    for (const layout of ["tables", "counter", "aisles", "store"] as const) {
+      const { furniture: fu, staff } = furnish(u, 0, d, layout, layout === "counter" ? "weapons" : "");
+      // The shop is the whole 30 × 20 m building, its door on the south wall (y = 0) at x = dx: s = x − dx, t = y.
+      const boxes: [number, number, number, number][] = [];
+      for (let k = 0; k < fu.count; k++) {
+        const p = PROPS[fu.prop[k]!]!, [w, dp] = PROP_SIZE[p];
+        const [hx, hy] = Math.abs(fu.fy[k]!) > 0.5 ? [w / 2, dp / 2] : [dp / 2, w / 2];
+        const box: [number, number, number, number] = [fu.x[k]! - hx, fu.y[k]! - hy, fu.x[k]! + hx, fu.y[k]! + hy];
+        expect(box[0]).toBeGreaterThan(0);
+        expect(box[2]).toBeLessThan(30);
+        expect(box[1]).toBeGreaterThan(DOOR.reveal);
+        expect(box[3]).toBeLessThan(20);
+        expect(box[2] > dx - 0.9 && box[0] < dx + 0.9 && box[1] < 2.2, `${p} in the way in`).toBe(false);
+        if (p !== "register") boxes.push(box);
+      }
+      for (let i = 0; i < boxes.length; i++) {
+        for (let j = i + 1; j < boxes.length; j++) {
+          const [a, b] = [boxes[i]!, boxes[j]!];
+          expect(a[0] < b[2] - 1e-3 && b[0] < a[2] - 1e-3 && a[1] < b[3] - 1e-3 && b[1] < a[3] - 1e-3, `${layout}: ${i} and ${j} overlap`).toBe(false);
+        }
+      }
+      expect(staff.count).toBeGreaterThan(0);
+      for (let k = 0; k < staff.count; k++) expect(staff.x[k]! > 0 && staff.x[k]! < 30 && staff.y[k]! > 0 && staff.y[k]! < 20).toBe(true);
+      if (layout === "tables") expect([count(fu, "table") > 4, count(fu, "chair"), count(fu, "register")]).toEqual([true, 2 * count(fu, "table"), 1]);
+      if (layout === "counter") expect([count(fu, "case") > 10, count(fu, "shelf") > 10]).toEqual([true, true]);
+      if (layout === "aisles") expect(count(fu, "shelf")).toBeGreaterThan(40);
+      if (layout === "store") expect([count(fu, "shelf") > 20, count(fu, "register")]).toEqual([true, 1]);
+    }
+    // The same every time.
+    expect(furnish(u, 0, d, "tables")).toEqual(furnish(u, 0, d, "tables"));
   });
 
   it("round-trips through Arrow", () => {
