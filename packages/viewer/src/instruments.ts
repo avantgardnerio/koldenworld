@@ -34,7 +34,7 @@ export interface FlightData {
 export interface HandData {
   slots: string[];    // the inventory's items, by name
   selected: number;   // the one in hand
-  rounds?: string;    // a gun in hand: what's in it ("12/12", "reloading")
+  rounds?: string;    // a gun in hand: what's in it ("18/18", "reloading")
   crosshair: boolean; // a gun in hand
   aiming: boolean;
   sway: [number, number];  // the crosshair off the middle, radians right and up

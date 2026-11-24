@@ -17,7 +17,7 @@ export interface Gun {
 
 export const ITEMS: Record<ItemKind, { name: string; gun?: Gun }> = {
   hands: { name: "Hands" },
-  pistol: { name: "Pistol", gun: { magazine: 12, interval: 0.15, reload: 1.2, range: 200 } },
+  pistol: { name: "Pistol", gun: { magazine: 18, interval: 0.15, reload: 1.2, range: 200 } },
   // An AR-15-style rifle, semi-automatic: one shot a pull.
   rifle: { name: "Rifle", gun: { magazine: 30, interval: 0.1, reload: 2.2, range: 400 } },
 };
