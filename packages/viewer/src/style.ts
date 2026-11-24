@@ -17,6 +17,8 @@ export const GROUND = palette([
 
 /** vec3 per massing material from the Rust cell generator (a coarse tile's buildings): wall, roof. */
 export const MASSING = palette(["#d2c6b2", "#8e7e6e"]);
+/** The graph overlay's shop units. */
+export const UNIT_COLOR = palette(["#ff4fd8"]);
 
 
 const CLASS_COLORS: Record<RoadClass, string> = {

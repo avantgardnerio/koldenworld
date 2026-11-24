@@ -10,11 +10,12 @@
 export const DOOR = { width: 1.0, height: 2.2, inset: 0.12, reveal: 0.25, margin: 0.3, street: 1, headroom: 0.3 };
 
 /**
- * Doors, as columns: each in building row `building`, its middle at the foot of the wall (x, y, z: m in the cell's
- * frame), the wall running (ux, uy) (as its ring: outward is (uy, −ux)).
+ * Doors, as columns: each the door of business `poi` (a row of Pois) in building row `building`, its middle at the
+ * foot of the wall (x, y, z: m in the cell's frame), the wall running (ux, uy) (as its ring: outward is (uy, −ux)).
  */
 export interface Doors {
   count: number;
+  poi: Int32Array;
   building: Int32Array;
   x: Float32Array;
   y: Float32Array;
@@ -24,7 +25,7 @@ export interface Doors {
 }
 
 export const NO_DOORS: Doors = {
-  count: 0, building: new Int32Array(0), x: new Float32Array(0), y: new Float32Array(0), z: new Float32Array(0),
+  count: 0, poi: new Int32Array(0), building: new Int32Array(0), x: new Float32Array(0), y: new Float32Array(0), z: new Float32Array(0),
   ux: new Float32Array(0), uy: new Float32Array(0),
 };
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBuildings, buildingMesh, buildPois, businessSigns, enuFrame, enuProjection, enuUnprojection, poisFromArrow, poisToArrow,
-  charityWeight, DOOR, placeVagrants, SHOPFRONT, SIGN, VAGRANTS, type BuildingInput, type PoiInput,
+  charityWeight, DOOR, placeVagrants, SHOPFRONT, shopUnits, SIGN, UNIT, VAGRANTS, type BuildingInput, type PoiInput,
 } from "../src/index.ts";
 
 const toLonLat = enuUnprojection(enuFrame({ lat: 0, lon: 0, h: 0 }));
@@ -76,6 +76,33 @@ describe("businesses", () => {
     expect(facing([1, 0, 0]) - 20 * 8).toBeCloseTo(DOOR.reveal * DOOR.height, 4);  // the east wall, and a jamb
     expect(facing([-1, 0, 0]) - 20 * 8).toBeCloseTo(DOOR.reveal * DOOR.height, 4);
     expect(facing([0, 0, -1])).toBeCloseTo(DOOR.reveal * DOOR.width, 4);
+  });
+
+  it("gives each door its share of the ground floor: nearest door, at most UNIT.depth in", () => {
+    const unitArea = (u: ReturnType<typeof shopUnits>, k: number) => {
+      const p = u.points.subarray(2 * u.pointStart[k]!, 2 * u.pointStart[k + 1]!);
+      let s = 0;
+      for (let i = 0, n = p.length / 2; i < n; i++) s += p[2 * i]! * p[2 * ((i + 1) % n) + 1]! - p[2 * ((i + 1) % n)]! * p[2 * i + 1]!;
+      return s / 2;
+    };
+    // One café on the south wall: the whole 30 × 20 m floor.
+    let d = businessSigns(buildings, buildPois([poi(1, 10, 2, "Cafe")], buildings, origin)).doors;
+    let u = shopUnits(buildings, d);
+    expect(u.count).toBe(1);
+    expect(unitArea(u, 0)).toBeCloseTo(600, 3);
+    // One on the west wall: only UNIT.depth (20 m) in from it.
+    d = businessSigns(buildings, buildPois([poi(1, 1, 10, "Cafe")], buildings, origin)).doors;
+    u = shopUnits(buildings, d);
+    expect(unitArea(u, 0)).toBeCloseTo(UNIT.depth * 20, 3);
+    // Two on the south wall: split halfway between their doors.
+    d = businessSigns(buildings, buildPois([poi(1, 10, 2, "Cafe One"), poi(2, 11, 2, "Cafe Two")], buildings, origin)).doors;
+    u = shopUnits(buildings, d);
+    expect(u.count).toBe(2);
+    const mid = (d.x[0]! + d.x[1]!) / 2;
+    const [west, east] = d.x[u.door[0]!]! < d.x[u.door[1]!]! ? [0, 1] : [1, 0];
+    expect(unitArea(u, west)).toBeCloseTo(mid * 20, 3);
+    expect(unitArea(u, east)).toBeCloseTo((30 - mid) * 20, 3);
+    expect([...d.poi].sort()).toEqual([0, 1]);
   });
 
   it("round-trips through Arrow", () => {

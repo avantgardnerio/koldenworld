@@ -31,7 +31,7 @@ export interface BusinessSign {
 /** A cell's business signs, per building row whether it has a shopfront (1), and the doors under the signs. */
 export function businessSigns(b: Buildings, p: Pois): { signs: BusinessSign[]; shopfront: Uint8Array; doors: Doors } {
   const shopfront = new Uint8Array(b.count);
-  const door = { building: [] as number[], x: [] as number[], y: [] as number[], z: [] as number[], ux: [] as number[], uy: [] as number[] };
+  const door = { poi: [] as number[], building: [] as number[], x: [] as number[], y: [] as number[], z: [] as number[], ux: [] as number[], uy: [] as number[] };
   // Each building's businesses, by wall.
   const byWall = new Map<string, { i: number; t: number }[]>();
   for (let k = 0; k < p.count; k++) {
@@ -87,6 +87,7 @@ export function businessSigns(b: Buildings, p: Pois): { signs: BusinessSign[]; s
       const c = Math.min(hi, Math.max(lo, centers[j]!));
       if (!doors || lo > hi || c - lastDoor < DOOR.width + DOOR.margin) return;
       lastDoor = c;
+      door.poi.push(k);
       door.building.push(i);
       door.x.push(px + ux * c);
       door.y.push(py + uy * c);
@@ -98,7 +99,7 @@ export function businessSigns(b: Buildings, p: Pois): { signs: BusinessSign[]; s
   return {
     signs, shopfront,
     doors: {
-      count: door.building.length, building: Int32Array.from(door.building), x: Float32Array.from(door.x),
+      count: door.building.length, poi: Int32Array.from(door.poi), building: Int32Array.from(door.building), x: Float32Array.from(door.x),
       y: Float32Array.from(door.y), z: Float32Array.from(door.z), ux: Float32Array.from(door.ux), uy: Float32Array.from(door.uy),
     },
   };

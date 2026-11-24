@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, PROPS, PROPS_PALETTE, propMeshes, type Doors, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, PROPS, PROPS_PALETTE, propMeshes, shopUnits, type Doors, type Units, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -53,7 +53,7 @@ import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { CAR_HALF, emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
-  BUILDING_COLORS_RGB, BUILDING_WINDOWS, GROUND, PAINTS, CLASS_COLORS_RGB, fogRange, MASSING, SKY, SUN,
+  BUILDING_COLORS_RGB, BUILDING_WINDOWS, GROUND, PAINTS, CLASS_COLORS_RGB, fogRange, MASSING, SKY, SUN, UNIT_COLOR,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -209,6 +209,8 @@ interface CellGpu {
   buildings?: SolidLayer;
   signs?: SignLayer;
   doors?: Doors;         // a fine cell's businesses' doors, drawn as props in their doorways
+  unitOutlines?: FlatMesh;  // the graph overlay's shop units (each door's share of its building), uploaded on first use
+  units?: FlatLayer;
   walls?: WallGrid;      // a fine cell's building walls, for the driven car's collisions
   vagrants?: RoamCell;   // a fine cell with places that draw vagrants, in their sim
   counts: { nodes: number; edges: number; surfaceTriangles: number; buildings: number; buildingTriangles: number };
@@ -325,6 +327,7 @@ async function start(): Promise<void> {
         ...businessSignBoxes(shops.signs),
       ]),
       doors: shops.doors,
+      unitOutlines: unitOutlines(shopUnits(c.buildings, shops.doors)),
       walls,
       vagrants: roam.placements.count > 0 ? vagrantView.add(roam) : undefined,
       counts: {
@@ -338,7 +341,7 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 16,  // the cell server builds on a pool of workers
     dispose: (g) => {
-      [g.ground, g.graph, g.buildings, g.massing, g.signs].forEach((l) => l?.dispose());
+      [g.ground, g.graph, g.units, g.buildings, g.massing, g.signs].forEach((l) => l?.dispose());
       if (g.traffic) {
         peopleView.remove(g.traffic);
         traffic.remove(g.traffic);
@@ -613,6 +616,9 @@ async function start(): Promise<void> {
       for (const g of visible) {
         if (g.lines && !g.graph) g.graph = createFlatLayer(gl, g.lines, { mode: gl.LINES, colors: CLASS_COLORS_RGB, bias: 1 });
         g.graph?.draw(f, g.model);
+        // Shops' units, outlined on their floors, seen through their buildings (no depth test).
+        if (g.unitOutlines && !g.units) g.units = createFlatLayer(gl, g.unitOutlines, { mode: gl.LINES, colors: UNIT_COLOR });
+        g.units?.draw(f, g.model);
       }
     }
     status.frames++;
@@ -789,6 +795,19 @@ function handData(foot: OnFoot): HandData {
 }
 
 /** Adds one car (position and forward direction, in the view frame) to a model's instances. */
+/** Shop units' outlines as lines, a little above their floors. */
+function unitOutlines(u: Units): FlatMesh {
+  const n = u.points.length / 2, positions = new Float32Array(3 * n), indices = new Uint32Array(2 * n);
+  for (let k = 0; k < u.count; k++) {
+    const a = u.pointStart[k]!, e = u.pointStart[k + 1]!;
+    for (let p = a; p < e; p++) {
+      positions.set([u.points[2 * p]!, u.points[2 * p + 1]!, u.z[k]! + 0.1], 3 * p);
+      indices.set([p, p + 1 < e ? p + 1 : a], 2 * p);
+    }
+  }
+  return { positions, dims: 3, material: new Uint8Array(n), indices };
+}
+
 /** A cell's doors as door props, in the view frame (`model`: the cell's frame → it): set into their openings, facing out. */
 function addDoors(out: CarInstances, d: Doors, model: Float32Array): void {
   const m = model, door = PROPS.indexOf("door");
