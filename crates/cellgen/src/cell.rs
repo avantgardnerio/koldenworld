@@ -553,7 +553,7 @@ pub fn build(
     let lost = (0..kinds.len())
         .map(|k| (clip::area(kinds[k]) - terrain.area(&draped, k as u8, &metric)).abs())
         .fold(0.0, f64::max);
-    let mesh = mesh::build(&draped, &terrain, &rim, face, cell, &COVERS);
+    let mesh = mesh::build(&draped, &terrain, &rim, face, cell, c.level, &COVERS);
     let (flat, cell_m2) = mesh_check(&mesh, &terrain, face, cell);
     log.push(format!(
         "terrain and mesh in {:.0?}: {} heights ({} without data), {} pieces (area lost at most {lost:.3} m² a kind), \

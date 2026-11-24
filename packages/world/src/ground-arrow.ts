@@ -1,6 +1,6 @@
 // A cell's ground from the Rust cell generator (crates/cellgen): every point of the cell one kind of ground
 // (asphalt, markings, grass, sidewalk, lot, water), draped on the terrain, as GPU-ready buffers. A coarse tile's
-// buildings (massing: walls and roofs) come in the same format, their ranges per fine cell instead of per material.
+// buildings (massing: walls and roofs) come in the same format.
 //
 //   ground.arrow (a row per vertex)            ground_triangles.arrow (a row per triangle)
 //   position  fixed_size_list<float32, 3>       vertices  fixed_size_list<uint16, 3> (under 65,536 vertices)
@@ -9,7 +9,8 @@
 //
 // Normals are × 127 with a zero fourth, as the GPU takes them (normalized bytes).
 // Positions and normals are in the cell's frame (cellFrame); triangles are counterclockwise from above and sorted by
-// material, with each material's range of triangles in the schema metadata.
+// child cell (the 64 three levels down, Hilbert order), with each child's range of triangles in the schema metadata,
+// so a viewer can leave out the children it has finer ground (or buildings) for.
 
 import { column, readTable, values } from "./arrow-util.ts";
 
@@ -20,7 +21,7 @@ export interface CellGround {
   shade: Uint8Array;        // no per-vertex variation: all 0
   indices: Uint16Array | Uint32Array;
   materials: string[];      // "asphalt", "yellow", "white", "grass", "sidewalk", "lot", "water"
-  ranges: [material: number, first: number, count: number][];  // in triangles; a coarse tile's buildings: [fine cell 0..64, …]
+  ranges: [child: number, first: number, count: number][];  // in triangles, per child cell 0..64
 }
 
 export function groundFromArrow(ground: Uint8Array, triangles: Uint8Array): CellGround {

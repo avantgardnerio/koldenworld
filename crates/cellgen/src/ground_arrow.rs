@@ -8,9 +8,10 @@
 //!
 //! Normals are × 127 with a zero fourth (as the GPU takes them: normalized bytes, four to a vertex). Positions and
 //! normals are in the cell's ENU frame (x east, y north, z up, from its center on the ellipsoid, as the
-//! TS cellFrame). Triangles are sorted by material; the schema metadata (values JSON-encoded) holds the cell's token,
-//! the frame's origin, the materials' names, and each material's range of triangles (for a coarse tile's buildings,
-//! each fine cell's range instead: [child, first triangle, triangles], child 0..64 within the tile).
+//! TS cellFrame). Triangles are sorted by child cell (the cell's 64 three levels down); the schema metadata (values
+//! JSON-encoded) holds the cell's token, the frame's origin, the materials' names, and each child's range of triangles
+//! ([child, first triangle, triangles]), so a viewer can leave out the children it has finer ground (or, for a coarse
+//! tile's buildings, finer buildings) for.
 
 use crate::mesh::Mesh;
 use arrow_array::{

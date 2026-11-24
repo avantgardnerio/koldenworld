@@ -158,13 +158,27 @@ function bounds(positions: Float32Array, flat: number, more?: Float32Array): { c
 }
 
 /**
- * A coarse tile's 64 fine cells (three levels down), by the index its massing knows them by: the three levels'
- * Hilbert positions, the bits just below the tile's own.
+ * A tile's 64 cells three levels down (a coarse tile's fine cells, a far tile's coarse tiles), by the index its ground
+ * and massing ranges know them by: the three levels' Hilbert positions, the bits just below the tile's own.
  */
-function fineChildren(tile: CellId): CellId[] {
+function children(tile: CellId): CellId[] {
   const lsb = (level: number) => 1n << BigInt(2 * (30 - level));
-  const prefix = tile ^ lsb(COARSE_LEVEL), shift = BigInt(2 * (30 - CELL_LEVEL) + 1);
-  return Array.from({ length: 64 }, (_, i) => prefix | (BigInt(i) << shift) | lsb(CELL_LEVEL));
+  const level = cellLevel(tile), prefix = tile ^ lsb(level), shift = BigInt(2 * (30 - (level + 3)) + 1);
+  return Array.from({ length: 64 }, (_, i) => prefix | (BigInt(i) << shift) | lsb(level + 3));
+}
+
+/**
+ * Into `runs`, the (first index, index count) pairs of the ranges (child, first triangle, triangles) whose child
+ * `skip` doesn't leave out, neighbors in the index buffer as one run; returns how many.
+ */
+function runsWithout(ranges: [number, number, number][], skip: (child: number) => boolean, runs: Uint32Array): number {
+  let n = 0;
+  for (const [child, first, count] of ranges) {
+    if (skip(child)) continue;
+    if (n > 0 && runs[2 * n - 2]! + runs[2 * n - 1]! === 3 * first) runs[2 * n - 1]! += 3 * count;
+    else [runs[2 * n], runs[2 * n + 1], n] = [3 * first, 3 * count, n + 1];
+  }
+  return n;
 }
 
 /** Farthest horizontal distance of interleaved points from the origin. */
@@ -179,9 +193,10 @@ interface CellGpu {
   coarse: boolean;  // a coarse or far tile: ground (and a coarse tile's massing)
   far?: boolean;    // a far tile: drawn where coarse tiles aren't
   massing?: SolidLayer;  // a coarse tile's buildings, merged; a shape hides where its fine cell is loaded
-  children?: CellId[];   // a coarse tile's 64 fine cells, by the index its massing knows them by
+  children?: CellId[];   // a coarse or far tile's 64 cells three levels down, by the index its ranges know them by
+  groundRanges?: [child: number, first: number, count: number][];  // a coarse or far tile's ground triangles per child
   massingRanges?: [child: number, first: number, count: number][];  // the massing's triangles per fine cell
-  runs?: Uint32Array;    // this frame's massing to draw: (first index, index count) pairs, reused
+  runs?: Uint32Array;    // this frame's ground or massing to draw: (first index, index count) pairs, reused
   missing: boolean;
   radius: number;  // bounding sphere around (0, 0, centerZ) in the frame, m: the ground, roads, building tops
   centerZ: number;
@@ -247,8 +262,9 @@ async function start(): Promise<void> {
         frame, coarse: true, far: !coarseTile, missing: false, model: new Float32Array(16), terrain: flatTerrain(),
         ground: createSolidLayer(gl!, mesh, GROUND), ...sphere,
         massing: massing && createSolidLayer(gl!, massing, MASSING),
-        massingRanges: massing?.ranges, runs: massing && new Uint32Array(2 * massing.ranges.length),
-        children: coarseTile ? fineChildren(cell) : undefined,
+        groundRanges: mesh.ranges, massingRanges: massing?.ranges,
+        runs: new Uint32Array(2 * Math.max(mesh.ranges.length, massing?.ranges.length ?? 0)),
+        children: children(cell),
         counts: { ...zero, surfaceTriangles: mesh.indices.length / 3, buildingTriangles: massing ? massing.indices.length / 3 : 0 },
       };
     }
@@ -495,18 +511,23 @@ async function start(): Promise<void> {
     });
     status.cells.drawn = visible.length;
     // The ground first (airports are part of it), then buildings; everything depth-tested.
-    // Finest first: fine ground marks the stencil; coarse ground draws only where it isn't marked, and marks too; far
-    // ground draws only where neither did. Each tier shows only where the finer ones haven't loaded.
+    // Finest first. A coarse or far tile leaves out its children that are loaded (its ground there is coarser, and
+    // can poke up through theirs where its terrain is higher). Then the stencil, for the seams: fine ground marks it;
+    // coarse ground draws only where it isn't marked, and marks too; far ground draws only where neither did.
     gl.enable(gl.STENCIL_TEST);
     gl.stencilFunc(gl.ALWAYS, 1, 0xff);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
     const drawn = status.drawn;
     drawn.ground = drawn.buildings = drawn.massing = 0;
     for (const g of visible) if (!g.coarse) drawn.ground += g.ground.draw(f, g.model, SUN);
+    const coarser = (g: CellGpu) => {
+      const n = runsWithout(g.groundRanges!, (child) => !!streamer.get(g.children![child]!), g.runs!);
+      return g.ground.draw(f, g.model, SUN, g.runs, n);
+    };
     gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
-    for (const g of visible) if (g.coarse && !g.far) drawn.ground += g.ground.draw(f, g.model, SUN);
+    for (const g of visible) if (g.coarse && !g.far) drawn.ground += coarser(g);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-    for (const g of visible) if (g.far) drawn.ground += g.ground.draw(f, g.model, SUN);
+    for (const g of visible) if (g.far) drawn.ground += coarser(g);
     gl.disable(gl.STENCIL_TEST);
     for (const g of visible) drawn.buildings += g.buildings?.draw(f, g.model, SUN) ?? 0;
     // Coarse tiles' massing, less the shapes in fine cells that have their own buildings.
@@ -516,14 +537,11 @@ async function start(): Promise<void> {
       // The tile's nearest point: its frame's origin, in the view frame, less its bounding sphere.
       const m = g.model;
       if (Math.hypot(m[12]! + m[8]! * g.centerZ, m[13]! + m[9]! * g.centerZ, m[14]! + m[10]! * g.centerZ) - g.radius > MASSING_DISTANCE) continue;
-      // The fine cells without their own buildings loaded, neighbors in the index buffer as one run.
-      let n = 0;
-      for (const [child, first, count] of massingRanges) {
+      // The fine cells without their own buildings loaded.
+      const n = runsWithout(massingRanges, (child) => {
         const fine = streamer.get(children[child]!);
-        if (fine && !fine.missing) continue;
-        if (n > 0 && runs[2 * n - 2]! + runs[2 * n - 1]! === 3 * first) runs[2 * n - 1]! += 3 * count;
-        else [runs[2 * n], runs[2 * n + 1], n] = [3 * first, 3 * count, n + 1];
-      }
+        return !!fine && !fine.missing;
+      }, runs);
       drawn.massing += massing.draw(f, g.model, SUN, runs, n);
     }
     for (const g of visible) g.signs?.draw(f, g.model, SUN);

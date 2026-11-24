@@ -1,6 +1,6 @@
 //! The draped ground as GPU buffers: positions (f32, in the cell's ENU frame: x east, y north, z up, from its center
 //! on the ellipsoid, as the TS cellFrame), normals (i8 × 127, and a zero to make four bytes, as the GPU takes them), a
-//! material per vertex (the kind), and indices, one range per kind. Each piece is triangulated with earcut, holes and
+//! material per vertex (the kind), and indices, one range per child cell (of the 64 three levels down). Each piece is triangulated with earcut, holes and
 //! all; every vertex of a piece lies in one flat terrain triangle, and its normal is interpolated across that triangle
 //! from the lattice's smooth normals at its corners (central differences, from a lattice with a rim outside the cell,
 //! so neighbors agree along their edge). Vertices alike in all three (position, normal, material) are one vertex. Open ground (lots) takes its material from its triangle's land
@@ -20,7 +20,7 @@ pub struct Mesh {
     pub material: Vec<u8>,
     pub indices: Vec<u32>,
     pub child: Vec<u8>, // per vertex while building massing: which of the tile's 64 fine cells (not written)
-    pub ranges: Vec<[u32; 3]>, // per kind present: kind, first index, index count
+    pub ranges: Vec<[u32; 3]>, // per child cell present (0..64, three levels down): child, first index, index count
     pub failed: usize,  // pieces earcut couldn't triangulate
 }
 
@@ -40,6 +40,7 @@ pub fn build(
     rim: &[f64],
     face: u32,
     cell: [f64; 4],
+    level: u32,
     covers: &Covers,
 ) -> Mesh {
     let (clat, clon) =
@@ -126,9 +127,21 @@ pub fn build(
         }
     };
 
+    // Which of the cell's 64 children (three levels down, numbered as the massing's) a terrain triangle lies in: by its
+    // square's middle. The lattice is a multiple of 8 squares across, so a square never straddles two.
+    let shift = 61 - 2 * (level + 3);
+    let child_of = |tri: u32| {
+        let square = (tri / 2) as usize;
+        let st = [
+            cell[0] + (cell[2] - cell[0]) * ((square % n) as f64 + 0.5) / n as f64,
+            cell[1] + (cell[3] - cell[1]) * ((square / n) as f64 + 0.5) / n as f64,
+        ];
+        ((s2::cell_id(face, st, level + 3) >> shift) & 63) as usize
+    };
+
     let mut mesh = Mesh::default();
-    // Triangles by material, so each material is one range.
-    let mut buckets: Vec<Vec<u32>> = Vec::new();
+    // Triangles by child cell, so each child is one range: a viewer leaves out the children it has finer ground for.
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 64];
     let mut welded: HashMap<([u32; 3], [i8; 3], u8), u32> = HashMap::new();
     let ring = |p: usize| d.start[p] as usize..d.start[p + 1] as usize;
     let mut p = 0;
@@ -139,10 +152,7 @@ pub fn build(
             .take_while(|&q| d.kind[q] == kind && d.tri[q] == tri)
             .collect();
         p += group.len();
-        let mat = material(kind, tri);
-        if buckets.len() <= mat as usize {
-            buckets.resize(mat as usize + 1, Vec::new());
-        }
+        let (mat, child) = (material(kind, tri), child_of(tri));
         for &o in group.iter().filter(|&&q| d.outer[q] as usize == q) {
             let mine: Vec<usize> = group
                 .iter()
@@ -196,15 +206,15 @@ pub fn build(
                 let [a, b, c] = [a, b, c].map(|k| ids[k]);
                 // Two corners at one point (earcut keeps a ring's repeated points): no triangle.
                 if a != b && b != c && a != c {
-                    buckets[mat as usize].extend([a, b, c]);
+                    buckets[child].extend([a, b, c]);
                 }
             }
         }
     }
-    for (mat, indices) in buckets.into_iter().enumerate() {
+    for (child, indices) in buckets.into_iter().enumerate() {
         if !indices.is_empty() {
             mesh.ranges
-                .push([mat as u32, mesh.indices.len() as u32, indices.len() as u32]);
+                .push([child as u32, mesh.indices.len() as u32, indices.len() as u32]);
             mesh.indices.extend(indices);
         }
     }
