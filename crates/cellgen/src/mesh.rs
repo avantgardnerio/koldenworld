@@ -21,7 +21,7 @@ pub struct Mesh {
     pub indices: Vec<u32>,
     pub child: Vec<u8>, // per vertex while building massing: which of the tile's 64 fine cells (not written)
     pub ranges: Vec<[u32; 3]>, // per child cell present (0..64, three levels down): child, first index, index count
-    pub failed: usize,  // pieces earcut couldn't triangulate
+    pub failed: usize,         // pieces earcut couldn't triangulate
 }
 
 /// The materials open ground becomes: the lot kind (grass) and the kinds for forest, rock and snow.
@@ -213,8 +213,11 @@ pub fn build(
     }
     for (child, indices) in buckets.into_iter().enumerate() {
         if !indices.is_empty() {
-            mesh.ranges
-                .push([child as u32, mesh.indices.len() as u32, indices.len() as u32]);
+            mesh.ranges.push([
+                child as u32,
+                mesh.indices.len() as u32,
+                indices.len() as u32,
+            ]);
             mesh.indices.extend(indices);
         }
     }
