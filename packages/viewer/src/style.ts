@@ -17,6 +17,8 @@ export const GROUND = palette([
 
 /** vec3 per massing material from the Rust cell generator (a coarse tile's buildings): wall, roof. */
 export const MASSING = palette(["#d2c6b2", "#8e7e6e"]);
+/** Inside shops (world's INTERIOR): the floor, the walls, the ceiling. */
+export const INTERIOR_COLORS = palette(["#8b6b4e", "#e8e1cf", "#f2f0ea"]);
 /** The graph overlay's shop units. */
 export const UNIT_COLOR = palette(["#ff4fd8"]);
 

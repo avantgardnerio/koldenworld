@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBuildings, buildingMesh, buildPois, businessSigns, enuFrame, enuProjection, enuUnprojection, poisFromArrow, poisToArrow,
-  charityWeight, DOOR, placeVagrants, SHOPFRONT, shopUnits, SIGN, UNIT, VAGRANTS, type BuildingInput, type PoiInput,
+  charityWeight, DOOR, interiorMesh, placeVagrants, SHOPFRONT, shopUnits, SIGN, UNIT, VAGRANTS, wallGrid, type BuildingInput, type PoiInput,
 } from "../src/index.ts";
 
 const toLonLat = enuUnprojection(enuFrame({ lat: 0, lon: 0, h: 0 }));
@@ -17,6 +17,19 @@ const poi = (osmId: number, x: number, y: number, name: string, kind = "cafe"): 
   const [lon, lat] = toLonLat(x, y);
   return { osmId, category: "amenity", kind, name, brand: null, lon, lat };
 };
+
+/** The area of a mesh's triangles facing n (wound counterclockwise seen from there), of those whose first corner's x passes. */
+function areaFacing(m: { positions: Float32Array; indices: ArrayLike<number> }, n: [number, number, number], keep = (_x: number) => true): number {
+  let area = 0;
+  for (let t = 0; t < m.indices.length; t += 3) {
+    const [a, b, c] = [0, 1, 2].map((k) => Array.from(m.positions.subarray(3 * m.indices[t + k]!, 3 * m.indices[t + k]! + 3)));
+    const [u, v] = [b!.map((x, k) => x - a![k]!), c!.map((x, k) => x - a![k]!)];
+    const cross = [u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!];
+    const len = Math.hypot(...cross);
+    if (keep(a![0]!) && len > 0 && cross.every((x, k) => Math.abs(x / len - n[k]!) < 1e-6)) area += len / 2;
+  }
+  return area;
+}
 
 describe("businesses", () => {
   it("assigns a business to the building it's in, or the nearest within reach, else drops it", () => {
@@ -61,17 +74,7 @@ describe("businesses", () => {
     expect([doors.building[0], doors.x[0], doors.y[0], doors.ux[0], doors.uy[0]]).toEqual([0, signs[0]!.x, 0, 1, 0]);
     // The south wall's area facing out (−y), and the reveal's faces (into the opening ±x, the lintel down).
     const m = buildingMesh(buildings, undefined, doors);
-    const facing = (n: [number, number, number]) => {
-      let area = 0;
-      for (let t = 0; t < m.indices.length; t += 3) {
-        const [a, b, c] = [0, 1, 2].map((k) => Array.from(m.positions.subarray(3 * m.indices[t + k]!, 3 * m.indices[t + k]! + 3)));
-        const [u, v] = [b!.map((x, k) => x - a![k]!), c!.map((x, k) => x - a![k]!)];
-        const cross = [u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!];
-        const len = Math.hypot(...cross);
-        if (a![0]! < 50 && len > 0 && cross.every((x, k) => Math.abs(x / len - n[k]!) < 1e-6)) area += len / 2;
-      }
-      return area;
-    };
+    const facing = (n: [number, number, number]) => areaFacing(m, n, (x) => x < 50);
     expect(facing([0, -1, 0])).toBeCloseTo(30 * 8 - DOOR.width * DOOR.height, 4);
     expect(facing([1, 0, 0]) - 20 * 8).toBeCloseTo(DOOR.reveal * DOOR.height, 4);  // the east wall, and a jamb
     expect(facing([-1, 0, 0]) - 20 * 8).toBeCloseTo(DOOR.reveal * DOOR.height, 4);
@@ -103,6 +106,33 @@ describe("businesses", () => {
     expect(unitArea(u, west)).toBeCloseTo(mid * 20, 3);
     expect(unitArea(u, east)).toBeCloseTo((30 - mid) * 20, 3);
     expect([...d.poi].sort()).toEqual([0, 1]);
+  });
+
+  it("opens the walls at doors, walls the shop in, and builds its shell facing in", () => {
+    const d = businessSigns(buildings, buildPois([poi(1, 10, 2, "Cafe")], buildings, origin)).doors;
+    const u = shopUnits(buildings, d);
+    // Collisions: the south wall less the doorway; the shop's own wall behind it, at the reveal, less the doorway.
+    const g = wallGrid(buildings, d, u);
+    const along = (y: number) => {
+      let len = 0;
+      for (let s = 0; s < g.segments.length; s += 4) {
+        const [ax, ay, bx, by] = [g.segments[s]!, g.segments[s + 1]!, g.segments[s + 2]!, g.segments[s + 3]!];
+        if (ax < 50 && Math.abs(ay - y) < 1e-4 && Math.abs(by - y) < 1e-4) len += Math.abs(bx - ax);  // the shop's
+      }
+      return len;
+    };
+    expect(along(0)).toBeCloseTo(30 - DOOR.width, 4);
+    expect(along(DOOR.reveal)).toBeCloseTo(30 - DOOR.width, 4);
+    // The shell: floor up and ceiling down, 30 × 20 m; the door's wall facing into the room, open at the door with the
+    // wall over it; the other walls facing in too.
+    const m = interiorMesh(u, 0, d), z = u.z[0]!, h = u.height[0]!;
+    const [z0, z1] = [z + 0.03, z + h - 0.05];
+    expect(areaFacing(m, [0, 0, 1])).toBeCloseTo(600, 3);
+    expect(areaFacing(m, [0, 0, -1])).toBeCloseTo(600, 3);
+    expect(areaFacing(m, [0, 1, 0])).toBeCloseTo((30 - DOOR.width) * (z1 - z0) + DOOR.width * (z1 - z - DOOR.height), 3);
+    expect(areaFacing(m, [0, -1, 0])).toBeCloseTo(30 * (z1 - z0), 3);
+    // (The side walls reach the outline's corners, past the door's wall, where it hides them.)
+    expect(areaFacing(m, [1, 0, 0]) + areaFacing(m, [-1, 0, 0])).toBeCloseTo(2 * 20 * (z1 - z0), 3);
   });
 
   it("round-trips through Arrow", () => {

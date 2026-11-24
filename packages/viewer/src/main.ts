@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, PROPS, PROPS_PALETTE, propMeshes, shopUnits, type Doors, type Units, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, interiorMesh, PROPS, PROPS_PALETTE, propMeshes, shopUnits, type Doors, type Units, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -53,7 +53,7 @@ import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { CAR_HALF, emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
 import {
-  BUILDING_COLORS_RGB, BUILDING_WINDOWS, GROUND, PAINTS, CLASS_COLORS_RGB, fogRange, MASSING, SKY, SUN, UNIT_COLOR,
+  BUILDING_COLORS_RGB, BUILDING_WINDOWS, GROUND, PAINTS, CLASS_COLORS_RGB, fogRange, INTERIOR_COLORS, MASSING, SKY, SUN, UNIT_COLOR,
 } from "./style.ts";
 
 export interface ViewerStatus {
@@ -117,6 +117,10 @@ const MOUSE_WHEEL = 1 / 400, MOUSE_PEDAL = 1 / 300;
 const CAR_LOD_DISTANCE = 250;
 /** Cells within this distance (m) get traffic (cars are ~2,100 triangles each); beyond 1.3× it they lose it. */
 const CAR_DISTANCE = 1500;
+/** A shop's inside is built once the camera is this close to its door, m. */
+const INTERIOR_DISTANCE = 30;
+/** A shop's door opens for someone on foot this close to it (m), taking this long (s). */
+const DOOR_OPENS = 2.5, DOOR_SECONDS = 0.6;
 /** Cells within this distance (m) get people on their sidewalks; beyond 1.3× it they lose them. */
 const PEOPLE_DISTANCE = 800;
 
@@ -209,6 +213,9 @@ interface CellGpu {
   buildings?: SolidLayer;
   signs?: SignLayer;
   doors?: Doors;         // a fine cell's businesses' doors, drawn as props in their doorways
+  doorOpen?: Float32Array;  // per door: how far open, 0 (shut) .. 1 (slid aside into the wall)
+  shopUnits?: Units;        // each door's share of its building, inside
+  interiors?: Map<number, SolidLayer>;  // by unit: its shell, built once the camera comes near its door
   unitOutlines?: FlatMesh;  // the graph overlay's shop units (each door's share of its building), uploaded on first use
   units?: FlatLayer;
   walls?: WallGrid;      // a fine cell's building walls, for the driven car's collisions
@@ -298,7 +305,8 @@ async function start(): Promise<void> {
     for (let i = 0; i < c.buildings.count; i++) z1 = Math.max(z1, c.buildings.base[i]! + c.buildings.height[i]!);
     // Where the cell's cars, people and vagrants start.
     const seed = Number(BigInt.asUintN(32, cell ^ (cell >> 32n)));
-    const walls = wallGrid(c.buildings), unproject = enuUnprojection(frame);
+    const units = shopUnits(c.buildings, shops.doors);
+    const walls = wallGrid(c.buildings, shops.doors, units), unproject = enuUnprojection(frame);
     const roam: RoamCell = {
       model, walls, visible: false, placements: placeVagrants(c.pois, c.buildings, seed ^ 0x85ebca6b),
       ground: (x, y) => {
@@ -326,8 +334,9 @@ async function start(): Promise<void> {
         })),
         ...businessSignBoxes(shops.signs),
       ]),
-      doors: shops.doors,
-      unitOutlines: unitOutlines(shopUnits(c.buildings, shops.doors)),
+      doors: shops.doors, doorOpen: new Float32Array(shops.doors.count),
+      shopUnits: units, interiors: new Map(),
+      unitOutlines: unitOutlines(units),
       walls,
       vagrants: roam.placements.count > 0 ? vagrantView.add(roam) : undefined,
       counts: {
@@ -341,7 +350,7 @@ async function start(): Promise<void> {
     load: loadCell,
     concurrency: 16,  // the cell server builds on a pool of workers
     dispose: (g) => {
-      [g.ground, g.graph, g.units, g.buildings, g.massing, g.signs].forEach((l) => l?.dispose());
+      [g.ground, g.graph, g.units, g.buildings, g.massing, g.signs, ...(g.interiors?.values() ?? [])].forEach((l) => l?.dispose());
       if (g.traffic) {
         peopleView.remove(g.traffic);
         traffic.remove(g.traffic);
@@ -553,8 +562,24 @@ async function start(): Promise<void> {
       drawn.massing += massing.draw(f, g.model, SUN, runs, n);
     }
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
+    // Shops: their doors (sliding open for someone on foot close by), and the insides of those near the camera.
     propInstances.count.fill(0);
-    for (const g of visible) if (g.doors) addDoors(propInstances, g.doors, g.model);
+    const walker = foot?.pose(vf).pos;
+    for (const g of visible) {
+      if (!g.doors || !g.doorOpen || !g.shopUnits || !g.interiors) continue;
+      openDoors(g.doors, g.doorOpen, g.model, walker, dt);
+      addDoors(propInstances, g.doors, g.doorOpen, g.model);
+      const u = g.shopUnits;
+      for (let k = 0; k < u.count; k++) {
+        let inside = g.interiors.get(k);
+        if (!inside) {
+          const d = u.door[k]!, at = toView(g.model, g.doors.x[d]!, g.doors.y[d]!, g.doors.z[d]!);
+          if (Math.hypot(at[0] - f.eye[0], at[1] - f.eye[1], at[2] - f.eye[2]) > INTERIOR_DISTANCE) continue;
+          g.interiors.set(k, inside = createSolidLayer(gl, interiorMesh(u, k, g.doors), INTERIOR_COLORS));
+        }
+        drawn.buildings += inside.draw(f, g.model, SUN);
+      }
+    }
     propRenderer.draw(f, SUN, 0, propInstances);
     let carTriangles = 0;
     if (carRenderer && (showCars || drive || foot)) {
@@ -808,16 +833,30 @@ function unitOutlines(u: Units): FlatMesh {
   return { positions, dims: 3, material: new Uint8Array(n), indices };
 }
 
-/** A cell's doors as door props, in the view frame (`model`: the cell's frame → it): set into their openings, facing out. */
-function addDoors(out: CarInstances, d: Doors, model: Float32Array): void {
+/** A point in a cell's frame, in the view frame (`m`: the cell's frame → it, column-major). */
+function toView(m: Float32Array, x: number, y: number, z: number): Vec3 {
+  return [m[0]! * x + m[4]! * y + m[8]! * z + m[12]!, m[1]! * x + m[5]! * y + m[9]! * z + m[13]!, m[2]! * x + m[6]! * y + m[10]! * z + m[14]!];
+}
+
+/** Each door eases toward open while someone on foot (at `walker`, in the view frame) is within DOOR_OPENS of it, else shut. */
+function openDoors(d: Doors, open: Float32Array, model: Float32Array, walker: Vec3 | undefined, dt: number): void {
+  for (let k = 0; k < d.count; k++) {
+    const at = walker && toView(model, d.x[k]!, d.y[k]!, d.z[k]!);
+    const near = at !== undefined && Math.hypot(at[0] - walker![0], at[1] - walker![1], at[2] - walker![2]) < DOOR_OPENS;
+    open[k] = Math.min(1, Math.max(0, open[k]! + (near ? 1 : -1) * dt / DOOR_SECONDS));
+  }
+}
+
+/**
+ * A cell's doors as door props, in the view frame (`model`: the cell's frame → it): set into their openings, facing
+ * out, each slid along its wall as far as it's open.
+ */
+function addDoors(out: CarInstances, d: Doors, open: Float32Array, model: Float32Array): void {
   const m = model, door = PROPS.indexOf("door");
   for (let k = 0; k < d.count; k++) {
-    const [ux, uy] = [d.ux[k]!, d.uy[k]!];
-    const [x, y, z] = [d.x[k]! - uy * DOOR.inset, d.y[k]! + ux * DOOR.inset, d.z[k]!];
-    addCar(out, door, {
-      pos: [m[0]! * x + m[4]! * y + m[8]! * z + m[12]!, m[1]! * x + m[5]! * y + m[9]! * z + m[13]!, m[2]! * x + m[6]! * y + m[10]! * z + m[14]!],
-      fwd: [m[0]! * uy - m[4]! * ux, m[1]! * uy - m[5]! * ux, m[2]! * uy - m[6]! * ux],
-    });
+    const [ux, uy] = [d.ux[k]!, d.uy[k]!], slide = open[k]! * DOOR.width;
+    const [x, y, z] = [d.x[k]! - uy * DOOR.inset + ux * slide, d.y[k]! + ux * DOOR.inset + uy * slide, d.z[k]!];
+    addCar(out, door, { pos: toView(m, x, y, z), fwd: [m[0]! * uy - m[4]! * ux, m[1]! * uy - m[5]! * ux, m[2]! * uy - m[6]! * ux] });
   }
 }
 

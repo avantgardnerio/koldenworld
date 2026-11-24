@@ -37,8 +37,11 @@ import type { GlobeCamera } from "./globe-camera.ts";
 import { CAR_TOP, LocalWorld, rectangle, type LoadedWorld } from "./local-world.ts";
 import { POSE, type PersonInstances } from "./person-layer.ts";
 
-/** The camera: this far behind (m, along where it looks) and up from their feet to where it looks, never under the ground. */
-const VIEW = { back: 3.8, eye: 2.3, clearance: 0.5, pitch: [-1.2, 0.5] as const, start: -0.2 };
+/**
+ * The camera: this far behind (m, along where it looks) and up from their feet to where it looks, never under the
+ * ground; kept `wall` m short of a wall behind them, and no nearer than `nearest`.
+ */
+const VIEW = { back: 3.8, eye: 2.3, clearance: 0.5, wall: 0.3, nearest: 0.4, pitch: [-1.2, 0.5] as const, start: -0.2 };
 /** Getting out: how far from the car's middle, to its left (the driver's side), m. */
 const DOOR = 1.7;
 /** Getting back in: within this far of the car's middle, m. */
@@ -170,9 +173,9 @@ export class OnFoot {
     const [sx, sy] = this.sway, [yaw, pitch] = [this.yaw - sx, this.pitch + sy], cq = Math.cos(pitch);
     const d: Vec3 = [Math.cos(yaw) * cq, Math.sin(yaw) * cq, Math.sin(pitch)];
     // The camera, as camera() places it (without its ground clearance), and the ray from beside them.
-    const [cx, cy] = [Math.cos(this.yaw) * cp, Math.sin(this.yaw) * cp];
-    const eye: Vec3 = [w.x - cx * VIEW.back, w.y - cy * VIEW.back, w.z + VIEW.eye - Math.sin(this.pitch) * VIEW.back];
-    const from: Vec3 = [eye[0] + d[0] * VIEW.back, eye[1] + d[1] * VIEW.back, eye[2] + d[2] * VIEW.back];
+    const [cx, cy] = [Math.cos(this.yaw) * cp, Math.sin(this.yaw) * cp], back = this.cameraDistance();
+    const eye: Vec3 = [w.x - cx * back, w.y - cy * back, w.z + VIEW.eye - Math.sin(this.pitch) * back];
+    const from: Vec3 = [eye[0] + d[0] * back, eye[1] + d[1] * back, eye[2] + d[2] * back];
     const { t, hit } = this.local.raycast(from, d, gun.range);
     const end: Vec3 = [from[0] + d[0] * t, from[1] + d[1] * t, from[2] + d[2] * t];
     // Facing where the camera looks; the right shoulder, and the arm from it toward where the shot stopped.
@@ -220,10 +223,23 @@ export class OnFoot {
   /** The camera: behind and above them, looking where it looks; never under the ground. */
   camera(): GlobeCamera {
     const w = this.walker, c = Math.cos(this.pitch);
-    const [x, y] = [w.x - Math.cos(this.yaw) * c * VIEW.back, w.y - Math.sin(this.yaw) * c * VIEW.back];
+    const head: Vec3 = [w.x, w.y, w.z + VIEW.eye], back: Vec3 = [-Math.cos(this.yaw) * c, -Math.sin(this.yaw) * c, -Math.sin(this.pitch)];
+    const dist = this.cameraDistance();
+    const [x, y] = [head[0] + back[0] * dist, head[1] + back[1] * dist];
     const { lat, lon } = this.local.geodetic(x, y);
-    const h = Math.max(w.z + VIEW.eye - Math.sin(this.pitch) * VIEW.back, this.w.groundAt(lat, lon) + VIEW.clearance);
+    const h = Math.max(head[2] + back[2] * dist, this.w.groundAt(lat, lon) + VIEW.clearance);
     return { lat, lon, h, rot: fromYawPitch(this.yaw - Math.PI / 2, this.pitch) };
+  }
+
+  /**
+   * How far back from above their head the camera is: VIEW.back, but no further than the first wall that way (a
+   * shop's, say), less a margin.
+   */
+  private cameraDistance(): number {
+    const w = this.walker, c = Math.cos(this.pitch);
+    const head: Vec3 = [w.x, w.y, w.z + VIEW.eye], back: Vec3 = [-Math.cos(this.yaw) * c, -Math.sin(this.yaw) * c, -Math.sin(this.pitch)];
+    const { t } = this.local.raycast(head, back, VIEW.back + VIEW.wall);
+    return Math.max(VIEW.nearest, Math.min(VIEW.back, t - VIEW.wall));
   }
 
   /** Where they stand and face, in a view frame. */

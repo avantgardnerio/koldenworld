@@ -7,6 +7,7 @@
 // A concave footprint can leave a unit in pieces joined along a clip line.
 // Courtyards are ignored. Pure.
 
+import { floorHeight } from "./building-mesh.ts";
 import type { Buildings } from "./buildings.ts";
 import { doorIndex, type Doors } from "./doors.ts";
 import { clipConvex } from "./roofs.ts";
@@ -15,18 +16,19 @@ import { clipConvex } from "./roofs.ts";
 export const UNIT = { depth: 20, minArea: 4 };
 
 /** Units, as columns: each its door's (a row of Doors), its outline points[pointStart[u] .. pointStart[u + 1]) (x, y
- * pairs, m in the cell's frame, counterclockwise, open), its floor at height z. */
+ * pairs, m in the cell's frame, counterclockwise, open), its floor at height z and its ceiling `height` m above. */
 export interface Units {
   count: number;
   door: Uint32Array;
   z: Float32Array;
+  height: Float32Array;
   pointStart: Uint32Array;
   points: Float32Array;
 }
 
 export function shopUnits(b: Buildings, d: Doors): Units {
   const index = doorIndex(d, b.count);
-  const out = { door: [] as number[], z: [] as number[], pointStart: [0], points: [] as number[] };
+  const out = { door: [] as number[], z: [] as number[], height: [] as number[], pointStart: [0], points: [] as number[] };
   for (let i = 0; i < b.count; i++) {
     const n0 = index.start[i]!, n1 = index.start[i + 1]!;
     if (n0 === n1) continue;
@@ -47,12 +49,13 @@ export function shopUnits(b: Buildings, d: Doors): Units {
       if (poly.length < 6 || area(poly) < UNIT.minArea) continue;
       out.door.push(k);
       out.z.push(d.z[k]!);
+      out.height.push(floorHeight(b, i));
       out.points.push(...poly);
       out.pointStart.push(out.points.length / 2);
     }
   }
   return {
-    count: out.door.length, door: Uint32Array.from(out.door), z: Float32Array.from(out.z),
+    count: out.door.length, door: Uint32Array.from(out.door), z: Float32Array.from(out.z), height: Float32Array.from(out.height),
     pointStart: Uint32Array.from(out.pointStart), points: Float32Array.from(out.points),
   };
 }

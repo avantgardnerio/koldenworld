@@ -1,10 +1,14 @@
 // A cell's walls for collisions: every edge of every ground-level building
-// polygon (outer rings and courtyards; parts up in the air are skipped), as
+// polygon (outer rings and courtyards; parts up in the air are skipped), open
+// at businesses' doorways, and the walls inside shops (their units), as
 // segments in the cell's frame, in a uniform grid of BUCKET-m squares (CSR:
 // each bucket's segments). Built once per cell; a query visits each segment
 // near a box once.
 
 import type { Buildings } from "./buildings.ts";
+import { doorIndex, doorsAlong, NO_DOORS, type Doors } from "./doors.ts";
+import { unitWalls } from "./interiors.ts";
+import type { Units } from "./units.ts";
 
 /** Grid squares, m. */
 export const BUCKET = 16;
@@ -24,18 +28,37 @@ export interface WallGrid {
   query: number;
 }
 
-export function wallGrid(b: Buildings): WallGrid {
+/** Buildings' walls, open where their doors are; with units, the shops' inside walls (interiors.ts unitWalls) too. */
+export function wallGrid(b: Buildings, doors: Doors = NO_DOORS, units?: Units): WallGrid {
   const seg: number[] = [], top: number[] = [];
+  const byBuilding = doorIndex(doors, b.count);
   for (let i = 0; i < b.count; i++) {
     if (b.minHeight[i]! > GROUND) continue;
     for (let r = b.ringStart[i]!; r < b.ringStart[i + 1]!; r++) {
       const a = b.pointStart[r]!, e = b.pointStart[r + 1]!;
       for (let k = a; k < e; k++) {
         const j = k + 1 < e ? k + 1 : a;  // rings are open
-        seg.push(b.points[2 * k]!, b.points[2 * k + 1]!, b.points[2 * j]!, b.points[2 * j + 1]!);
-        top.push(b.base[i]! + b.height[i]!);
+        const [px, py, qx, qy] = [b.points[2 * k]!, b.points[2 * k + 1]!, b.points[2 * j]!, b.points[2 * j + 1]!];
+        const len = Math.hypot(qx - px, qy - py), [dx, dy] = len > 0 ? [(qx - px) / len, (qy - py) / len] : [0, 0];
+        // The wall between its doors.
+        let from = 0;
+        const openings = len > 0 ? doorsAlong(doors, byBuilding, i, px, py, dx, dy, len) : [];
+        for (let o = 0; o <= openings.length; o += 2) {
+          const to = o < openings.length ? openings[o]! : len;
+          if (to > from || len === 0) {
+            seg.push(px + dx * from, py + dy * from, px + dx * to, py + dy * to);
+            top.push(b.base[i]! + b.height[i]!);
+          }
+          from = openings[o + 1] ?? len;
+        }
       }
     }
+  }
+  for (let k = 0; k < (units?.count ?? 0); k++) {
+    unitWalls(units!, k, doors, (ax, ay, bx, by) => {
+      seg.push(ax, ay, bx, by);
+      top.push(units!.z[k]! + units!.height[k]!);
+    });
   }
   const segments = Float32Array.from(seg), n = segments.length / 4;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
