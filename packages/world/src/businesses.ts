@@ -3,10 +3,13 @@
 // building's outer wall nearest its point (walls at least MIN_WALL long first),
 // centered where the point projects onto the wall; several on one wall are laid
 // out in order, squeezed to fit. Signs sit just above the shopfront glass, at
-// the top of the ground floor. Pure: the viewer turns them into a mesh.
+// the top of the ground floor. Each sign on a building at street level gets a
+// door under it (DOOR), kept inside its wall and clear of the door before it.
+// Pure: the viewer turns them into a mesh.
 
 import { floorHeight } from "./building-mesh.ts";
 import type { Buildings } from "./buildings.ts";
+import { DOOR, type Doors } from "./doors.ts";
 import { POI_CATEGORIES, type Pois } from "./pois.ts";
 
 /** Walls shorter than this (m) get a sign only if the building has nothing longer. */
@@ -25,9 +28,10 @@ export interface BusinessSign {
   kind: string;       // "cafe", "bakery", ...
 }
 
-/** A cell's business signs, and per building row whether it has a shopfront (1). */
-export function businessSigns(b: Buildings, p: Pois): { signs: BusinessSign[]; shopfront: Uint8Array } {
+/** A cell's business signs, per building row whether it has a shopfront (1), and the doors under the signs. */
+export function businessSigns(b: Buildings, p: Pois): { signs: BusinessSign[]; shopfront: Uint8Array; doors: Doors } {
   const shopfront = new Uint8Array(b.count);
+  const door = { building: [] as number[], x: [] as number[], y: [] as number[], z: [] as number[], ux: [] as number[], uy: [] as number[] };
   // Each building's businesses, by wall.
   const byWall = new Map<string, { i: number; t: number }[]>();
   for (let k = 0; k < p.count; k++) {
@@ -67,8 +71,11 @@ export function businessSigns(b: Buildings, p: Pois): { signs: BusinessSign[]; s
     });
     const overflow = cursor - SIGN.gap - (len - SIGN.gap);
     if (overflow > 0) for (let j = 0; j < centers.length; j++) centers[j] = centers[j]! - overflow;
-    const z = b.base[i]! + b.minHeight[i]! + floorHeight(b, i) - 0.4;
+    const foot = b.base[i]! + b.minHeight[i]!, z = foot + floorHeight(b, i) - 0.4;
     const out = SIGN.out + SIGN.thick / 2;
+    const doors = b.minHeight[i]! <= DOOR.street && floorHeight(b, i) >= DOOR.height + DOOR.headroom;
+    const [lo, hi] = [DOOR.margin + DOOR.width / 2, len - DOOR.margin - DOOR.width / 2];
+    let lastDoor = -Infinity;
     list.forEach(({ i: k }, j) => {
       if (widths[j]! < 0.5) return;  // no room left on this wall
       signs.push({
@@ -76,9 +83,25 @@ export function businessSigns(b: Buildings, p: Pois): { signs: BusinessSign[]; s
         dir: Math.atan2(uy, ux), width: widths[j]!, text: text(k),
         category: POI_CATEGORIES[p.category[k]!]!, kind: p.kinds[p.kind[k]!]!,
       });
+      // Its door: under it, inside the wall, clear of the last one.
+      const c = Math.min(hi, Math.max(lo, centers[j]!));
+      if (!doors || lo > hi || c - lastDoor < DOOR.width + DOOR.margin) return;
+      lastDoor = c;
+      door.building.push(i);
+      door.x.push(px + ux * c);
+      door.y.push(py + uy * c);
+      door.z.push(foot);
+      door.ux.push(ux);
+      door.uy.push(uy);
     });
   }
-  return { signs, shopfront };
+  return {
+    signs, shopfront,
+    doors: {
+      count: door.building.length, building: Int32Array.from(door.building), x: Float32Array.from(door.x),
+      y: Float32Array.from(door.y), z: Float32Array.from(door.z), ux: Float32Array.from(door.ux), uy: Float32Array.from(door.uy),
+    },
+  };
 }
 
 /** The outer wall of building row i nearest a point (walls MIN_WALL long first), and where along it (0..1). */

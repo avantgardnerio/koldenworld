@@ -61,4 +61,6 @@ export {
   type Pois,
 } from "./pois.ts";
 export { businessSigns, SIGN, type BusinessSign } from "./businesses.ts";
+export { DOOR, doorIndex, doorsAlong, NO_DOORS, type DoorIndex, type Doors } from "./doors.ts";
+export { PROPS, PROPS_PALETTE, propMeshes } from "./props.ts";
 export { BUCKET, queryWalls, wallGrid, type WallGrid } from "./wall-grid.ts";

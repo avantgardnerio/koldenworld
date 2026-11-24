@@ -26,7 +26,7 @@
 // what was drawn without decoding screenshots.
 
 import {
-  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
+  AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, PROPS, PROPS_PALETTE, propMeshes, type Doors, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
   frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
@@ -208,6 +208,7 @@ interface CellGpu {
   graph?: FlatLayer;
   buildings?: SolidLayer;
   signs?: SignLayer;
+  doors?: Doors;         // a fine cell's businesses' doors, drawn as props in their doorways
   walls?: WallGrid;      // a fine cell's building walls, for the driven car's collisions
   vagrants?: RoamCell;   // a fine cell with places that draw vagrants, in their sim
   counts: { nodes: number; edges: number; surfaceTriangles: number; buildings: number; buildingTriangles: number };
@@ -289,7 +290,7 @@ async function start(): Promise<void> {
     const lines = roadLineMesh(c.graph);
     // Businesses: shopfronts on their buildings' ground floors, and a sign each.
     const shops = businessSigns(c.buildings, c.pois);
-    const tris = buildingMesh(c.buildings, shops.shopfront);
+    const tris = buildingMesh(c.buildings, shops.shopfront, shops.doors);
     // Owned objects reach past the cell's edge; roads by up to half their width beyond their centerlines.
     const flat = Math.max(groundReach, reach(c.graph.points, 2) + 20, reach(c.buildings.points, 2));
     for (let i = 0; i < c.buildings.count; i++) z1 = Math.max(z1, c.buildings.base[i]! + c.buildings.height[i]!);
@@ -323,6 +324,7 @@ async function start(): Promise<void> {
         })),
         ...businessSignBoxes(shops.signs),
       ]),
+      doors: shops.doors,
       walls,
       vagrants: roam.placements.count > 0 ? vagrantView.add(roam) : undefined,
       counts: {
@@ -377,6 +379,9 @@ async function start(): Promise<void> {
   const planeRenderer = showPlanes
     ? createCarRenderer(gl, createCarModels(gl, aircraftMeshes(), new ImageData(new Uint8ClampedArray(AIRCRAFT_PALETTE), 16, 1)))
     : undefined;
+  // Props: doors in their doorways (as the cars are drawn, a model per kind of prop).
+  const propRenderer = createCarRenderer(gl, createCarModels(gl, propMeshes(), new ImageData(new Uint8ClampedArray(PROPS_PALETTE), 16, 1)));
+  const propInstances: CarInstances = { data: PROPS.map(() => new Float32Array(6 * 256)), count: PROPS.map(() => 0) };
   // People (P): rows of them walking the sidewalks.
   const personRenderer = createPersonRenderer(gl, personMesh(), new ImageData(new Uint8ClampedArray(PEOPLE_PALETTE), 16, 1));
   const personInstances: PersonInstances = { data: new Float32Array(PERSON_STRIDE * 64), count: 0 };
@@ -545,6 +550,9 @@ async function start(): Promise<void> {
       drawn.massing += massing.draw(f, g.model, SUN, runs, n);
     }
     for (const g of visible) g.signs?.draw(f, g.model, SUN);
+    propInstances.count.fill(0);
+    for (const g of visible) if (g.doors) addDoors(propInstances, g.doors, g.model);
+    propRenderer.draw(f, SUN, 0, propInstances);
     let carTriangles = 0;
     if (carRenderer && (showCars || drive || foot)) {
       if (showCars) {
@@ -781,6 +789,19 @@ function handData(foot: OnFoot): HandData {
 }
 
 /** Adds one car (position and forward direction, in the view frame) to a model's instances. */
+/** A cell's doors as door props, in the view frame (`model`: the cell's frame → it): set into their openings, facing out. */
+function addDoors(out: CarInstances, d: Doors, model: Float32Array): void {
+  const m = model, door = PROPS.indexOf("door");
+  for (let k = 0; k < d.count; k++) {
+    const [ux, uy] = [d.ux[k]!, d.uy[k]!];
+    const [x, y, z] = [d.x[k]! - uy * DOOR.inset, d.y[k]! + ux * DOOR.inset, d.z[k]!];
+    addCar(out, door, {
+      pos: [m[0]! * x + m[4]! * y + m[8]! * z + m[12]!, m[1]! * x + m[5]! * y + m[9]! * z + m[13]!, m[2]! * x + m[6]! * y + m[10]! * z + m[14]!],
+      fwd: [m[0]! * uy - m[4]! * ux, m[1]! * uy - m[5]! * ux, m[2]! * uy - m[6]! * ux],
+    });
+  }
+}
+
 function addCar(out: CarInstances, model: number, { pos, fwd }: { pos: Vec3; fwd: Vec3 }): void {
   let data = out.data[model]!;
   const o = 6 * out.count[model]!++;

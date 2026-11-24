@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBuildings, buildingMesh, buildPois, businessSigns, enuFrame, enuProjection, enuUnprojection, poisFromArrow, poisToArrow,
-  charityWeight, placeVagrants, SHOPFRONT, SIGN, VAGRANTS, type BuildingInput, type PoiInput,
+  charityWeight, DOOR, placeVagrants, SHOPFRONT, SIGN, VAGRANTS, type BuildingInput, type PoiInput,
 } from "../src/index.ts";
 
 const toLonLat = enuUnprojection(enuFrame({ lat: 0, lon: 0, h: 0 }));
@@ -52,6 +52,30 @@ describe("businesses", () => {
     }
     expect(shopWalls).toEqual(new Set([SHOPFRONT]));
     expect(houseWalls).toEqual(new Set([0]));
+  });
+
+  it("puts a door under each sign, its opening cut out of the wall and lined", () => {
+    const p = buildPois([poi(1, 10, 2, "Cafe")], buildings, origin);
+    const { signs, doors } = businessSigns(buildings, p);
+    expect(doors.count).toBe(1);
+    expect([doors.building[0], doors.x[0], doors.y[0], doors.ux[0], doors.uy[0]]).toEqual([0, signs[0]!.x, 0, 1, 0]);
+    // The south wall's area facing out (−y), and the reveal's faces (into the opening ±x, the lintel down).
+    const m = buildingMesh(buildings, undefined, doors);
+    const facing = (n: [number, number, number]) => {
+      let area = 0;
+      for (let t = 0; t < m.indices.length; t += 3) {
+        const [a, b, c] = [0, 1, 2].map((k) => Array.from(m.positions.subarray(3 * m.indices[t + k]!, 3 * m.indices[t + k]! + 3)));
+        const [u, v] = [b!.map((x, k) => x - a![k]!), c!.map((x, k) => x - a![k]!)];
+        const cross = [u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!];
+        const len = Math.hypot(...cross);
+        if (a![0]! < 50 && len > 0 && cross.every((x, k) => Math.abs(x / len - n[k]!) < 1e-6)) area += len / 2;
+      }
+      return area;
+    };
+    expect(facing([0, -1, 0])).toBeCloseTo(30 * 8 - DOOR.width * DOOR.height, 4);
+    expect(facing([1, 0, 0]) - 20 * 8).toBeCloseTo(DOOR.reveal * DOOR.height, 4);  // the east wall, and a jamb
+    expect(facing([-1, 0, 0]) - 20 * 8).toBeCloseTo(DOOR.reveal * DOOR.height, 4);
+    expect(facing([0, 0, -1])).toBeCloseTo(DOOR.reveal * DOOR.width, 4);
   });
 
   it("round-trips through Arrow", () => {

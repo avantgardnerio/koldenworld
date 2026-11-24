@@ -28,7 +28,10 @@
 
 import earcut from "earcut";
 import { BUILDING_GROUPS, buildingGroup, ROOF_SHAPES, signedArea2, type BuildingGroup, type Buildings } from "./buildings.ts";
+import { DOOR, doorIndex, doorsAlong, NO_DOORS, type Doors } from "./doors.ts";
 import { clipConvex, pitchedRoof, type PitchedRoof, type RoofShape } from "./roofs.ts";
+
+type Vec3 = [number, number, number];
 
 export interface BuildingMesh {
   positions: Float32Array;  // x, y, z, m
@@ -86,8 +89,12 @@ export function idShade(osmId: number): number {
   return (h ^ (h >>> 13)) & 255;
 }
 
-/** shopfront: per building row, 1 where it has businesses (its ground floor becomes a shopfront). */
-export function buildingMesh(b: Buildings, shopfront?: Uint8Array): BuildingMesh {
+/**
+ * shopfront: per building row, 1 where it has businesses (its ground floor becomes a shopfront); doors: openings cut
+ * into the walls (businesses' doors), each lined with a reveal.
+ */
+export function buildingMesh(b: Buildings, shopfront?: Uint8Array, doors: Doors = NO_DOORS): BuildingMesh {
+  const byBuilding = doorIndex(doors, b.count);
   const totalPoints = b.points.length / 2;
   // Room for 6 vertices per wall (with its dark band) and one per roof point; grown if pitched roofs need more.
   let vertexCap = 7 * totalPoints + 64, indexCap = 16 * totalPoints + 64;
@@ -208,27 +215,78 @@ export function buildingMesh(b: Buildings, shopfront?: Uint8Array): BuildingMesh
         const bays = style ? Math.floor(len / style.bay) : 0;
         const offset = bays > 0 ? (len - bays * style!.bay) / 2 : 0;
         Object.assign(at, { span: bays * (style?.bay ?? 0), wall, floor: bays > 0 ? style!.floor : 0 });
-        const corners = (zi: number, zj: number, ao: number) => {
-          at.u = -offset;
-          at.v = zi - bottom;
-          const first = vertex(xi, yi, zi, si, ti, 0, wallMat, sh, ao);
-          at.u = len - offset;
-          at.v = zj - bottom;
-          vertex(xj, yj, zj, sj, tj, 0, wallMat, sh, ao);
-          return first;
+        const [dx, dy] = [(xj - xi) / len, (yj - yi) / len], [ex, ey] = [edges[2 * k]!, edges[2 * k + 1]!];
+        const darker = (z: number) => (band > bottom ? Math.min(1, Math.max(0, (band - z) / (band - bottom))) : 0);
+        // The wall from u0 to u1 m along it, from height `from` up: rows of two vertices (u0, u1) at `from`, the band's
+        // top, the top; each pair of rows a quad, counterclockwise from outside. Its ends take the corners' normals.
+        const column = (u0: number, u1: number, from: number) => {
+          const [x0, y0, x1, y1] = [xi + dx * u0, yi + dy * u0, xi + dx * u1, yi + dy * u1];
+          const [n0x, n0y] = u0 === 0 ? [si, ti] : [ex, ey], [n1x, n1y] = u1 === len ? [sj, tj] : [ex, ey];
+          const row = (z0: number, z1: number, ao: number) => {
+            at.u = u0 - offset;
+            at.v = z0 - bottom;
+            const first = vertex(x0, y0, z0, n0x, n0y, 0, wallMat, sh, ao);
+            at.u = u1 - offset;
+            at.v = z1 - bottom;
+            vertex(x1, y1, z1, n1x, n1y, 0, wallMat, sh, ao);
+            return first;
+          };
+          room(6, 12);
+          const q = row(from, from, darker(from));
+          let rows = 1;
+          if (band > from) {
+            row(band, band, 0);
+            rows++;
+          }
+          if (band < top) {
+            // Up to the roof: the eaves, or a gable's slope.
+            row(top + rise(x0, y0), top + rise(x1, y1), 0);
+            rows++;
+          }
+          for (let r = 0; r + 1 < rows; r++) {
+            const a = q + 2 * r;
+            indices.set([a, a + 1, a + 3, a, a + 3, a + 2], ix);
+            ix += 6;
+          }
         };
-        // Rows of two vertices (i, j): the base, the band's top, the top; each pair of rows a quad, counterclockwise
-        // from outside.
-        const q = corners(bottom, bottom, 1);
-        corners(band, band, 0);
-        indices.set([q, q + 1, q + 3, q, q + 3, q + 2], ix);
-        ix += 6;
-        if (band < top) {
-          // Up to the roof: the eaves, or a gable's slope.
-          corners(top + rise(xi, yi), top + rise(xj, yj), 0);
-          indices.set([q + 2, q + 3, q + 5, q + 2, q + 5, q + 4], ix);
+        // A quad with normal n (no windows), wound counterclockwise seen from where n points.
+        const face = (c: Vec3[], n: Vec3) => {
+          const [a, p, q] = [c[0]!, c[1]!, c[2]!];
+          const cross: Vec3 = [
+            (p[1] - a[1]) * (q[2] - a[2]) - (p[2] - a[2]) * (q[1] - a[1]),
+            (p[2] - a[2]) * (q[0] - a[0]) - (p[0] - a[0]) * (q[2] - a[2]),
+            (p[0] - a[0]) * (q[1] - a[1]) - (p[1] - a[1]) * (q[0] - a[0]),
+          ];
+          const ccw = cross[0] * n[0] + cross[1] * n[1] + cross[2] * n[2] > 0;
+          const save = { span: at.span, floor: at.floor };
+          Object.assign(at, { u: 0, v: 0, span: 0, floor: 0 });
+          room(4, 6);
+          const first = v;
+          for (const [x, y, z] of c) vertex(x, y, z, n[0], n[1], n[2], wallMat, sh, darker(z));
+          indices.set(ccw ? [first, first + 1, first + 2, first, first + 2, first + 3]
+            : [first, first + 2, first + 1, first, first + 3, first + 2], ix);
           ix += 6;
+          Object.assign(at, save);
+        };
+        // A door's opening, DOOR.reveal deep: its jambs facing into it, the lintel facing down.
+        const reveal = (d0: number, d1: number) => {
+          const head = bottom + DOOR.height, [rx, ry] = [-ex * DOOR.reveal, -ey * DOOR.reveal];
+          const p = (u: number, z: number, inner: boolean): Vec3 => [xi + dx * u + (inner ? rx : 0), yi + dy * u + (inner ? ry : 0), z];
+          face([p(d0, bottom, false), p(d0, bottom, true), p(d0, head, true), p(d0, head, false)], [dx, dy, 0]);
+          face([p(d1, bottom, false), p(d1, bottom, true), p(d1, head, true), p(d1, head, false)], [-dx, -dy, 0]);
+          face([p(d0, head, false), p(d0, head, true), p(d1, head, true), p(d1, head, false)], [0, 0, -1]);
+        };
+        // The wall around its doors: full height between them, above each from its top; each opening lined.
+        let from = 0;
+        const openings = doorsAlong(doors, byBuilding, i, xi, yi, dx, dy, len);
+        for (let o = 0; o < openings.length; o += 2) {
+          const [d0, d1] = [openings[o]!, openings[o + 1]!];
+          column(from, d0, bottom);
+          column(d0, d1, bottom + DOOR.height);
+          reveal(d0, d1);
+          from = d1;
         }
+        column(from, len, bottom);
       }
     }
 
