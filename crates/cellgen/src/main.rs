@@ -16,6 +16,7 @@ mod graph;
 mod ground_arrow;
 mod import;
 mod landcover;
+mod local;
 mod markings;
 mod mesh;
 mod osm;
@@ -220,10 +221,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some((lat, lon)) => fetch::fetch_cell(lat.trim().parse()?, lon.trim().parse()?),
                 None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
             };
-            let body = tokio::runtime::Runtime::new()?
-                .block_on(fetch::fetch(&data_dir()?, &c, |m| println!("{m}")))
-                .map_err(|e| e.to_string())?;
-            let osm = osm::parse(&body)?;
+            let osm = if args.get(2).map(String::as_str) == Some("--local") {
+                let cells = data_dir()?.join("osm").join("cells");
+                let loaded = local::load(&cells, &c)
+                    .map_err(|e| e.to_string())?
+                    .ok_or(format!(
+                        "no cell files for {} under {}",
+                        c.token,
+                        cells.display()
+                    ))?;
+                println!(
+                    "{}: {} nodes, {} ways from {}",
+                    c.token,
+                    loaded.osm.nodes(),
+                    loaded.osm.ways(),
+                    loaded.source
+                );
+                loaded.osm
+            } else {
+                let body = tokio::runtime::Runtime::new()?
+                    .block_on(fetch::fetch(&data_dir()?, &c, |m| println!("{m}")))
+                    .map_err(|e| e.to_string())?;
+                let osm = osm::parse(&body)?;
+                println!(
+                    "{}: {} nodes, {} ways, {} relations from Overpass",
+                    c.token,
+                    osm.nodes(),
+                    osm.ways(),
+                    osm.relations()
+                );
+                osm
+            };
             let started = std::time::Instant::now();
             let x = extract::extract(&osm);
             let parts = x.buildings.is_part.iter().filter(|&&p| p).count();
@@ -304,14 +332,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let started = std::time::Instant::now();
             let counts = tokio::runtime::Runtime::new()?
                 .block_on(async {
-                    let raw = fetch::fetch(&data, &c, |m| println!("{m}")).await?;
-                    let osm = osm::parse(&raw)?;
+                    // --local: from the cell files under data/osm/cells (local.rs), not Overpass.
+                    let (raw, source, osm) = if args.get(2).map(String::as_str) == Some("--local") {
+                        let cells = data.join("osm").join("cells");
+                        let loaded = local::load(&cells, &c)?.ok_or(format!(
+                            "no cell files for {} under {}",
+                            c.token,
+                            cells.display()
+                        ))?;
+                        (loaded.identity, loaded.source, loaded.osm)
+                    } else {
+                        let raw = fetch::fetch(&data, &c, |m| println!("{m}")).await?;
+                        let osm = osm::parse(&raw)?;
+                        (raw, fetch::OVERPASS_URL.to_string(), osm)
+                    };
                     let x = extract::extract(&osm);
                     let area = format!("s2:{}", c.token);
                     let snapshot = import::Snapshot {
                         area: &area,
                         bbox: fetch::padded_box(&c),
-                        source: fetch::OVERPASS_URL,
+                        source: &source,
                         raw: &raw,
                     };
                     let mut db = pool.get().await?;

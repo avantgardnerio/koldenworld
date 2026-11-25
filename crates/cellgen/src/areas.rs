@@ -2,9 +2,12 @@
 //! draws from is fetched (Overpass, cached in data/osm/s2/) and imported into Postgres, once. Downloads run one at a
 //! time (Overpass is a shared server); asking for an area being imported waits for that import. What's imported is
 //! known from osm_fetches (area "s2:<token>"), read once at the start.
+//!
+//! An area whose level-6 cell has local cell files (data/osm/cells/, see local.rs) is loaded from them instead of
+//! Overpass: no download, no waiting on other areas.
 
 use crate::cell::Cell;
-use crate::{extract, fetch, import, osm, s2};
+use crate::{extract, fetch, import, local, osm, s2};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -76,14 +79,24 @@ impl Areas {
             .into());
         }
         let started = std::time::Instant::now();
-        let raw = {
-            let _one = self.download.lock().await;
-            fetch::fetch(&self.data, &c, |m| println!("{m}")).await?
+        let cells = self.data.join("osm").join("cells");
+        let c2 = Cell::from_token(token).ok_or_else(|| format!("{token} isn't a cell token"))?;
+        let loaded = tokio::task::spawn_blocking(move || local::load(&cells, &c2)).await??;
+        let (raw, source, osm) = match loaded {
+            Some(loaded) => (loaded.identity, loaded.source, Some(loaded.osm)),
+            None => {
+                let _one = self.download.lock().await;
+                let raw = fetch::fetch(&self.data, &c, |m| println!("{m}")).await?;
+                (raw, fetch::OVERPASS_URL.to_string(), None)
+            }
         };
         let fetched = started.elapsed();
         let raw2 = raw.clone();
         let (osm, x) = tokio::task::spawn_blocking(move || -> Result<_, Error> {
-            let osm = osm::parse(&raw2)?;
+            let osm = match osm {
+                Some(osm) => osm,
+                None => osm::parse(&raw2)?,
+            };
             let x = extract::extract(&osm);
             Ok((osm, x))
         })
@@ -92,7 +105,7 @@ impl Areas {
         let snapshot = import::Snapshot {
             area: &area,
             bbox: fetch::padded_box(&c),
-            source: fetch::OVERPASS_URL,
+            source: &source,
             raw: &raw,
         };
         let mut db = self.pool.get().await?;

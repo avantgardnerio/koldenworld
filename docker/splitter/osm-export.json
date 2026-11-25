@@ -1,0 +1,4 @@
+{
+    "linear_tags": ["highway", "railway", "waterway", "barrier", "aeroway", "aerialway", "power", "man_made", "route", "natural=coastline", "natural=cliff", "natural=ridge"],
+    "area_tags": true
+}
