@@ -48,6 +48,7 @@ import { createPersonRenderer, PERSON_STRIDE, POSE, type PersonInstances } from 
 import { createFlatLayer, type FlatLayer, type FlatMesh } from "./flat-layer.ts";
 import { formatGlobeHash, localCamera, parseGlobeHash, stepGlobe, viewFrame, type GlobeCamera } from "./globe-camera.ts";
 import { attachInput, isIdle } from "./input.ts";
+import { attachPlaceSearch } from "./place-search.ts";
 import { businessSignBoxes, createSignLayer, streetSignBoxes, type SignLayer } from "./sign-layer.ts";
 import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
@@ -803,6 +804,10 @@ async function start(): Promise<void> {
   addEventListener("hashchange", () => {
     const c = parseGlobeHash(location.hash);
     if (c) { camera = c; render(); }
+  });
+  attachPlaceSearch(canvas, () => {
+    const [, , , yaw, pitch] = formatGlobeHash(camera).slice(1).split(",").map(Number);
+    return [yaw!, pitch!];
   });
   new ResizeObserver(() => render()).observe(canvas);
 

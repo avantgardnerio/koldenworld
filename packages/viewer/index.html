@@ -14,12 +14,18 @@
     #help { left: 8px; top: 6px; }
     #hud { left: 8px; bottom: 4px; }
     footer a { color: inherit; }
+    #place-search { position: fixed; left: 50%; top: 40px; transform: translateX(-50%); display: flex; gap: 8px;
+      align-items: center; font: 14px system-ui, sans-serif; color: #1d2a38; background: rgb(255 255 255 / 0.9);
+      padding: 6px 10px; border-radius: 6px; box-shadow: 0 2px 8px rgb(0 0 0 / 0.25); }
+    #place-search[hidden] { display: none; }
+    #place-search input { width: 360px; font: inherit; padding: 4px 6px; border: 1px solid #8aa0b8; border-radius: 4px; }
+    #place-search span { max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
   </style>
 </head>
 <body>
   <canvas></canvas>
   <canvas id="instruments"></canvas>
-  <div id="help">click to look (Esc releases) · WASD / arrows move · E / Space up · Q / C down · Shift fast · V drive · F on foot (Space jumps; 1–3 hands/pistol/rifle, hold the right button to aim, then left fires; R reloads) · G road graph</div>
+  <div id="help">click to look (Esc releases) · WASD / arrows move · E / Space up · Q / C down · Shift fast · V drive · F on foot (Space jumps; 1–3 hands/pistol/rifle, hold the right button to aim, then left fires; R reloads) · G road graph · / go to a place</div>
   <div id="hud"></div>
   <footer>© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · aircraft <a href="https://adsb.fi/">adsb.fi</a></footer>
   <script type="module" src="/src/main.ts"></script>
