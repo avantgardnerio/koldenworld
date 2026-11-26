@@ -1,0 +1,20 @@
+# The game's image repository: a stack of its own, since an image must be pushed before the function using it
+# (app.yml) can be created. Deployed by deploy/deploy.sh.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: koldenworld image repository (ECR)
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: koldenworld
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules": [{"rulePriority": 1, "description": "keep the last 20 images",
+                      "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 20},
+                      "action": {"type": "expire"}}]}
+
+Outputs:
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri

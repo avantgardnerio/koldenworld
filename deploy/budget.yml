@@ -1,0 +1,36 @@
+# A monthly cost alarm for the account: the game is public with no auth (until Google OAuth), so anyone can make
+# cells build. Email at 80% of the limit actually spent, and when the month is forecast to pass it. Deployed once:
+#   aws cloudformation deploy --stack-name koldenworld-budget --template-file deploy/budget.yml --region us-east-2
+AWSTemplateFormatVersion: "2010-09-09"
+Description: koldenworld monthly cost alarm (AWS Budgets)
+
+Parameters:
+  LimitUsd:
+    Type: Number
+    Default: 100
+  Email:
+    Type: String
+    Default: bgardner@squarelabs.net
+
+Resources:
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: koldenworld-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit: { Amount: !Ref LimitUsd, Unit: USD }
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref Email }]
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref Email }]

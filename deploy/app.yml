@@ -1,0 +1,204 @@
+# The game on Lambda (docs/serverless-plan.md, step 2): the container image (Dockerfile) as an arm64 function, reached
+# only through CloudFront (the function URL takes IAM auth, and only this distribution may sign for it: Origin Access
+# Control), with a role that reads the data and reads and writes built cells in the bucket. Deployed by
+# deploy/deploy.sh with the image just pushed.
+#
+# Public (no auth) until Google OAuth: anyone can make cells build, so concurrency is capped and CloudFront caches
+# what it can. The server is GET-only (OAC would need signed bodies otherwise).
+AWSTemplateFormatVersion: "2010-09-09"
+Description: koldenworld game server (Lambda behind CloudFront)
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: The image to run (repository URI and tag), arm64.
+  Bucket:
+    Type: String
+    Default: koldenworld-data-2
+  Domain:
+    Type: String
+    Default: koldenworld.squarelabs.net
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: The ACM certificate for Domain (cert.yml, us-east-1), once issued; empty serves only the
+      distribution's own *.cloudfront.net name.
+  MaxConcurrency:
+    Type: Number
+    Default: 5
+    Description: Instances at most, which caps what anonymous traffic can cost.
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref CertificateArn, ""]]
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The inputs: OSM cell files and elevation.
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub arn:aws:s3:::${Bucket}/osm/*
+                  - !Sub arn:aws:s3:::${Bucket}/dem/*
+              # Built cells: read, and written on a miss.
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub arn:aws:s3:::${Bucket}/cells/*
+              # Listing makes a missing object a 404 (not a 403): how a missing cell or ocean tile is told.
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${Bucket}
+
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/koldenworld
+      RetentionInDays: 14
+
+  Function:
+    Type: AWS::Lambda::Function
+    DependsOn: Logs
+    Properties:
+      FunctionName: koldenworld
+      PackageType: Image
+      Code: { ImageUri: !Ref ImageUri }
+      Architectures: [arm64]
+      Role: !GetAtt Role.Arn
+      # Memory buys CPU on Lambda; the page and row-group caches take ~800 MB of it.
+      MemorySize: 3008
+      # A cold cell from S3 takes seconds; CloudFront gives up at 60 s anyway.
+      Timeout: 60
+      ReservedConcurrentExecutions: !Ref MaxConcurrency
+
+  Url:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref Function
+      AuthType: AWS_IAM
+
+  # Only this distribution may call the URL: invoking through the URL, and invoking the function (only via the URL).
+  CloudFrontUrl:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+      FunctionUrlAuthType: AWS_IAM
+  CloudFrontInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+      InvokedViaFunctionUrl: true
+
+  OriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: koldenworld-lambda
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # The server answers no-store (so browsers keep nothing on disk); CloudFront keeps copies anyway, by these TTLs.
+  # Cells don't change for a version, and a deploy clears the cache.
+  CellsCache:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: koldenworld-cells
+        MinTTL: 86400
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig: { CookieBehavior: none }
+          HeadersConfig: { HeaderBehavior: none }
+          QueryStringsConfig: { QueryStringBehavior: none }
+  # Live air traffic: everyone shares one upstream call for a few seconds (the sources rate-limit).
+  AircraftCache:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: koldenworld-aircraft
+        MinTTL: 5
+        DefaultTTL: 5
+        MaxTTL: 10
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig: { CookieBehavior: none }
+          HeadersConfig: { HeaderBehavior: none }
+          QueryStringsConfig: { QueryStringBehavior: all }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: koldenworld
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Aliases: !If [HasDomain, [!Ref Domain], !Ref AWS::NoValue]
+        ViewerCertificate: !If
+          - HasDomain
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: lambda
+            # The function URL's host: https://<id>.lambda-url.<region>.on.aws/ → <id>.lambda-url.<region>.on.aws
+            DomainName: !Select [2, !Split ["/", !GetAtt Url.FunctionUrl]]
+            OriginAccessControlId: !GetAtt OriginAccess.Id
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+              # The most CloudFront allows without a quota increase: a cold cell takes seconds, not this.
+              OriginReadTimeout: 60
+        DefaultCacheBehavior:
+          # The viewer's files: CloudFront's managed CachingOptimized (a day without headers; a deploy clears it).
+          TargetOriginId: lambda
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CacheBehaviors:
+          - PathPattern: /ground/*
+            TargetOriginId: lambda
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: !Ref CellsCache
+          - PathPattern: /aircraft
+            TargetOriginId: lambda
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: !Ref AircraftCache
+
+Outputs:
+  DistributionId:
+    Value: !Ref Distribution
+  DistributionDomain:
+    Value: !GetAtt Distribution.DomainName
+  Url:
+    Value: !If [HasDomain, !Sub "https://${Domain}/", !Sub "https://${Distribution.DomainName}/"]

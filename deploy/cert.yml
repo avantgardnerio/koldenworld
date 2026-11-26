@@ -1,0 +1,22 @@
+# The game's TLS certificate, for CloudFront (app.yml): in us-east-1, as CloudFront requires. Exactly
+# koldenworld.squarelabs.net, never a wildcard (one would let this account's certificate stand in for the domain's
+# other hosts). squarelabs.net's DNS is at deSEC, run by the koldenhome session: the validation CNAME (from
+# `aws acm describe-certificate`) is added there by hand, and the stack completes once ACM sees it.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: koldenworld TLS certificate (ACM, for CloudFront)
+
+Parameters:
+  Domain:
+    Type: String
+    Default: koldenworld.squarelabs.net
+
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref Domain
+      ValidationMethod: DNS
+
+Outputs:
+  CertificateArn:
+    Value: !Ref Certificate

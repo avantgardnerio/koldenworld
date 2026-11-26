@@ -15,8 +15,6 @@ export default defineConfig({
   publicDir: process.env.VIEWER_DATA ?? false,
   server: {
     port: 5173,
-    // Demos to friends: Caddy on bgdesktop terminates TLS and basic auth, then proxies here.
-    allowedHosts: ["koldenworld.squarelabs.net"],
     proxy: cellgenServer ? {
       "/aircraft": { target: cellgenServer },
       "/ground": { target: cellgenServer, timeout: 600_000, proxyTimeout: 600_000 },
