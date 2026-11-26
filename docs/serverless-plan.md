@@ -68,11 +68,18 @@ How to do it, one table at a time, the way 1a–1c went:
   (`packages/viewer/vite.config.ts`) at 5175, and delete `packages/cli/src/{server,cells,cell-pool,cell-worker,
   elevation}.ts`, `packages/db`'s loaders, `areas.rs`/`/ensure`/`import.rs`, and the Postgres dependency. Also the
   Postgres code kept only for checking: every `load` in cellgen that queries Postgres (`ways::load_road_ways`,
-  `water::load_water`, `aeroways::load`, `buildings::load`, `pois::load`, marked TEMPORARY where new),
+  `water::load_water`, `aeroways::load`, `buildings::load`, `pois::load`, `building_inputs::load`, marked TEMPORARY
+  where new),
   `cellgen compare`, `cell … --postgres` and `Inputs::load`.
 - **Done in 1d:** `terrain` (served by `cellgen serve`, from the drawn ground's lattice; no 1 m water carve); the POI
   input from the files (`pois.rs`, `charity_weight`). The `pois` table waits for `buildings`: each row is its
-  building's row in that table.
+  building's row in that table. The fine buildings input from the files (`building_inputs.rs`: parts replace the
+  outline holding their point on surface, a port of GEOS's InteriorPointArea; loaded over `reach` so parts past the
+  box are found). Postgres's coordinates came through ST_AsGeoJSON (9 decimals); the files' are full precision.
+  The `buildings` table (`building_table.rs`, draped by `cell::Ground` on the drawn ground's lattices), served by
+  `cellgen serve`; identical to the TS rows where the inputs match. The viewer takes terrain and buildings from
+  `/ground/…` and the rest from the TS server, with no points of interest until `pois` is ported (the TS rows point
+  at the TS server's buildings).
 - **Keep in TS:** everything the browser runs. The viewer generates the near building meshes itself
   (`solid-layer.ts` → building meshes, interiors, furniture); per the fine-buildings rule those stay TS. The viewer
   only imports geodesy, frames, people placement, walls, sign and class constants from `@game/world`.

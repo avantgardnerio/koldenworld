@@ -8,11 +8,12 @@
 //! 5. The terrain lattice's heights, the ground cut by its triangles and draped (terrain.rs), and triangulated into
 //!    buffers in the cell's ENU frame (mesh.rs), checked against the cell's own area at the ground's height.
 
+use crate::building_inputs::{self, BuildingInputs};
 use crate::ways::{ROAD_CLASSES, RoadWays};
 use crate::{
-    aeroways, buildings, clip, crossings, draw, elevation, faces, geodesy, geom, graph,
-    ground_arrow, markings, mesh, polygon, s2, simplify, terrain, terrain_arrow, water, ways,
-    widths,
+    aeroways, building_table, buildings, clip, crossings, draw, elevation, faces, geodesy, geom,
+    graph, ground_arrow, markings, mesh, polygon, s2, simplify, terrain, terrain_arrow, water,
+    ways, widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
 use deadpool_postgres::Pool;
@@ -139,6 +140,7 @@ pub struct Built {
     pub ground: Vec<u8>,
     pub triangles: Vec<u8>,
     pub terrain: Vec<u8>, // terrain.arrow: the lattice the ground is draped on, for what stands on it
+    pub fine_buildings: Option<Vec<u8>>, // a fine cell's buildings.arrow (building_table.rs)
     pub buildings: Option<(Vec<u8>, Vec<u8>)>, // coarse tiles: the massing, as buildings.arrow and buildings_triangles.arrow
     pub log: Vec<String>,
 }
@@ -204,6 +206,7 @@ pub struct Inputs {
     aeroways: aeroways::Aeroways,
     heights: Heights,
     buildings: Option<buildings::Buildings>,
+    fine_buildings: Option<BuildingInputs>, // a fine cell's, for its buildings table
 }
 
 /// An error that can cross an await (loading runs concurrently).
@@ -265,6 +268,7 @@ impl Inputs {
             aeroways,
             heights: Heights::Dem(heights),
             buildings,
+            fine_buildings: None,
         })
     }
 
@@ -304,14 +308,47 @@ impl Inputs {
                 (c.level == COARSE_LEVEL).then(buildings::Buildings::default),
             ),
         };
+        // A fine cell's buildings, with the parts that replace outlines wherever they are (a load over the outlines'
+        // reach), and the heights over every cell they reach into, whole: they're draped on those cells' lattices.
+        let mut region = bbox;
+        let fine_buildings = match (&osm, &x) {
+            (Some(osm), Some(x)) if c.level == s2::CELL_LEVEL => {
+                let reach = building_inputs::reach(x, bbox);
+                let b = match (reach != bbox)
+                    .then(|| crate::local::load_box(&crate::local::cells_dir(data), reach))
+                    .transpose()?
+                    .flatten()
+                {
+                    Some(wider) => BuildingInputs::from_extracted(
+                        &wider,
+                        &crate::extract::extract(&wider),
+                        bbox,
+                    ),
+                    None => BuildingInputs::from_extracted(osm, x, bbox),
+                };
+                for &[lon, lat] in &b.shape.lonlat {
+                    let (face, st) = s2::lat_lon_to_face_st(lat, lon);
+                    let whole = s2::lat_lon_bounds(face, s2::cell_square(st, c.level), 0.001);
+                    region = [
+                        region[0].min(whole[0]),
+                        region[1].min(whole[1]),
+                        region[2].max(whole[2]),
+                        region[3].max(whole[3]),
+                    ];
+                }
+                Some(b)
+            }
+            _ => None,
+        };
         let heights =
-            elevation::Elevation::region(&data.join("dem"), bbox).map_err(|e| e.to_string())?;
+            elevation::Elevation::region(&data.join("dem"), region).map_err(|e| e.to_string())?;
         Ok(Inputs {
             ways,
             water,
             aeroways,
             heights: Heights::Dem(heights),
             buildings,
+            fine_buildings,
         })
     }
 
@@ -324,6 +361,7 @@ impl Inputs {
             aeroways: aeroways::Aeroways::empty(),
             heights: Heights::Flat(height),
             buildings: (c.level == COARSE_LEVEL).then(buildings::Buildings::default),
+            fine_buildings: None,
         }
     }
 }
@@ -369,6 +407,7 @@ pub fn build(
         aeroways,
         heights,
         buildings: owned,
+        fine_buildings,
     } = inputs;
     if let Some(min) = options.min_class {
         ways = ways.keep(|w| ways.class[w] <= min);
@@ -606,7 +645,31 @@ pub fn build(
     let (ground, triangles) = ground_arrow::encode(&mesh, &KINDS, &c.token, center)?;
     let terrain_table = terrain_arrow::encode(&terrain.heights, n, &c.token)?;
 
-    // 6. Coarse tiles: the buildings as massing.
+    // 6. A fine cell's buildings table, draped on the drawn ground (this cell's lattice and its neighbors').
+    let fine_buildings = match &fine_buildings {
+        Some(b) => {
+            let started = Instant::now();
+            let frame = geodesy::Frame::at(center.0, center.1, 0.0);
+            let mut ground = Ground::new(|lat, lon| heights.height(lat, lon), c.level, n);
+            let table = building_table::build(
+                b,
+                |lon, lat| c.owns(lon, lat),
+                &frame,
+                |lat, lon| ground.at(lat, lon),
+            );
+            log.push(format!(
+                "fine buildings in {:.0?}: {} rows from {} inputs, on {} cells' lattices",
+                started.elapsed(),
+                table.osm_id.len(),
+                b.osm_id.len(),
+                ground.lattices.len()
+            ));
+            Some(building_table::encode(&table, &c.token)?)
+        }
+        None => None,
+    };
+
+    // 7. Coarse tiles: the buildings as massing.
     let buildings = match &owned {
         Some(b) => {
             let started = Instant::now();
@@ -681,6 +744,7 @@ pub fn build(
         ground,
         triangles,
         terrain: terrain_table,
+        fine_buildings,
         buildings,
         log,
     })
@@ -732,6 +796,40 @@ fn mesh_check(
         frame.local(geodesy::ecef(lat, lon, mean_h)).truncate()
     });
     (flat, geom::signed_area(ring))
+}
+
+/// The drawn ground anywhere (as the TS groundSampler): the lattice of whichever cell at `level` holds a point,
+/// sampled once per cell by rim_heights, and its triangles' height there. Everything draped with it sits on the ground
+/// as drawn, in this cell and its neighbors.
+pub struct Ground<F> {
+    height: F,
+    level: u32,
+    n: usize,
+    pub lattices: std::collections::HashMap<u64, terrain::Terrain>,
+}
+
+impl<F: Fn(f64, f64) -> f64> Ground<F> {
+    pub fn new(height: F, level: u32, n: usize) -> Ground<F> {
+        Ground {
+            height,
+            level,
+            n,
+            lattices: Default::default(),
+        }
+    }
+
+    /// Metres above the ellipsoid at degrees (lat, lon).
+    pub fn at(&mut self, lat: f64, lon: f64) -> f64 {
+        let (face, st) = s2::lat_lon_to_face_st(lat, lon);
+        let (height, n) = (&self.height, self.n);
+        let square = s2::cell_square(st, self.level);
+        self.lattices
+            .entry(s2::cell_id(face, st, self.level))
+            .or_insert_with(|| {
+                terrain::Terrain::new(n, lattice(&rim_heights(height, face, square, n), n), square)
+            })
+            .height_at(DVec2::from(st))
+    }
 }
 
 /// The ground's heights on the terrain lattice with a one-point rim outside the cell (rows and columns −1 to n + 1, t

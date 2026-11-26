@@ -28,7 +28,7 @@
 import {
   AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, furnish, interiorMesh, layoutFor, POI_CATEGORIES, PROPS, PROPS_PALETTE, propMeshes, shopUnits, type Doors,
   type Furniture, type Layout, type Staff, type Units, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
-  frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
+  emptyPois, frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, NEAR, viewProjection, yawPitch } from "./camera.ts";
@@ -285,8 +285,17 @@ async function start(): Promise<void> {
     const packed = await getBlob(`/cells/${token}.cell`);
     const files = packed && unpackCellFiles(packed);
     const blobs = files ? CELL_TABLES.map((t) => files[t]) : await Promise.all(CELL_TABLES.map((t) => getBlob(`/cells/${token}/${t}.arrow`)));
+    // While the TS cell server is ported (docs/serverless-plan.md, step 1d): terrain and buildings from the Rust
+    // generator. Points of interest point at the TS server's building rows, so none for now: no shopfronts, signs,
+    // doors or vagrants at charities.
+    const [rustTerrain, rustBuildings] = await Promise.all([
+      getBlob(`/ground/${token}/terrain.arrow`), getBlob(`/ground/${token}/buildings.arrow`),
+    ]);
+    blobs[CELL_TABLES.indexOf("terrain")] = rustTerrain;
+    blobs[CELL_TABLES.indexOf("buildings")] = rustBuildings;
     const missing = blobs.some((b) => b === null);
     const c = missing ? null : cellFromArrow(Object.fromEntries(CELL_TABLES.map((t, i) => [t, blobs[i]!])) as unknown as CellFiles);
+    if (c) c.pois = emptyPois();
     if (c && c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);
     const terrain = c?.terrain ?? flatTerrain();
     const mesh = await ground;

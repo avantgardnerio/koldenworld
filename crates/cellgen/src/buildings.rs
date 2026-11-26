@@ -200,7 +200,7 @@ pub fn from_extracted(
 }
 
 /// A building's owner point: the area centroid of its first outer ring (lon, lat), as cell.ts ownerPoint.
-fn owner_point(ring: &[[f64; 2]]) -> [f64; 2] {
+pub fn owner_point(ring: &[[f64; 2]]) -> [f64; 2] {
     let [x0, y0] = ring[0];
     let (mut a, mut cx, mut cy) = (0.0, 0.0, 0.0);
     for w in ring.windows(2) {

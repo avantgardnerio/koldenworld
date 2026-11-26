@@ -1,5 +1,5 @@
 //! The cell server: GET /cells/<token>/ground.arrow, ground_triangles.arrow and terrain.arrow (and a coarse tile's
-//! buildings.arrow and buildings_triangles.arrow), built on a miss and cached as files under data/rust-cells/<token>/:
+//! buildings.arrow and buildings_triangles.arrow massing, a fine cell's buildings.arrow table), built on a miss and cached as files under data/rust-cells/<token>/:
 //! the inputs from the cell files and elevation data (Inputs::from_files), then built, both on Tokio's blocking pool.
 //! Requests for a cell being built wait for that one build.
 //! GET /ensure/<area token> imports an area's OSM into Postgres (areas.rs), for the TS cell server.
@@ -86,12 +86,14 @@ async fn table(
         )
             .into_response();
     };
-    if table.starts_with("buildings") && c.level != cell::COARSE_LEVEL {
-        return (
-            StatusCode::NOT_FOUND,
-            "only coarse tiles have massing (fine cells' buildings come from the TS cell server)\n",
-        )
-            .into_response();
+    // buildings.arrow: a coarse tile's massing or a fine cell's buildings table; triangles only for massing.
+    let has = match table.as_str() {
+        "buildings.arrow" => c.level == cell::COARSE_LEVEL || c.level == crate::s2::CELL_LEVEL,
+        "buildings_triangles.arrow" => c.level == cell::COARSE_LEVEL,
+        _ => true,
+    };
+    if !has {
+        return (StatusCode::NOT_FOUND, "no such table at this level\n").into_response();
     }
     let file = app.cache.join(&token).join(&table);
     if !file.exists() {
@@ -143,6 +145,9 @@ async fn build(app: Arc<App>, c: Cell) -> Result<(), cell::LoadError> {
             ("ground_triangles.arrow", &built.triangles),
             ("terrain.arrow", &built.terrain),
         ];
+        if let Some(b) = &built.fine_buildings {
+            tables.push(("buildings.arrow", b));
+        }
         if let Some((v, t)) = &built.buildings {
             tables.push(("buildings.arrow", v));
             tables.push(("buildings_triangles.arrow", t));

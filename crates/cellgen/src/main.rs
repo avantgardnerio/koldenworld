@@ -1,6 +1,8 @@
 mod aeroways;
 mod areas;
 mod boxes;
+mod building_inputs;
+mod building_table;
 mod buildings;
 mod cell;
 mod clip;
@@ -131,6 +133,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::write(dir.join("ground.arrow"), &built.ground)?;
                 std::fs::write(dir.join("ground_triangles.arrow"), &built.triangles)?;
                 std::fs::write(dir.join("terrain.arrow"), &built.terrain)?;
+                if let Some(b) = &built.fine_buildings {
+                    std::fs::write(dir.join("buildings.arrow"), b)?;
+                }
                 if let Some((v, t)) = &built.buildings {
                     std::fs::write(dir.join("buildings.arrow"), v)?;
                     std::fs::write(dir.join("buildings_triangles.arrow"), t)?;
@@ -427,18 +432,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let [west, south, east, north] = bbox;
             let pool = pool(&db)?;
             let owns = |lon, lat| c.owns(lon, lat);
-            let (db, water, aeroways, buildings, pois) = tokio::runtime::Runtime::new()?
-                .block_on(async {
-                    let client = pool.get().await?;
-                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-                        ways::load_road_ways(&client, west, south, east, north).await?,
-                        water::load_water(&client, west, south, east, north, 0.0).await?,
-                        aeroways::load(&client, bbox).await?,
-                        buildings::load(&client, bbox, owns).await?,
-                        pois::load(&client, bbox).await?,
-                    ))
-                })
-                .map_err(|e| e.to_string())?;
+            let (db, water, aeroways, buildings, pois, building_inputs) =
+                tokio::runtime::Runtime::new()?
+                    .block_on(async {
+                        let client = pool.get().await?;
+                        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+                            ways::load_road_ways(&client, west, south, east, north).await?,
+                            water::load_water(&client, west, south, east, north, 0.0).await?,
+                            aeroways::load(&client, bbox).await?,
+                            buildings::load(&client, bbox, owns).await?,
+                            pois::load(&client, bbox).await?,
+                            building_inputs::load(&client, bbox).await?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
             println!("postgres: {} ways", db.osm_id.len());
             compare_ways(&db, &files);
             let w = water::Water::from_extracted(&osm, &x, bbox, 0.0);
@@ -512,6 +519,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             compare_pois(&pois, &pois::PoiInputs::from_extracted(&osm, &x, bbox));
+            // A fine cell's buildings: the parts replacing an outline can lie past the box, so load over the outlines.
+            let reach = building_inputs::reach(&x, bbox);
+            let cells = local::cells_dir(&data_dir()?);
+            let wider = (reach != bbox)
+                .then(|| local::load_box(&cells, reach))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .flatten();
+            let files = match &wider {
+                Some(osm) => building_inputs::BuildingInputs::from_extracted(
+                    osm,
+                    &extract::extract(osm),
+                    bbox,
+                ),
+                None => building_inputs::BuildingInputs::from_extracted(&osm, &x, bbox),
+            };
+            compare_building_inputs(&building_inputs, &files);
             Ok(())
         }
         Some("terrain") => {
@@ -582,6 +606,112 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// A pool of Postgres connections from a connection string (as libpq's: "host=… user=… dbname=…").
+/// What differs between two sets of buildings for a fine cell (`a` Postgres's, `b` the files'), the first few of each
+/// kind. Postgres's coordinates come through GeoJSON (9 decimals), so points are compared within 1e-9° too.
+fn compare_building_inputs(
+    a: &building_inputs::BuildingInputs,
+    b: &building_inputs::BuildingInputs,
+) {
+    use std::collections::HashMap;
+    let index = |p: &building_inputs::BuildingInputs| -> HashMap<(u8, i64), usize> {
+        (0..p.osm_id.len())
+            .map(|i| ((p.osm_type[i], p.osm_id[i]), i))
+            .collect()
+    };
+    let (ia, ib) = (index(a), index(b));
+    let only = |x: &HashMap<(u8, i64), usize>, y: &HashMap<(u8, i64), usize>| {
+        let mut keys: Vec<(u8, i64)> = x.keys().filter(|k| !y.contains_key(k)).copied().collect();
+        keys.sort_unstable();
+        keys
+    };
+    let (only_a, only_b) = (only(&ia, &ib), only(&ib, &ia));
+    let same_f = |x: f64, y: f64| x == y || (x.is_nan() && y.is_nan());
+    let (mut exact, mut rounded) = (0, 0);
+    let mut differ: HashMap<&str, Vec<i64>> = HashMap::new();
+    for (k, &i) in &ia {
+        let Some(&j) = ib.get(k) else { continue };
+        let (pa, pb) = (a.points(i), b.points(j));
+        let shape = |p: &building_inputs::BuildingInputs, i: usize| {
+            let s = &p.shape;
+            (s.poly_start[i]..s.poly_start[i + 1])
+                .map(|q| {
+                    (s.ring_start[q as usize]..s.ring_start[q as usize + 1])
+                        .map(|r| s.point_start[r as usize + 1] - s.point_start[r as usize])
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let geometry = if shape(a, i) != shape(b, j) {
+            false
+        } else if pa == pb {
+            exact += 1;
+            true
+        } else if pa
+            .iter()
+            .zip(pb)
+            .all(|(p, q)| (p[0] - q[0]).abs() <= 1e-9 && (p[1] - q[1]).abs() <= 1e-9)
+        {
+            rounded += 1;
+            true
+        } else {
+            false
+        };
+        let checks = [
+            ("kind", a.text(Some(a.kind[i])) == b.text(Some(b.kind[j]))),
+            ("is_part", a.is_part[i] == b.is_part[j]),
+            ("height", a.height[i] == b.height[j]),
+            ("min_height", a.min_height[i] == b.min_height[j]),
+            ("height_source", a.height_source[i] == b.height_source[j]),
+            ("levels", same_f(a.levels[i] as f64, b.levels[j] as f64)),
+            ("min_level", same_f(a.min_level[i], b.min_level[j])),
+            (
+                "roof_shape",
+                a.text(a.roof_shape[i]) == b.text(b.roof_shape[j]),
+            ),
+            ("geometry", geometry),
+        ];
+        for (what, ok) in checks {
+            if !ok {
+                differ.entry(what).or_default().push(k.1);
+            }
+        }
+    }
+    let ids = |p: &building_inputs::BuildingInputs| {
+        p.osm_type
+            .iter()
+            .zip(&p.osm_id)
+            .map(|(&t, &id)| (t, id))
+            .collect::<Vec<_>>()
+    };
+    println!(
+        "fine buildings: postgres {}, files {}{}",
+        a.osm_id.len(),
+        b.osm_id.len(),
+        if only_a.is_empty() && only_b.is_empty() && differ.is_empty() && ids(a) == ids(b) {
+            ", identical (same order)"
+        } else {
+            ", DIFFER"
+        }
+    );
+    println!("  geometry: {exact} exact, {rounded} within 1e-9° (GeoJSON's 9 decimals)");
+    println!(
+        "  only in postgres: {} {:?}",
+        only_a.len(),
+        &only_a[..only_a.len().min(8)]
+    );
+    println!(
+        "  only in files:    {} {:?}",
+        only_b.len(),
+        &only_b[..only_b.len().min(8)]
+    );
+    let mut differ: Vec<_> = differ.into_iter().collect();
+    differ.sort_unstable();
+    for (what, mut v) in differ {
+        v.sort_unstable();
+        println!("  {what} differs: {} {:?}", v.len(), &v[..v.len().min(8)]);
+    }
+}
+
 /// What differs between two sets of points of interest (`a` Postgres's, `b` the files'), the first few of each kind.
 fn compare_pois(a: &pois::PoiInputs, b: &pois::PoiInputs) {
     use std::collections::HashMap;
