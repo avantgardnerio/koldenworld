@@ -1,4 +1,4 @@
-//! The cell server: GET /cells/<token>/ground.arrow and /cells/<token>/ground_triangles.arrow (and a coarse tile's
+//! The cell server: GET /cells/<token>/ground.arrow, ground_triangles.arrow and terrain.arrow (and a coarse tile's
 //! buildings.arrow and buildings_triangles.arrow), built on a miss and cached as files under data/rust-cells/<token>/:
 //! the inputs from the cell files and elevation data (Inputs::from_files), then built, both on Tokio's blocking pool.
 //! Requests for a cell being built wait for that one build.
@@ -15,9 +15,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Every cell's tables, and a coarse tile's buildings.
-const TABLES: [&str; 4] = [
+const TABLES: [&str; 5] = [
     "ground.arrow",
     "ground_triangles.arrow",
+    "terrain.arrow",
     "buildings.arrow",
     "buildings_triangles.arrow",
 ];
@@ -140,6 +141,7 @@ async fn build(app: Arc<App>, c: Cell) -> Result<(), cell::LoadError> {
         let mut tables = vec![
             ("ground.arrow", &built.ground),
             ("ground_triangles.arrow", &built.triangles),
+            ("terrain.arrow", &built.terrain),
         ];
         if let Some((v, t)) = &built.buildings {
             tables.push(("buildings.arrow", v));

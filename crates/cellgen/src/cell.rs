@@ -11,7 +11,8 @@
 use crate::ways::{ROAD_CLASSES, RoadWays};
 use crate::{
     aeroways, buildings, clip, crossings, draw, elevation, faces, geodesy, geom, graph,
-    ground_arrow, markings, mesh, polygon, s2, simplify, terrain, water, ways, widths,
+    ground_arrow, markings, mesh, polygon, s2, simplify, terrain, terrain_arrow, water, ways,
+    widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
 use deadpool_postgres::Pool;
@@ -137,6 +138,7 @@ impl Default for Options {
 pub struct Built {
     pub ground: Vec<u8>,
     pub triangles: Vec<u8>,
+    pub terrain: Vec<u8>, // terrain.arrow: the lattice the ground is draped on, for what stands on it
     pub buildings: Option<(Vec<u8>, Vec<u8>)>, // coarse tiles: the massing, as buildings.arrow and buildings_triangles.arrow
     pub log: Vec<String>,
 }
@@ -580,24 +582,8 @@ pub fn build(
     // 5. Terrain heights on the lattice, the ground draped on its triangles, and the buffers.
     let started = Instant::now();
     let n = options.terrain;
-    // The lattice with a one-point rim outside the cell (rows and columns −1 to n + 1), so the normals at the cell's
-    // edge see the ground beyond it, as the neighbor's do.
-    let rim: Vec<f64> = (-1..=n as i64 + 1)
-        .flat_map(|b| (-1..=n as i64 + 1).map(move |a| (a, b)))
-        .map(|(a, b)| {
-            let st = [
-                cell[0] + (cell[2] - cell[0]) * a as f64 / n as f64,
-                cell[1] + (cell[3] - cell[1]) * b as f64 / n as f64,
-            ];
-            let (lat, lon) = s2::st_to_lat_lon(face, st);
-            heights.height(lat, lon)
-        })
-        .collect();
-    let lattice: Vec<f64> = (1..=n + 1)
-        .flat_map(|b| (1..=n + 1).map(move |a| (a, b)))
-        .map(|(a, b)| rim[b * (n + 3) + a])
-        .collect();
-    let terrain = terrain::Terrain::new(n, lattice, cell);
+    let rim = rim_heights(|lat, lon| heights.height(lat, lon), face, cell, n);
+    let terrain = terrain::Terrain::new(n, lattice(&rim, n), cell);
     let draped = terrain.cut(&kinds, &metric);
     let lost = (0..kinds.len())
         .map(|k| (clip::area(kinds[k]) - terrain.area(&draped, k as u8, &metric)).abs())
@@ -618,6 +604,7 @@ pub fn build(
 
     let center = s2::st_to_lat_lon(face, c.center());
     let (ground, triangles) = ground_arrow::encode(&mesh, &KINDS, &c.token, center)?;
+    let terrain_table = terrain_arrow::encode(&terrain.heights, n, &c.token)?;
 
     // 6. Coarse tiles: the buildings as massing.
     let buildings = match &owned {
@@ -693,6 +680,7 @@ pub fn build(
     Ok(Built {
         ground,
         triangles,
+        terrain: terrain_table,
         buildings,
         log,
     })
@@ -744,4 +732,34 @@ fn mesh_check(
         frame.local(geodesy::ecef(lat, lon, mean_h)).truncate()
     });
     (flat, geom::signed_area(ring))
+}
+
+/// The ground's heights on the terrain lattice with a one-point rim outside the cell (rows and columns −1 to n + 1, t
+/// outer, s inner), so the normals at the cell's edge see the ground beyond it, as the neighbor's do. Every ground
+/// height the game uses comes from here: the drawn ground, terrain.arrow, and what's draped on them.
+pub fn rim_heights(
+    height: impl Fn(f64, f64) -> f64,
+    face: u32,
+    cell: [f64; 4],
+    n: usize,
+) -> Vec<f64> {
+    (-1..=n as i64 + 1)
+        .flat_map(|b| (-1..=n as i64 + 1).map(move |a| (a, b)))
+        .map(|(a, b)| {
+            let st = [
+                cell[0] + (cell[2] - cell[0]) * a as f64 / n as f64,
+                cell[1] + (cell[3] - cell[1]) * b as f64 / n as f64,
+            ];
+            let (lat, lon) = s2::st_to_lat_lon(face, st);
+            height(lat, lon)
+        })
+        .collect()
+}
+
+/// The cell's own (n + 1)² lattice heights, from rim_heights.
+pub fn lattice(rim: &[f64], n: usize) -> Vec<f64> {
+    (1..=n + 1)
+        .flat_map(|b| (1..=n + 1).map(move |a| (a, b)))
+        .map(|(a, b)| rim[b * (n + 3) + a])
+        .collect()
 }

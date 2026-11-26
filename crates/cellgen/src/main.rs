@@ -27,6 +27,7 @@ mod s3;
 mod serve;
 mod simplify;
 mod terrain;
+mod terrain_arrow;
 mod water;
 mod ways;
 mod widths;
@@ -46,6 +47,8 @@ const USAGE: &str = "usage:
   cellgen import <token | lat,lon>              an area's OSM (fetched if need be) into Postgres: rows upserted, deleted
   cellgen region <lat,lon> [--download]          the Geofabrik region holding a point (its extract, downloaded once)
   cellgen compare <token | lat,lon>             a cell's inputs from Postgres and from the cell files: what differs
+  cellgen terrain <token | lat,lon>             a cell's terrain.arrow (the drawn ground's lattice heights) in
+                                                target/, compared with the TS server's in data/export/cells/
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
 The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
@@ -126,6 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::create_dir_all(&dir)?;
                 std::fs::write(dir.join("ground.arrow"), &built.ground)?;
                 std::fs::write(dir.join("ground_triangles.arrow"), &built.triangles)?;
+                std::fs::write(dir.join("terrain.arrow"), &built.terrain)?;
                 if let Some((v, t)) = &built.buildings {
                     std::fs::write(dir.join("buildings.arrow"), v)?;
                     std::fs::write(dir.join("buildings_triangles.arrow"), t)?;
@@ -505,6 +509,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &only_b[..only_b.len().min(8)]
                 );
             }
+            Ok(())
+        }
+        Some("terrain") => {
+            // A cell's terrain table from the drawn ground's lattice, and how it differs from the TS server's.
+            let what = args.get(1).ok_or(USAGE)?;
+            let c = match what.split_once(',') {
+                Some((lat, lon)) => cell::Cell::at(lat.trim().parse()?, lon.trim().parse()?),
+                None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
+            };
+            let data = data_dir()?;
+            let n = cell::Options::for_level(c.level).terrain;
+            let dem = elevation::Elevation::region(&data.join("dem"), c.load_box())?;
+            let rim = cell::rim_heights(|lat, lon| dem.height(lat, lon), c.face, c.square, n);
+            let heights = cell::lattice(&rim, n);
+            let bytes = terrain_arrow::encode(&heights, n, &c.token)?;
+            let out = PathBuf::from("target").join(format!("terrain-{}.arrow", c.token));
+            std::fs::write(&out, &bytes)?;
+            println!(
+                "cell {} (level {}): {} heights ({} without data) → {} ({} bytes)",
+                c.token,
+                c.level,
+                heights.len(),
+                dem.missing.get(),
+                out.display(),
+                bytes.len()
+            );
+            let ts = data
+                .join("export/cells")
+                .join(&c.token)
+                .join("terrain.arrow");
+            let Ok(ts) = std::fs::read(&ts) else {
+                println!("no TS terrain at {}", ts.display());
+                return Ok(());
+            };
+            let (ts_n, ts_h) = terrain_arrow::decode(&ts)?;
+            if ts_n != n {
+                println!("TS lattice is n = {ts_n}, ours n = {n}: not comparable");
+                return Ok(());
+            }
+            // By how much: exact, rounding (under 1 cm), the TS water carve (1 m lower), anything else.
+            let (mut exact, mut rounding, mut carved, mut other, mut worst) = (0, 0, 0, 0, 0.0f64);
+            for (&a, &b) in heights.iter().zip(&ts_h) {
+                let d = b as f64 - a as f32 as f64;
+                worst = f64::max(worst, d.abs());
+                match d {
+                    0.0 => exact += 1,
+                    d if d.abs() < 0.01 => rounding += 1,
+                    d if (d + 1.0).abs() < 0.01 => carved += 1,
+                    _ => other += 1,
+                }
+            }
+            println!(
+                "vs TS ({} bytes): {exact} identical, {rounding} within 1 cm, {carved} 1 m lower (water carve), \
+                 {other} other; largest difference {worst:.3} m",
+                ts.len()
+            );
             Ok(())
         }
         Some("serve") => {
