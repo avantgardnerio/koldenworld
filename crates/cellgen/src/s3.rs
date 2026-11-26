@@ -86,6 +86,44 @@ pub fn local_copy(url: &str, file: &Path) -> Option<PathBuf> {
     }
 }
 
+/// An object's bytes, or None where S3 has no such object. For async callers (on any runtime: the request runs on
+/// this module's).
+pub async fn get(url: &str) -> Result<Option<Vec<u8>>, String> {
+    let (bucket, key) = split(url).ok_or(format!("{url} isn't an s3://bucket/key URL"))?;
+    let (bucket, key) = (bucket.to_string(), key.to_string());
+    RUNTIME
+        .spawn(async move {
+            match CLIENT.get_object().bucket(bucket).key(key).send().await {
+                Ok(o) => o
+                    .body
+                    .collect()
+                    .await
+                    .map(|b| Some(b.into_bytes().to_vec()))
+                    .map_err(|e| e.to_string()),
+                Err(e) if e.raw_response().is_some_and(|r| r.status().as_u16() == 404) => Ok(None),
+                Err(e) => Err(aws_sdk_s3::error::DisplayErrorContext(e).to_string()),
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Writes an object (whole: a reader sees the old one or the new one, never part).
+pub async fn put(url: &str, bytes: Vec<u8>, content_type: &str) -> Result<(), String> {
+    let (bucket, key) = split(url).ok_or(format!("{url} isn't an s3://bucket/key URL"))?;
+    let request = CLIENT
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .content_type(content_type)
+        .body(bytes.into());
+    RUNTIME
+        .spawn(async move { request.send().await.map(|_| ()) })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| aws_sdk_s3::error::DisplayErrorContext(e).to_string())
+}
+
 /// Where `url` (`s3://bucket/prefix`) is mirrored under `dir`: `dir/bucket/prefix`.
 pub fn mirror(dir: &Path, url: &str) -> PathBuf {
     dir.join(url.trim_start_matches("s3://").trim_end_matches('/'))

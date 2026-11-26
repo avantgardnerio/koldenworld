@@ -110,7 +110,8 @@ One Docker image, run the same way locally and on Lambda, the only thing to depl
   files are 0.5–2 GB): dev runs the same path as Lambda.
   - **Built cells in S3**, shared by every instance and player: `cells/<version>/<token>/<table>.arrow`, the version
     from the table versions, so a format change never serves stale cells. On a request: S3, else build (inputs from
-    S3), write to S3, answer.
+    S3), write to S3, answer. **Done:** `cells/<data>/g<ground>-r<road graph>-b<buildings>/<token>/` (`<data>`:
+    `local`, or the CELLGEN_OSM_S3 snapshot's name, e.g. `planet-261116`); the server keeps nothing on disk.
   - **FABDEM by range reads:** tiles are 256×256 deflate blocks; a cell needs 1–4 blocks (~100–250 KB) and the
     header, not the 23 MB tile.
   - **Cell files by range reads:** an async Parquet reader over S3, footer first, row groups pruned by their

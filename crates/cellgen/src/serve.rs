@@ -1,11 +1,15 @@
 //! The cell server: GET /cells/<token>/ground.arrow, ground_triangles.arrow and terrain.arrow (and a coarse tile's
-//! buildings.arrow and buildings_triangles.arrow massing, a fine cell's buildings.arrow, pois.arrow, nodes.arrow and edges.arrow), built on a miss and cached as files under data/rust-cells/<token>/:
-//! the inputs from the cell files and elevation data (Inputs::from_files), then built, both on Tokio's blocking pool.
-//! Requests for a cell being built wait for that one build.
+//! buildings.arrow and buildings_triangles.arrow massing, a fine cell's buildings.arrow, pois.arrow, nodes.arrow and
+//! edges.arrow). Built cells live in S3, shared by every instance: cells/<data>/<format>/<token>/<table>.arrow under
+//! CELLGEN_CELLS_S3 (default CELLS_S3), where <data> names the OSM cell files they're built from and <format> the
+//! tables' versions, so neither new data nor a new format serves stale cells. On a miss the cell is built (its inputs
+//! from the cell files and elevation data, Inputs::from_files, then cell::build, on Tokio's blocking pool), every table
+//! written to S3, and the one asked for answered. Requests here for a cell being built wait for that one build.
 //! GET /aircraft?lat=&lon=&nm= answers with live air traffic around a point (aircraft.rs).
 
 use crate::aircraft::Aircraft;
 use crate::cell::{self, Cell};
+use crate::s3;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -26,10 +30,14 @@ const TABLES: [&str; 8] = [
     "buildings_triangles.arrow",
 ];
 
+/// Where built cells go, unless CELLGEN_CELLS_S3 says otherwise.
+const CELLS_S3: &str = "s3://koldenworld-data-2/cells";
+const ARROW: &str = "application/vnd.apache.arrow.file";
+
 struct App {
     data: PathBuf,                                                 // data/ (dem/ under it)
-    cache: PathBuf,                                                // data/rust-cells/
-    aircraft: Aircraft,                                            // live air traffic, rate-limited
+    cells: String, // s3://…/cells/<data>/<format>: where this server's built cells are
+    aircraft: Aircraft, // live air traffic, rate-limited
     building: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, // a lock per cell being asked for
 }
 
@@ -37,8 +45,19 @@ struct App {
 pub fn serve(port: u16, data: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let aircraft = Aircraft::new()?;
     tokio::runtime::Runtime::new()?.block_on(async {
+        let cells = format!(
+            "{}/{}/g{}-r{}-b{}",
+            std::env::var("CELLGEN_CELLS_S3")
+                .unwrap_or_else(|_| CELLS_S3.into())
+                .trim_end_matches('/'),
+            crate::local::source_name(),
+            cell::GROUND_VERSION,
+            crate::road_table::ROAD_GRAPH_VERSION,
+            crate::building_table::BUILDINGS_VERSION
+        );
+        println!("built cells in {cells}/<token>/");
         let app = Arc::new(App {
-            cache: data.join("rust-cells"),
+            cells,
             data,
             aircraft,
             building: Mutex::default(),
@@ -107,40 +126,52 @@ async fn table(
     if !has {
         return (StatusCode::NOT_FOUND, "no such table at this level\n").into_response();
     }
-    let file = app.cache.join(&token).join(&table);
-    if !file.exists() {
-        // One build per cell: whoever gets its lock first builds, the rest find the files.
-        let lock = app
-            .building
-            .lock()
-            .unwrap()
-            .entry(token.clone())
-            .or_default()
-            .clone();
-        let _held = lock.lock().await;
-        if !file.exists()
-            && let Err(e) = build(app.clone(), c).await
-        {
-            eprintln!("cell {token}: {e}");
-            return (StatusCode::BAD_GATEWAY, format!("{e}\n")).into_response();
-        }
-    }
-    match tokio::fs::read(&file).await {
-        Ok(bytes) => (
+    let url = format!("{}/{token}/{table}", app.cells);
+    let found = |bytes: Vec<u8>| {
+        (
             [
-                (header::CONTENT_TYPE, "application/vnd.apache.arrow.file"),
+                (header::CONTENT_TYPE, ARROW),
                 (header::CACHE_CONTROL, "no-store"),
                 (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
             ],
             bytes,
         )
-            .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n")).into_response(),
+            .into_response()
+    };
+    let failed = |e: String| {
+        eprintln!("cell {token}: {e}");
+        (StatusCode::BAD_GATEWAY, format!("{e}\n")).into_response()
+    };
+    match s3::get(&url).await {
+        Ok(Some(bytes)) => return found(bytes),
+        Ok(None) => {}
+        Err(e) => return failed(e),
+    }
+    // One build per cell here: whoever gets its lock first builds, the rest find the tables in S3.
+    let lock = app
+        .building
+        .lock()
+        .unwrap()
+        .entry(token.clone())
+        .or_default()
+        .clone();
+    let _held = lock.lock().await;
+    match s3::get(&url).await {
+        Ok(Some(bytes)) => return found(bytes),
+        Ok(None) => {}
+        Err(e) => return failed(e),
+    }
+    match build(app.clone(), c).await {
+        Ok(mut tables) => match tables.remove(table.as_str()) {
+            Some(bytes) => found(bytes),
+            None => (StatusCode::NOT_FOUND, "no such table for this cell\n").into_response(),
+        },
+        Err(e) => failed(e.to_string()),
     }
 }
 
-/// Builds a cell and writes its tables (each to a temporary name, then renamed, so a reader never sees half a file).
-async fn build(app: Arc<App>, c: Cell) -> Result<(), cell::LoadError> {
+/// Builds a cell and writes every table to S3; the tables, by file name.
+async fn build(app: Arc<App>, c: Cell) -> Result<HashMap<&'static str, Vec<u8>>, cell::LoadError> {
     let started = std::time::Instant::now();
     let options = cell::Options::for_level(c.level);
     let inputs = {
@@ -148,43 +179,47 @@ async fn build(app: Arc<App>, c: Cell) -> Result<(), cell::LoadError> {
         tokio::task::spawn_blocking(move || cell::Inputs::from_files(&data, &c, &options)).await??
     };
     let loaded = started.elapsed();
-    tokio::task::spawn_blocking(move || -> Result<(), cell::LoadError> {
+    let token = c.token.clone();
+    let (tables, log) = tokio::task::spawn_blocking(move || -> Result<_, cell::LoadError> {
         let built = cell::build(inputs, &c, &options, None).map_err(|e| e.to_string())?;
-        let dir = app.cache.join(&c.token);
-        std::fs::create_dir_all(&dir)?;
-        let mut tables = vec![
-            ("ground.arrow", &built.ground),
-            ("ground_triangles.arrow", &built.triangles),
-            ("terrain.arrow", &built.terrain),
-        ];
-        if let Some(b) = &built.fine_buildings {
-            tables.push(("buildings.arrow", b));
+        let mut tables = HashMap::from([
+            ("ground.arrow", built.ground),
+            ("ground_triangles.arrow", built.triangles),
+            ("terrain.arrow", built.terrain),
+        ]);
+        if let Some(b) = built.fine_buildings {
+            tables.insert("buildings.arrow", b);
         }
-        if let Some(p) = &built.fine_pois {
-            tables.push(("pois.arrow", p));
+        if let Some(p) = built.fine_pois {
+            tables.insert("pois.arrow", p);
         }
-        if let Some((nodes, edges)) = &built.fine_graph {
-            tables.push(("nodes.arrow", nodes));
-            tables.push(("edges.arrow", edges));
+        if let Some((nodes, edges)) = built.fine_graph {
+            tables.insert("nodes.arrow", nodes);
+            tables.insert("edges.arrow", edges);
         }
-        if let Some((v, t)) = &built.buildings {
-            tables.push(("buildings.arrow", v));
-            tables.push(("buildings_triangles.arrow", t));
+        if let Some((v, t)) = built.buildings {
+            tables.insert("buildings.arrow", v);
+            tables.insert("buildings_triangles.arrow", t);
         }
-        for (name, bytes) in tables {
-            let tmp = dir.join(format!("{name}.tmp"));
-            std::fs::write(&tmp, bytes)?;
-            std::fs::rename(&tmp, dir.join(name))?;
-        }
-        println!(
-            "cell {} built in {:.0?} (loaded in {loaded:.0?})",
-            c.token,
-            started.elapsed()
-        );
-        for line in &built.log {
-            println!("  {line}");
-        }
-        Ok(())
+        Ok((tables, built.log))
     })
-    .await?
+    .await??;
+    let built = started.elapsed();
+    let mut puts = tokio::task::JoinSet::new();
+    for (name, bytes) in &tables {
+        let url = format!("{}/{token}/{name}", app.cells);
+        let bytes = bytes.clone();
+        puts.spawn(async move { s3::put(&url, bytes, ARROW).await });
+    }
+    while let Some(put) = puts.join_next().await {
+        put??;
+    }
+    println!(
+        "cell {token} built in {built:.0?} (loaded in {loaded:.0?}), written to S3 in {:.0?}",
+        started.elapsed() - built
+    );
+    for line in &log {
+        println!("  {line}");
+    }
+    Ok(tables)
 }

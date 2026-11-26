@@ -43,6 +43,21 @@ pub fn cells_dir(data: &Path) -> PathBuf {
     }
 }
 
+/// A name for the cell files cells are built from, for keeping built cells apart: CELLGEN_OSM_S3's path without the
+/// bucket, `osm/` or `/raw` (s3://koldenworld-data-2/osm/planet-261116/raw is `planet-261116`), or `local` for
+/// data/osm/cells.
+pub fn source_name() -> String {
+    match std::env::var("CELLGEN_OSM_S3") {
+        Ok(url) if !url.is_empty() => {
+            let path = url.trim_start_matches("s3://").trim_end_matches('/');
+            let path = path.split_once('/').map_or(path, |(_, p)| p);
+            let path = path.strip_prefix("osm/").unwrap_or(path);
+            path.strip_suffix("/raw").unwrap_or(path).replace('/', "-")
+        }
+        _ => "local".into(),
+    }
+}
+
 /// The area's OSM from the cell files under `dir` (from cells_dir), or None if its cell has no files.
 pub fn load(dir: &Path, c: &Cell) -> Result<Option<Loaded>, Error> {
     let folder = cell_folder(dir, c);

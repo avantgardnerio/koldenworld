@@ -53,6 +53,9 @@ const COLORS: [[u8; 3]; 13] = [
 const ARC_TOLERANCE: f64 = 0.05;
 /// Terrain lattice squares across a cell (TERRAIN_N in the TS).
 pub const TERRAIN_N: usize = 64;
+/// Bump when the ground, terrain, points of interest or massing tables change for the same input (built cells are
+/// kept in S3 by this, ROAD_GRAPH_VERSION and BUILDINGS_VERSION).
+pub const GROUND_VERSION: u32 = 1;
 
 /// A cell: its cube face, its (s, t) square, its token.
 #[derive(Clone)]
