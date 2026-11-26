@@ -5,12 +5,24 @@
 //! data/dem/fabdem/N39W106_FABDEM_V1-2.tif covers 39–40° N, 106–105° W (named by its southwest corner); its pixels
 //! are areas, float32 in tiles, and only the tiles a box needs are read. Oceans have no tiles.
 //! data/dem/us_nga_egm08_25.tif is EGM2008 for the world: a node-registered 2.5' grid from 180° W, read the same way.
+//!
+//! A tile missing on disk is fetched first from CELLGEN_DEM_S3 (default below; empty turns it off) with the AWS CLI,
+//! so the usual credentials apply (AWS_PROFILE, or an instance's role). A tile S3 doesn't have (the oceans) leaves a
+//! `.none` file beside where it would be, so it's asked for once.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, LazyLock, Mutex};
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
+
+const DEM_S3: &str = "s3://koldenworld-data-2/dem/fabdem-v1-2/tiles/";
+
+/// Tiles being fetched, by name: cells building side by side wait for one fetch rather than each making their own.
+static FETCHES: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = LazyLock::new(Default::default);
 
 /// Samples of a raster window: rows run south.
 struct Grid {
@@ -53,7 +65,7 @@ impl Grid {
 pub struct Elevation {
     tiles: Vec<Grid>,
     geoid: Grid,
-    pub missing: std::cell::Cell<usize>, // samples without data (fell back to 0 m)
+    pub missing: std::cell::Cell<usize>, // samples without data (fell back to sea level)
 }
 
 impl Elevation {
@@ -68,12 +80,8 @@ impl Elevation {
             for lon in west.floor() as i32..east.ceil() as i32 {
                 let ns = if lat >= 0 { 'N' } else { 'S' };
                 let ew = if lon < 0 { 'W' } else { 'E' };
-                let file: PathBuf = dir.join("fabdem").join(format!(
-                    "{ns}{:02}{ew}{:03}_FABDEM_V1-2.tif",
-                    lat.abs(),
-                    lon.abs()
-                ));
-                if file.exists() {
+                let name = format!("{ns}{:02}{ew}{:03}_FABDEM_V1-2.tif", lat.abs(), lon.abs());
+                if let Some(file) = local_tile(&dir.join("fabdem"), &name) {
                     tiles.push(read_window(&file, [west, south, east, north])?);
                 }
             }
@@ -85,16 +93,77 @@ impl Elevation {
         })
     }
 
-    /// Metres above the WGS84 ellipsoid at a point (0 where there's no data, counted in `missing`).
+    /// Metres above the WGS84 ellipsoid at a point (sea level where there's no data, counted in `missing`).
     pub fn height(&self, lat: f64, lon: f64) -> f64 {
         let h = self.tiles.iter().find_map(|g| g.sample(lat, lon));
         let n = self.geoid.sample(lat, lon);
-        match (h, n) {
-            (Some(h), Some(n)) => h + n,
-            _ => {
-                self.missing.set(self.missing.get() + 1);
-                0.0
+        if h.is_none() {
+            self.missing.set(self.missing.get() + 1);
+        }
+        // No tile (the sea) is sea level: the geoid.
+        h.unwrap_or(0.0) + n.unwrap_or(0.0)
+    }
+}
+
+/// A FABDEM tile on disk, fetched from S3 first if it isn't there; None where there's no tile (or the fetch failed,
+/// which is logged and tried again next time).
+fn local_tile(dir: &Path, name: &str) -> Option<PathBuf> {
+    let file = dir.join(name);
+    let none = file.with_extension("none");
+    let known = || (file.exists() || none.exists()).then(|| file.exists().then(|| file.clone()));
+    if let Some(found) = known() {
+        return found;
+    }
+    let source = std::env::var("CELLGEN_DEM_S3").unwrap_or_else(|_| DEM_S3.into());
+    if source.is_empty() {
+        return None;
+    }
+    let lock = FETCHES
+        .lock()
+        .unwrap()
+        .entry(name.into())
+        .or_default()
+        .clone();
+    let _fetching = lock.lock().unwrap();
+    if let Some(found) = known() {
+        return found; // fetched while we waited
+    }
+    let part = file.with_extension(format!("part{}", std::process::id()));
+    let fetched = std::fs::create_dir_all(dir)
+        .map_err(|e| e.to_string())
+        .and_then(|_| {
+            Command::new("aws")
+                .args(["s3", "cp", "--only-show-errors", &format!("{source}{name}")])
+                .arg(&part)
+                .output()
+                .map_err(|e| format!("aws: {e}"))
+        });
+    match fetched {
+        Ok(out) if out.status.success() => match std::fs::rename(&part, &file) {
+            Ok(()) => {
+                eprintln!("elevation: fetched {name}");
+                Some(file)
             }
+            Err(e) => {
+                eprintln!("elevation: {name}: {e}");
+                None
+            }
+        },
+        Ok(out) if String::from_utf8_lossy(&out.stderr).contains("(404)") => {
+            File::create(&none).ok();
+            None
+        }
+        Ok(out) => {
+            eprintln!(
+                "elevation: {name} from {source}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            std::fs::remove_file(&part).ok();
+            None
+        }
+        Err(e) => {
+            eprintln!("elevation: {name}: {e}");
+            None
         }
     }
 }

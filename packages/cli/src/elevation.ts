@@ -8,16 +8,25 @@
 // data/dem/us_nga_egm08_25.tif is EGM2008 for the world (node-registered 2.5'
 // grid from 180° W), read in blocks like the tiles.
 //
+// A tile missing on disk is fetched first from CELLGEN_DEM_S3 (default below;
+// empty turns it off) with the AWS CLI, as cellgen does, so the usual
+// credentials apply. A tile S3 doesn't have (the oceans) leaves a `.none` file
+// beside where it would be, so it's asked for once.
+//
 // region(bbox) reads just the windows a box needs and returns a synchronous
 // sampler for that box: bilinear between pixel centers. Points without data
-// (no tile, or nodata) fall back to 0 m and are counted.
+// (no tile, or nodata) fall back to sea level (the geoid) and are counted.
 
-import { existsSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { threadId } from "node:worker_threads";
 import type { Bbox } from "@game/db";
 import type { HeightFn } from "@game/world";
 import { fromFile, type GeoTIFFImage } from "geotiff";
 import { DATA_DIR } from "./paths.ts";
+
+const DEM_S3 = process.env.CELLGEN_DEM_S3 ?? "s3://koldenworld-data-2/dem/fabdem-v1-2/tiles/";
 
 interface Grid {
   data: Float32Array;
@@ -115,6 +124,22 @@ export class Elevation {
     return p;
   }
 
+  /** A FABDEM tile, fetched from S3 first if it isn't on disk; null where there's no tile (or the fetch failed, which is logged and tried again next time). */
+  private tile(name: string): Promise<GeoTIFFImage | null> {
+    const file = path.join(this.dir, "fabdem", name), none = file.replace(/\.tif$/, ".none");
+    if (existsSync(file) || existsSync(none) || !DEM_S3) return this.image(file);
+    let p = this.images.get(file);
+    if (!p) {
+      p = fetchTile(`${DEM_S3}${name}`, file, none).then((got) => {
+        if (got) return fromFile(file).then((t) => t.getImage());
+        if (!existsSync(none)) this.images.delete(file);
+        return null;
+      });
+      this.images.set(file, p);
+    }
+    return p;
+  }
+
   /** Loads what a box needs and returns a sampler for points in it: meters above the WGS84 ellipsoid. */
   async region(b: Bbox): Promise<HeightFn> {
     const geoidFile = path.join(this.dir, "us_nga_egm08_25.tif");
@@ -124,9 +149,9 @@ export class Elevation {
     const grids: Grid[] = [];
     for (let lat = Math.floor(b.south); lat < b.north; lat++) {
       for (let lon = Math.floor(b.west); lon < b.east; lon++) {
-        const name = `${lat >= 0 ? "N" : "S"}${String(Math.abs(lat)).padStart(2, "0")}${lon < 0 ? "W" : "E"}${String(Math.abs(lon)).padStart(3, "0")}`;
-        const file = path.join(this.dir, "fabdem", `${name}_FABDEM_V1-2.tif`);
-        const im = await this.image(file);
+        const name = `${lat >= 0 ? "N" : "S"}${String(Math.abs(lat)).padStart(2, "0")}${lon < 0 ? "W" : "E"}${String(Math.abs(lon)).padStart(3, "0")}_FABDEM_V1-2.tif`;
+        const file = path.join(this.dir, "fabdem", name);
+        const im = await this.tile(name);
         if (!im) continue;
         grids.push(...await Promise.all(blocksFor(im, b).map(([bx, by]) => this.block(file, im, bx, by))));
       }
@@ -140,11 +165,28 @@ export class Elevation {
     };
     return (lat, lon) => {
       const H = first(grids, lat, lon), N = first(geoid, lat, lon);
-      if (Number.isNaN(H) || Number.isNaN(N)) {
-        this.missing++;
-        return 0;
-      }
-      return H + N;
+      if (Number.isNaN(H)) this.missing++;
+      // No tile (the sea) is sea level: the geoid.
+      return (Number.isNaN(H) ? 0 : H) + (Number.isNaN(N) ? 0 : N);
     };
   }
+}
+
+/** Copies an S3 object to `file` (by way of a temporary name): true when it's there, false when S3 has no such tile (marked with `none`) or the copy failed. */
+function fetchTile(source: string, file: string, none: string): Promise<boolean> {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const part = `${file}.part${process.pid}-${threadId}`;
+  return new Promise((resolve) => {
+    execFile("aws", ["s3", "cp", "--only-show-errors", source, part], (err, _out, stderr) => {
+      if (!err) {
+        renameSync(part, file);
+        console.log(`elevation: fetched ${path.basename(file)}`);
+        return resolve(true);
+      }
+      rmSync(part, { force: true });
+      if (stderr.includes("(404)")) writeFileSync(none, "");
+      else console.error(`elevation: ${source}: ${stderr.trim() || err.message}`);
+      resolve(false);
+    });
+  });
 }
