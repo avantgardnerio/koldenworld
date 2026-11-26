@@ -112,9 +112,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let started = std::time::Instant::now();
                 let inputs = match (&fixture, &pool, data.as_deref()) {
                     (Some(ways), _, _) => cell::Inputs::fixture(ways, height, c),
-                    (None, Some(pool), Some(data)) => runtime
+                    (None, Some(pool), Some(data)) if flag("--postgres").is_some() => runtime
                         .block_on(cell::Inputs::load(pool, data, c, &options(c)))
                         .map_err(|e| e.to_string())?,
+                    (None, Some(_), Some(data)) => {
+                        cell::Inputs::from_files(data, c, &options(c)).map_err(|e| e.to_string())?
+                    }
                     _ => unreachable!(),
                 };
                 let loaded = started.elapsed();

@@ -52,6 +52,7 @@ const ARC_TOLERANCE: f64 = 0.05;
 pub const TERRAIN_N: usize = 64;
 
 /// A cell: its cube face, its (s, t) square, its token.
+#[derive(Clone)]
 pub struct Cell {
     pub face: u32,
     pub level: u32,
@@ -60,6 +61,7 @@ pub struct Cell {
 }
 
 /// What a build draws: everything (the default), or less, for coarser tiers.
+#[derive(Clone)]
 pub struct Options {
     /// Roads of this class and above (an index into ROAD_CLASSES, most important first); None: every road.
     pub min_class: Option<u8>,
@@ -255,6 +257,53 @@ impl Inputs {
                 .map_err(LoadError::from)
             },
         )?;
+        Ok(Inputs {
+            ways,
+            water,
+            aeroways,
+            heights: Heights::Dem(heights),
+            buildings,
+        })
+    }
+
+    /// From the cell files (local::load_box, under local::cells_dir) and the elevation data under `data`: the box's
+    /// OSM extracted once, each kind kept as its Postgres query would. A far tile has no OSM, terrain only: reading
+    /// 70 km of cell files for a few wide rivers and lakes takes seconds (a water-only file per level-6 cell, from the
+    /// splitter, would bring them back cheaply). Blocking (reads files and decodes them).
+    pub fn from_files(data: &Path, c: &Cell, options: &Options) -> Result<Inputs, LoadError> {
+        let bbox = c.load_box();
+        let osm = if c.level > FAR_LEVEL {
+            crate::local::load_box(&crate::local::cells_dir(data), bbox)?
+        } else {
+            None
+        };
+        let x = osm.as_ref().map(crate::extract::extract);
+        let (ways, water, aeroways, buildings) = match (&osm, &x) {
+            (Some(osm), Some(x)) => (
+                if options.roads {
+                    RoadWays::from_extracted(osm, x, bbox)
+                } else {
+                    RoadWays::empty()
+                },
+                water::Water::from_extracted(osm, x, bbox, options.min_waterway),
+                if options.airports {
+                    aeroways::Aeroways::from_extracted(osm, x, bbox)
+                } else {
+                    aeroways::Aeroways::empty()
+                },
+                (c.level == COARSE_LEVEL)
+                    .then(|| buildings::from_extracted(osm, x, bbox, |lon, lat| c.owns(lon, lat))),
+            ),
+            // A far tile, or no files for the box (open sea): nothing on it.
+            _ => (
+                RoadWays::empty(),
+                water::Water::empty(),
+                aeroways::Aeroways::empty(),
+                (c.level == COARSE_LEVEL).then(buildings::Buildings::default),
+            ),
+        };
+        let heights =
+            elevation::Elevation::region(&data.join("dem"), bbox).map_err(|e| e.to_string())?;
         Ok(Inputs {
             ways,
             water,

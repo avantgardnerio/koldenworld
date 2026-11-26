@@ -7,7 +7,7 @@
 //! Overpass: no download, no waiting on other areas.
 
 use crate::cell::Cell;
-use crate::{extract, fetch, import, local, osm, s2};
+use crate::{extract, fetch, import, local, osm};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -44,14 +44,6 @@ impl Areas {
 
     pub fn imported(&self) -> usize {
         self.imported.lock().unwrap().len()
-    }
-
-    /// Every area a cell draws from imported: those its load box (its square and a quarter of it around) touches.
-    pub async fn ensure_cell(&self, c: &Cell) -> Result<(), Error> {
-        for token in areas_for(c) {
-            self.ensure(&token).await?;
-        }
-        Ok(())
     }
 
     /// An area imported: fetched (if it isn't cached) and imported, once.
@@ -118,29 +110,4 @@ impl Areas {
         self.imported.lock().unwrap().insert(token.to_string());
         Ok(())
     }
-}
-
-/// The download areas a cell's load box touches: its corners and points every ~500 m across it.
-fn areas_for(c: &Cell) -> Vec<String> {
-    let [west, south, east, north] = c.load_box();
-    let step_lat = 500.0 / 111_320.0;
-    let step_lon = step_lat / ((south + north) / 2.0).to_radians().cos().max(0.01);
-    let mut tokens = Vec::new();
-    let mut seen = HashSet::new();
-    let (nx, ny) = (
-        ((east - west) / step_lon).ceil() as usize,
-        ((north - south) / step_lat).ceil() as usize,
-    );
-    for j in 0..=ny {
-        for i in 0..=nx {
-            let lat = (south + j as f64 * step_lat).min(north);
-            let lon = (west + i as f64 * step_lon).min(east);
-            let (face, st) = s2::lat_lon_to_face_st(lat, lon);
-            let token = s2::token(s2::cell_id(face, st, fetch::FETCH_LEVEL));
-            if seen.insert(token.clone()) {
-                tokens.push(token);
-            }
-        }
-    }
-    tokens
 }

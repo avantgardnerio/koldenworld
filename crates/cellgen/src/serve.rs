@@ -1,8 +1,8 @@
 //! The cell server: GET /cells/<token>/ground.arrow and /cells/<token>/ground_triangles.arrow (and a coarse tile's
 //! buildings.arrow and buildings_triangles.arrow), built on a miss and cached as files under data/rust-cells/<token>/:
-//! the inputs loaded at once (queries on pooled connections), then built on Tokio's blocking pool. Requests for a cell
-//! being built wait for that one build. A fine cell or coarse tile first has the OSM areas it draws from imported
-//! (areas.rs); GET /ensure/<area token> does just that, for the TS cell server.
+//! the inputs from the cell files and elevation data (Inputs::from_files), then built, both on Tokio's blocking pool.
+//! Requests for a cell being built wait for that one build.
+//! GET /ensure/<area token> imports an area's OSM into Postgres (areas.rs), for the TS cell server.
 
 use crate::areas::Areas;
 use crate::cell::{self, Cell};
@@ -25,7 +25,6 @@ const TABLES: [&str; 4] = [
 struct App {
     data: PathBuf,                                                 // data/ (dem/ under it)
     cache: PathBuf,                                                // data/rust-cells/
-    pool: deadpool_postgres::Pool,                                 // Postgres connections
     areas: Areas,                                                  // OSM areas imported on demand
     building: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, // a lock per cell being asked for
 }
@@ -37,14 +36,13 @@ pub fn serve(
     pool: deadpool_postgres::Pool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Runtime::new()?.block_on(async {
-        let areas = Areas::new(data.clone(), pool.clone())
+        let areas = Areas::new(data.clone(), pool)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         println!("{} OSM areas imported", areas.imported());
         let app = Arc::new(App {
             cache: data.join("rust-cells"),
             data,
-            pool,
             areas,
             building: Mutex::default(),
         });
@@ -130,11 +128,10 @@ async fn table(
 async fn build(app: Arc<App>, c: Cell) -> Result<(), cell::LoadError> {
     let started = std::time::Instant::now();
     let options = cell::Options::for_level(c.level);
-    // Far tiles draw only terrain, land cover and water already there: no OSM fetched for 70 km at a time.
-    if c.level > cell::FAR_LEVEL {
-        app.areas.ensure_cell(&c).await?;
-    }
-    let inputs = cell::Inputs::load(&app.pool, &app.data, &c, &options).await?;
+    let inputs = {
+        let (data, c, options) = (app.data.clone(), c.clone(), options.clone());
+        tokio::task::spawn_blocking(move || cell::Inputs::from_files(&data, &c, &options)).await??
+    };
     let loaded = started.elapsed();
     tokio::task::spawn_blocking(move || -> Result<(), cell::LoadError> {
         let built = cell::build(inputs, &c, &options, None).map_err(|e| e.to_string())?;

@@ -552,7 +552,9 @@ fn clusters(paths: &Paths64) -> Vec<Vec<usize>> {
             }
         }
     }
-    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    // Ordered by root, so the groups (and the output) are the same every run.
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for i in all {
         let r = root(&mut parent, i);
         groups.entry(r).or_default().push(i);
