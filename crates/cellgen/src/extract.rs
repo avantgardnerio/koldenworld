@@ -100,10 +100,6 @@ const AEROWAY_LINES: [(&str, u8, f64); 4] = [
     ("taxiway", 1, 23.0),
     ("taxilane", 1, 15.0),
 ];
-/// Airport kinds, as aeroways.rs.
-pub const AEROWAY_KINDS: [&str; 3] = ["runway", "taxiway", "apron"];
-/// Water area kinds: "lake" is flat at one level, "river" follows the ground.
-pub const WATER_KINDS: [&str; 2] = ["lake", "river"];
 /// What makes a point of interest: one of these keys, and a name or brand.
 pub const POI_KEYS: [&str; 7] = [
     "shop",
@@ -168,7 +164,7 @@ impl Polygons {
     }
 }
 
-/// Features in Postgres's `ORDER BY osm_type, osm_id`: relations, then ways, each by id.
+/// Features by OSM type as text, then id (as Postgres's `ORDER BY osm_type, osm_id` did): relations, then ways.
 pub fn by_type_and_id(osm: &Osm, relation: &[bool], element: &[u32]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..element.len()).collect();
     order.sort_by_key(|&f| {

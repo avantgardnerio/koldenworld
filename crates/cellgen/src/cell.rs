@@ -1,4 +1,5 @@
-//! A cell, built: from its roads and water in Postgres and its terrain, to its ground as GPU buffers in Arrow.
+//! A cell, built: from its roads, water, buildings and terrain in the cell files and elevation data, to its ground as
+//! GPU buffers in Arrow (and a fine cell's other tables).
 //!
 //! 1. The road graph of every way around the cell, each node's ends sorted counterclockwise, and its faces.
 //! 2. Regions (every block, with the road pieces inside it as holes, and the cell around the network), each split into
@@ -17,7 +18,6 @@ use crate::{
     terrain_arrow, water, ways, widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
-use deadpool_postgres::Pool;
 use glam::DVec2;
 use std::path::Path;
 use std::time::Instant;
@@ -245,69 +245,8 @@ pub struct Inputs {
 pub type LoadError = Box<dyn std::error::Error + Send + Sync>;
 
 impl Inputs {
-    /// From Postgres (road_ways, waterways, water_areas; buildings, for a coarse tile) and the elevation data under
-    /// `data` (data/dem), all at once: each query on its own connection from `pool`, the elevation files on a
-    /// blocking thread.
-    pub async fn load(
-        pool: &Pool,
-        data: &Path,
-        c: &Cell,
-        options: &Options,
-    ) -> Result<Inputs, LoadError> {
-        let [west, south, east, north] = c.load_box();
-        let dem = data.join("dem");
-        let (ways, water, aeroways, buildings, heights) = tokio::try_join!(
-            async {
-                if !options.roads {
-                    return Ok(RoadWays::empty());
-                }
-                let db = pool.get().await?;
-                ways::load_road_ways(&db, west, south, east, north).await
-            },
-            async {
-                let db = pool.get().await?;
-                water::load_water(&db, west, south, east, north, options.min_waterway).await
-            },
-            async {
-                if !options.airports {
-                    return Ok(aeroways::Aeroways::empty());
-                }
-                let db = pool.get().await?;
-                aeroways::load(&db, [west, south, east, north]).await
-            },
-            async {
-                if c.level != COARSE_LEVEL {
-                    return Ok(None);
-                }
-                let db = pool.get().await?;
-                let owns = |lon, lat| c.owns(lon, lat);
-                Ok::<_, LoadError>(Some(
-                    buildings::load(&db, [west, south, east, north], owns).await?,
-                ))
-            },
-            async {
-                tokio::task::spawn_blocking(move || {
-                    elevation::Elevation::region(&dem, [west, south, east, north])
-                        .map_err(|e| e.to_string())
-                })
-                .await?
-                .map_err(LoadError::from)
-            },
-        )?;
-        Ok(Inputs {
-            ways,
-            water,
-            aeroways,
-            heights: Heights::Dem(heights),
-            buildings,
-            fine_buildings: None,
-            fine_pois: None,
-            fine_graph: None,
-        })
-    }
-
     /// From the cell files (local::load_box, under local::cells_dir) and the elevation data under `data`: the box's
-    /// OSM extracted once, each kind kept as its Postgres query would. A far tile has no OSM, terrain only: reading
+    /// OSM extracted once, each kind kept as its old Postgres query did (boxes.rs). A far tile has no OSM, terrain only: reading
     /// 70 km of cell files for a few wide rivers and lakes takes seconds (a water-only file per level-6 cell, from the
     /// splitter, would bring them back cheaply). Blocking (reads files and decodes them).
     pub fn from_files(data: &Path, c: &Cell, options: &Options) -> Result<Inputs, LoadError> {

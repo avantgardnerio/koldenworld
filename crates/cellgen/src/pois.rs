@@ -5,7 +5,6 @@
 use crate::extract::{Extracted, POI_KEYS};
 use crate::osm::{NODE, Osm, RELATION, WAY};
 use std::collections::HashMap;
-use tokio_postgres::Client;
 
 /// Points of interest as columns; strings (kinds, names, brands) once each in `strings`.
 #[derive(Default, PartialEq)]
@@ -74,60 +73,9 @@ const CHARITY_NAMES: [&str; 29] = [
 /// Kinds a charity's name doesn't make a draw: its schools and day cares.
 const NOT_SERVICES: [&str; 3] = ["childcare", "kindergarten", "school"];
 
-/// TEMPORARY, for `cellgen compare`: delete with Postgres (step 1d). Points of interest in a lon/lat box (geom &&
-/// box), as the TS loadPois queries them.
-pub async fn load(
-    db: &Client,
-    [west, south, east, north]: [f64; 4],
-) -> Result<PoiInputs, Box<dyn std::error::Error + Send + Sync>> {
-    let rows = db
-        .query(
-            "SELECT osm_type, osm_id, category, kind, name, brand, ST_X(geom), ST_Y(geom),
-                    tags ->> 'social_facility', tags ->> 'social_facility:for', tags ->> 'operator'
-             FROM pois WHERE geom && ST_MakeEnvelope($1, $2, $3, $4, 4326) ORDER BY osm_type, osm_id",
-            &[&west, &south, &east, &north],
-        )
-        .await?;
-    let mut p = PoiInputs::default();
-    let mut index = HashMap::new();
-    for row in &rows {
-        let osm_type = match row.get::<_, &str>(0) {
-            "node" => NODE,
-            "way" => WAY,
-            _ => RELATION,
-        };
-        let category: &str = row.get(2);
-        let (kind, name, brand): (&str, Option<&str>, Option<&str>) =
-            (row.get(3), row.get(4), row.get(5));
-        let tag = |key: &str| -> Option<&str> {
-            match key {
-                "social_facility" => row.get(8),
-                "social_facility:for" => row.get(9),
-                "operator" => row.get(10),
-                "name" => name,
-                "brand" => brand,
-                _ => None,
-            }
-        };
-        let charity = charity_weight(category, kind, tag);
-        p.push(
-            &mut index,
-            (osm_type, row.get(1)),
-            POI_KEYS
-                .iter()
-                .position(|k| *k == category)
-                .ok_or(format!("unknown category {category}"))? as u8,
-            [Some(kind), name, brand],
-            [row.get(6), row.get(7)],
-            charity,
-        );
-    }
-    Ok(p)
-}
-
 impl PoiInputs {
-    /// The points of interest of OSM loaded for a box (local::load_box) and extracted, as load returns them from
-    /// Postgres: those in the box (edges included), ordered by OSM type (as text) and id.
+    /// The points of interest of OSM loaded for a box (local::load_box) and extracted: those in the box (edges
+    /// included), ordered by OSM type (as text, as Postgres did) and id.
     pub fn from_extracted(
         osm: &Osm,
         x: &Extracted,

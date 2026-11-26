@@ -1,7 +1,7 @@
-// Screenshot the world headlessly, with cells from the cell server (run `npm run server`):
+// Screenshot the world headlessly, with cells from the cell server (run `cellgen serve` in crates/cellgen):
 //   npm run shot -- [--view=lat,lon,alt,yaw,pitch] [--graph] [--radius <m>] [--size 1600x1200] [--out data/shots/x.png]
 // (Use --view=..., with "=": a value starting with "-" would otherwise parse as a flag.)
-// Waits until every cell in range has loaded, which may mean downloading OSM first.
+// Waits until every cell in range has loaded, which may mean building them first.
 
 import { mkdir } from "node:fs/promises";
 import path from "node:path";

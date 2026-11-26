@@ -10,7 +10,6 @@ use crate::boxes;
 use crate::extract::{self, Extracted, Polygons};
 use crate::osm::{Osm, RELATION, WAY};
 use std::collections::HashMap;
-use tokio_postgres::Client;
 
 /// Buildings as columns; strings (kinds, roof shapes) once each in `strings`; building b's polygons in `shape`
 /// (poly_start[b]..poly_start[b + 1], each its rings, outer first, closed).
@@ -32,67 +31,6 @@ pub struct BuildingInputs {
 
 /// TS HEIGHT_SOURCES, as the import stores them.
 pub const HEIGHT_SOURCES: [&str; 3] = ["height", "levels", "default"];
-
-/// TEMPORARY, for `cellgen compare`: delete with Postgres (step 1d). The buildings in a lon/lat box, by the TS
-/// loadBuildings query (coordinates through ST_AsGeoJSON, as it reads them: 9 decimals).
-pub async fn load(
-    db: &Client,
-    [west, south, east, north]: [f64; 4],
-) -> Result<BuildingInputs, Box<dyn std::error::Error + Send + Sync>> {
-    let rows = db
-        .query(
-            "WITH box AS (SELECT ST_MakeEnvelope($1, $2, $3, $4, 4326) AS g)
-             SELECT b.osm_type, b.osm_id, b.kind, b.is_part, b.height_m, b.min_height_m, b.height_source,
-                    b.levels, b.tags ->> 'building:min_level', b.tags ->> 'roof:shape',
-                    (ST_AsGeoJSON(b.geom)::json -> 'coordinates')::text
-             FROM buildings b, box
-             WHERE ST_Intersects(b.geom, box.g)
-               AND (b.is_part OR NOT EXISTS (
-                     SELECT 1 FROM buildings p
-                     WHERE p.is_part AND p.geom && b.geom
-                       AND ST_Intersects(b.geom, ST_PointOnSurface(p.geom))))
-             ORDER BY b.osm_type, b.osm_id",
-            &[&west, &south, &east, &north],
-        )
-        .await?;
-    let mut b = BuildingInputs::empty();
-    let mut index = HashMap::new();
-    for row in &rows {
-        let coords: Vec<Vec<Vec<[f64; 2]>>> = serde_json::from_str(row.get(10))?;
-        for polygon in &coords {
-            for ring in polygon {
-                b.shape.lonlat.extend_from_slice(ring);
-                b.shape.point_start.push(b.shape.lonlat.len() as u32);
-            }
-            b.shape
-                .ring_start
-                .push((b.shape.point_start.len() - 1) as u32);
-        }
-        let source: &str = row.get(6);
-        b.push(
-            &mut index,
-            (
-                if row.get::<_, &str>(0) == "way" {
-                    WAY
-                } else {
-                    RELATION
-                },
-                row.get(1),
-            ),
-            row.get(2),
-            row.get(3),
-            [row.get(4), row.get(5)],
-            HEIGHT_SOURCES
-                .iter()
-                .position(|s| *s == source)
-                .ok_or(format!("unknown height source {source}"))? as u8,
-            row.get::<_, Option<f32>>(7).unwrap_or(f32::NAN),
-            row.get(8),
-            row.get(9),
-        );
-    }
-    Ok(b)
-}
 
 /// How far the outlines intersecting the box reach (the box grown to cover them): an OSM load over it has every part
 /// that can replace them.
@@ -118,8 +56,7 @@ pub fn reach(x: &Extracted, bbox: [f64; 4]) -> [f64; 4] {
 }
 
 impl BuildingInputs {
-    /// The buildings of OSM loaded (local::load_box) over `reach(x, bbox)` and extracted, as load returns them from
-    /// Postgres.
+    /// The buildings of OSM loaded (local::load_box) over `reach(x, bbox)` and extracted.
     pub fn from_extracted(osm: &Osm, x: &Extracted, bbox: [f64; 4]) -> BuildingInputs {
         let xb = &x.buildings;
         let s = &xb.shape;
@@ -237,14 +174,6 @@ impl BuildingInputs {
     /// A string by index, for comparing two loads (whose strings are numbered differently).
     pub fn text(&self, s: Option<u32>) -> Option<&str> {
         s.map(|s| self.strings[s as usize].as_str())
-    }
-
-    /// Building b's points, every ring in order.
-    pub fn points(&self, b: usize) -> &[[f64; 2]] {
-        let s = &self.shape;
-        let rings = s.ring_start[s.poly_start[b] as usize] as usize
-            ..s.ring_start[s.poly_start[b + 1] as usize] as usize;
-        &s.lonlat[s.point_start[rings.start] as usize..s.point_start[rings.end] as usize]
     }
 }
 

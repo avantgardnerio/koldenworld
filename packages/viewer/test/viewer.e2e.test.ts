@@ -92,7 +92,7 @@ beforeAll(async () => {
   dir = await mkdtemp(path.join(tmpdir(), "viewer-e2e-"));
   await writeGround(dir);
   const files = cellToArrow(buildCell(cell, ways, buildings));
-  const cellDir = path.join(dir, "cells", cellToken(cell));
+  const cellDir = path.join(dir, "ground", cellToken(cell));
   await mkdir(cellDir, { recursive: true });
   for (const t of CELL_TABLES) await writeFile(path.join(cellDir, `${t}.arrow`), files[t]);
   viewer = await openViewer({ dataDir: dir, query: "radius=1000&cars=0", hash: top(0, 1), width: W, height: H });
@@ -251,7 +251,7 @@ describe("traffic", () => {
     highDir = await mkdtemp(path.join(tmpdir(), "viewer-e2e-high-"));
     await writeGround(highDir, GROUND_H);
     const files = cellToArrow(drapeCell(buildCell(cell, ways, buildings), groundSampler(() => GROUND_H, CELL_LEVEL)));
-    const cellDir = path.join(highDir, "cells", cellToken(cell));
+    const cellDir = path.join(highDir, "ground", cellToken(cell));
     await mkdir(cellDir, { recursive: true });
     for (const t of CELL_TABLES) await writeFile(path.join(cellDir, `${t}.arrow`), files[t]);
     const [x, y] = firstCar();

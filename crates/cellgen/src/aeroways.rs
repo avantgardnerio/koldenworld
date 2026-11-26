@@ -1,6 +1,6 @@
 //! Airport surfaces: runways, taxiways and aprons, as ground kinds (decision 32). Center lines are expanded like
 //! roads, half their width either side (runways with flat ends, as painted thresholds; taxiways round, so their bends
-//! join smoothly), and areas are as they are; loaded from Postgres (aeroway_lines, aeroway_areas) in lon/lat.
+//! join smoothly), and areas are as they are; from the cell files, in lon/lat.
 
 use crate::boxes;
 use crate::clip::{UNITS, point};
@@ -9,13 +9,8 @@ use crate::geom::Metric;
 use crate::osm::Osm;
 use crate::polygon::MADE;
 use crate::s2;
-use crate::ways::wkb_line_string;
 use clipper2_rust::{EndType, FillRule, JoinType, Paths64, inflate_paths_64, union_subjects_64};
 use glam::DVec2;
-use tokio_postgres::Client;
-
-/// The kinds, in the order of `paths`: where they overlap, the first wins.
-pub const KINDS: [&str; 3] = ["runway", "taxiway", "apron"];
 
 /// Airport surfaces as columns: lines with a kind and a width, and area rings (outer rings counterclockwise, holes
 /// clockwise) with a kind, each a run of points (CSR).
@@ -29,53 +24,8 @@ pub struct Aeroways {
     pub lonlat: Vec<[f64; 2]>, // the lines' points, then the rings'
 }
 
-/// Every airport line and area intersecting a lon/lat box.
-pub async fn load(
-    db: &Client,
-    [west, south, east, north]: [f64; 4],
-) -> Result<Aeroways, Box<dyn std::error::Error + Send + Sync>> {
-    let kind = |k: &str| KINDS.iter().position(|c| *c == k).map(|i| i as u8);
-    let mut a = Aeroways {
-        line_start: vec![0],
-        ..Default::default()
-    };
-    let lines = db
-        .query(
-            "SELECT kind, width_m, ST_AsBinary(geom) FROM aeroway_lines
-             WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326)) ORDER BY osm_way_id",
-            &[&west, &south, &east, &north],
-        )
-        .await?;
-    for row in &lines {
-        let Some(k) = kind(row.get(0)) else { continue };
-        wkb_line_string(row.get(2), &mut a.lonlat)?;
-        a.line_kind.push(k);
-        a.width.push(row.get::<_, f32>(1) as f64);
-        a.line_start.push(a.lonlat.len() as u32);
-    }
-    // Each area's rings as line strings, outer rings counterclockwise and holes clockwise (so a nonzero fill of them
-    // all has the holes).
-    let rings = db
-        .query(
-            "SELECT kind, ST_AsBinary(ST_ExteriorRing((r).geom)) FROM (
-               SELECT kind, ST_DumpRings((ST_Dump(ST_ForcePolygonCCW(geom))).geom) AS r FROM aeroway_areas
-               WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326)) ORDER BY osm_type, osm_id
-             ) rings",
-            &[&west, &south, &east, &north],
-        )
-        .await?;
-    a.ring_start.push(a.lonlat.len() as u32);
-    for row in &rings {
-        let Some(k) = kind(row.get(0)) else { continue };
-        wkb_line_string(row.get(1), &mut a.lonlat)?;
-        a.ring_kind.push(k);
-        a.ring_start.push(a.lonlat.len() as u32);
-    }
-    Ok(a)
-}
-
 impl Aeroways {
-    /// The airports of OSM loaded for a box (local::load_box) and extracted, as load returns them from Postgres.
+    /// The airports of OSM loaded for a box (local::load_box) and extracted: lines and areas intersecting it.
     pub fn from_extracted(osm: &Osm, x: &Extracted, bbox: [f64; 4]) -> Aeroways {
         let mut a = Aeroways {
             line_start: vec![0],

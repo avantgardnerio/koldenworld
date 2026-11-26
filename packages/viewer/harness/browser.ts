@@ -17,7 +17,7 @@ export interface Session {
 }
 
 export interface OpenOptions {
-  dataDir?: string;   // static cells/<token>/*.arrow instead of the cell server
+  dataDir?: string;   // static ground/<token>/*.arrow instead of the cell server
   query?: string;     // e.g. "graph=1&radius=300"
   hash?: string;      // camera, "#lat,lon,alt,yaw,pitch"; default is the viewer's default view
   width: number;
@@ -29,7 +29,7 @@ export async function openViewer(o: OpenOptions): Promise<Session> {
   let server: ViteDevServer | undefined;
   let browser: Browser | undefined;
   try {
-    if (o.dataDir) process.env.CELL_SERVER = "";  // read by vite.config.ts
+    if (o.dataDir) process.env.CELLGEN_SERVER = "";  // read by vite.config.ts
     server = await createServer({
       configFile: path.join(viewerRoot, "vite.config.ts"),
       ...(o.dataDir ? { publicDir: o.dataDir } : {}),

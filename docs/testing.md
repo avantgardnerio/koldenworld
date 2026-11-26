@@ -12,11 +12,10 @@ Everything except `viewer` runs in Node with the same code as the browser. Claud
 
 ## CLI (sketch)
 
-Run as `npm run cli -- <command>`. Existing today: `migrate`, `cell`, `serve` (OSM is fetched and imported by `cellgen`: see osm-pipeline.md). The rest are planned.
+Planned; none of these exist yet (the old TS `cli` with `migrate`, `cell` and `serve` was removed with the TS cell
+server: cells are built by `cellgen`, see osm-pipeline.md).
 
 ```sh
-cli migrate                           # apply pending SQL migrations
-cli cell --token 876c7edc             # build one cell's files (cellgen serve imports its OSM)
 cli run scenarios/straight-line.json  # run a scenario, print pass/fail and diffs
 cli replay recordings/crash.jsonl     # replay a recorded input log
 cli view --at 1200,-340 --radius 150  # print the text view

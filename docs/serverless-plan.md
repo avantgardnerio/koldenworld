@@ -9,8 +9,8 @@ server. Optionally later the same Rust crate compiled to WASM runs in the browse
 
 Done and committed:
 
-- **Elevation everywhere:** FABDEM V1-2 (bare-earth Copernicus, 30 m, CC BY-NC-SA) plus the EGM2008 geoid, in both
-  readers (`crates/cellgen/src/elevation.rs`, `packages/cli/src/elevation.ts`). All 19,011 tiles (319 GB) are in
+- **Elevation everywhere:** FABDEM V1-2 (bare-earth Copernicus, 30 m, CC BY-NC-SA) plus the EGM2008 geoid
+  (`crates/cellgen/src/elevation.rs`). All 19,011 tiles (319 GB) are in
   `s3://koldenworld-data-2/dem/fabdem-v1-2/tiles/`, geoid in `dem/geoid/`. Missing tiles are fetched on first use
   (`s3.rs`, `.none` marks the sea); no tile = sea level.
 - **OSM cell files on S3:** the SedonaDB splitter (`../sedona-db`, branch `osm-pbf-reader`) writes
@@ -19,16 +19,23 @@ Done and committed:
   from Ballista); `SEDONA_SPILL_COMPRESSION`. Planet 261116 → `s3://koldenworld-data-2/osm/planet-261116/raw/`.
 - **cellgen without Postgres** (steps 1a–1c): `local::load_box` reads any box's OSM from the level-6 files it
   touches; `from_extracted` for roads, water, airports, buildings reproduces each Postgres query exactly
-  (`boxes.rs`: ST_Intersects, &&, ST_ForcePolygonCCW). `cellgen compare <token|lat,lon>` diffs the two;
-  `cellgen cell … --postgres` builds the old way. The ground server (`cellgen serve`, port 5175) builds every cell
+  (`boxes.rs`: ST_Intersects, &&, ST_ForcePolygonCCW). The ground server (`cellgen serve`, port 5175) builds every cell
   from files: byte-identical output where OSM versions match, more complete near level-6 edges (the old area import
   missed ways there). Far tiles (level ≤ 7) draw terrain only for now. `CELLGEN_OSM_S3=s3://…/raw` reads the cell
   files from S3 into a mirror under `data/osm/s3/`.
 
-What still needs Postgres: the **TS cell server** (`packages/cli/src/server.ts` + `cells.ts`, port 5174) and the
-`/ensure` import in cellgen (`areas.rs`) it calls.
+- **Step 1d done (2026-11-26):** every fine cell table (`terrain`, `buildings`, `pois`, `nodes`, `edges`) and
+  `/aircraft` come from `cellgen serve`, from the cell files; the viewer talks to nothing else. The TS cell server,
+  the PostGIS import (`areas.rs`, `import.rs`, `/ensure`), every Postgres loader, `cellgen compare` and the TS
+  migrations (`packages/db`, `packages/cli`) are deleted, and the OSM tables dropped. Postgres keeps only the empty
+  `game` database and its roles (`db/bootstrap.sql`), for auth later, with migrations in Rust.
+- **Still in TS, unused by the viewer:** `packages/world`'s cell building (`buildCell`, `drapeCell`,
+  `groundSampler`, `carveWater`, `buildRoadGraph`, `buildBuildings`, `buildPois`, the `*ToArrow` writers), kept for
+  its tests and the e2e test's fixture cell. Delete or keep later.
 
-## Step 1d: port the TS cell server into cellgen
+## Step 1d (done): port the TS cell server into cellgen
+
+What follows is how it was done, kept for reference.
 
 The TS server builds five tables per cell (level 13): `nodes`, `edges`, `buildings`, `terrain`, `pois`
 (`CELL_TABLES` in `packages/world/src/cell.ts`), served as `/cells/<token>/<table>.arrow` or all at once as

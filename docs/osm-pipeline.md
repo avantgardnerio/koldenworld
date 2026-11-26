@@ -1,24 +1,27 @@
 # OSM pipeline
 
-## Current: OSM on demand, by the Rust cell generator
+## Current: cell files, read by the Rust cell generator
 
 ```
 viewer: cells and tiles in view
-   │  GET /ground/<token>/…  (cellgen serve)     GET /cells/<token>.cell  (TS cell server: npm run server)
-   ▼                                              │  asks GET /ensure/<area> for each area it needs
-cellgen serve: before building a fine cell or coarse tile, every download area (level-12 S2 cell, ~4.5 km)
-   its load box touches, if not in osm_fetches (area "s2:<token>"):        (crates/cellgen: areas.rs)
-     fetch.rs   Overpass, one download at a time, retried while busy
-                  ─▶ data/osm/s2/<token>.json + .meta.json  (gitignored raw snapshot; cached)
-     osm.rs     parse [out:json] into columns (nodes, ways, relations; tags into one string table)
+   │  GET /ground/<token>/<table>.arrow and /aircraft  (cellgen serve, port 5175, through Vite)
+   ▼
+cellgen serve: on a miss, every table of a cell or tile from the OSM cell files (local.rs: the level-6 files its
+   load box touches, data/osm/cells/, or fetched from CELLGEN_OSM_S3 into data/osm/s3/), and the elevation data
+     osm.rs     the files' ways and tagged nodes into columns (tags into one string table)
      extract.rs roads, buildings, water, airports, points of interest (columns)
-     import.rs  one transaction ─▶ PostGIS
-   then builds from PostGIS (and the TS server builds its tables the same way).
+   ─▶ data/rust-cells/<token>/*.arrow (cached)
 ```
 
-By hand: `cellgen fetch <token | lat,lon>` (download and parse), `cellgen extract …` (counts), `cellgen import …` (into Postgres). `npm run cli -- cell --token <token>` builds one TS cell (cellgen serve must be running to import its areas).
+The cell files come from a planet (or extract) .pbf, split by the SedonaDB pipeline (docker/splitter). There is no
+database: the PostGIS import and the TS cell server were removed on 2026-11-26.
 
-Measured (Nov 2026): a downtown download area is 7–22 MB of raw OSM and takes 20–45 s from overpass-api.de (downtown Seattle: 43 s); parsing it takes 20–55 ms, extracting 2–13 ms, importing 0.2–0.5 s. Re-importing an area the TS import had written leaves every row identical.
+By hand: `cellgen fetch <token | lat,lon>` downloads an area from Overpass (cached in data/osm/s2/) and parses it;
+`cellgen extract …` prints what it holds (`--local`: from the cell files). `cellgen cell <token>…` builds cells into
+data/rust-cells/.
+
+Measured (Nov 2026, Overpass): a downtown download area is 7–22 MB of raw OSM and takes 20–45 s from overpass-api.de
+(downtown Seattle: 43 s); parsing it takes 20–55 ms, extracting 2–13 ms.
 
 ### Regional extracts (later)
 
@@ -27,8 +30,8 @@ Measured (Nov 2026): a downtown download area is 7–22 MB of raw OSM and takes 
 ## Target (later)
 
 ```
-PostGIS ─▶ export (TS, Node): as now, plus an R-tree per cell and LOD levels
-        ─▶ Arrow files per table per cell, immutable, keyed by content hash
+cell files ─▶ cellgen (one Rust Lambda, docs/serverless-plan.md): as now, plus an R-tree per cell and LOD levels
+        ─▶ Arrow files per table per cell on S3, immutable, keyed by content hash
         ─▶ GET /cells/{token}/{hash}/{table}.arrow   (Cache-Control: immutable, brotli)
         ─▶ client getBlob() → typed-array views
 ```

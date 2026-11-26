@@ -6,8 +6,7 @@
 //! The schema metadata (values JSON-encoded) holds the cell's token and terrainN (n). The heights are the drawn
 //! ground's own lattice (cell::rim_heights), so what stands on the ground meets what's drawn.
 
-use arrow_array::{Array, Float32Array, RecordBatch};
-use arrow_ipc::reader::FileReader;
+use arrow_array::{Float32Array, RecordBatch};
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
 use std::collections::HashMap;
@@ -38,28 +37,4 @@ pub fn encode(
     writer.finish()?;
     drop(writer);
     Ok(out)
-}
-
-/// A terrain.arrow's n and heights (to compare with the TS server's).
-pub fn decode(bytes: &[u8]) -> Result<(usize, Vec<f32>), Box<dyn std::error::Error>> {
-    let reader = FileReader::try_new(std::io::Cursor::new(bytes), None)?;
-    let n: usize = reader
-        .schema()
-        .metadata()
-        .get("terrainN")
-        .ok_or("terrain: no terrainN")?
-        .parse()?;
-    let mut heights = Vec::new();
-    for batch in reader {
-        let batch = batch?;
-        let h = batch
-            .column_by_name("h")
-            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-            .ok_or("terrain: no float32 column h")?;
-        heights.extend_from_slice(h.values());
-    }
-    if heights.len() != (n + 1) * (n + 1) {
-        return Err(format!("terrain: {} heights for n = {n}", heights.len()).into());
-    }
-    Ok((n, heights))
 }

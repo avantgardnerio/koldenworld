@@ -3,9 +3,8 @@
 //! coordinates, in each level-6 cell it passes through; every tagged node, in its cell). An area (level 12) is inside one
 //! level-6 cell, so one cell's files hold everything with a node in it.
 //!
-//! load_box loads any box the same way for building a cell rather than importing an area: the ways whose bounding box
-//! overlaps the box, from every level-6 cell the box touches, each way once; what each kind keeps of them, as its
-//! Postgres query would (boxes.rs), is up to its loader.
+//! load_box loads any box the same way for building a cell: the ways whose bounding box overlaps the box, from every
+//! level-6 cell the box touches, each way once; what each kind keeps of them (boxes.rs) is up to its loader.
 //!
 //! With CELLGEN_OSM_S3 set (`s3://bucket/prefix`, the same layout), a cell's files come from there instead, fetched on
 //! first use into a mirror, data/osm/s3/bucket/prefix/ (s3.rs).
@@ -30,12 +29,10 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 /// The level of the cells the files are split by.
 const FILE_LEVEL: u32 = 6;
 
-/// An area's OSM, and what identifies its source: the files' paths, sizes and modification times, standing in for an
-/// Overpass response's bytes in osm_fetches' hash (the same files give the same hash).
+/// An area's OSM, and where it came from.
 pub struct Loaded {
     pub osm: Osm,
     pub source: String,
-    pub identity: Vec<u8>,
 }
 
 /// Where the cell files are, under `data`: data/osm/cells, or the mirror of CELLGEN_OSM_S3.
@@ -58,20 +55,9 @@ pub fn load(dir: &Path, c: &Cell) -> Result<Option<Loaded>, Error> {
     else {
         return Ok(None);
     };
-    let mut identity = c.token.clone().into_bytes();
-    for path in [folder.join("ways.parquet"), folder.join("nodes.parquet")] {
-        if let Ok(meta) = path.metadata() {
-            identity.extend(path.to_string_lossy().as_bytes());
-            identity.extend(meta.len().to_le_bytes());
-            if let Ok(modified) = meta.modified() {
-                identity.extend(format!("{modified:?}").as_bytes());
-            }
-        }
-    }
     Ok(Some(Loaded {
         osm,
         source: format!("local:{}", folder.display()),
-        identity,
     }))
 }
 

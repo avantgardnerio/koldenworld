@@ -1,6 +1,0 @@
-{
-  // Node-only package.
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "types": ["node"] },
-  "include": ["src"]
-}

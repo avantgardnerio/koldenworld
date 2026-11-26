@@ -1,5 +1,5 @@
 mod aeroways;
-mod areas;
+mod aircraft;
 mod boxes;
 mod building_inputs;
 mod building_table;
@@ -17,7 +17,6 @@ mod geofabrik;
 mod geom;
 mod graph;
 mod ground_arrow;
-mod import;
 mod landcover;
 mod local;
 mod markings;
@@ -44,26 +43,20 @@ const USAGE: &str = "usage:
                [--min-class <class>] [--simplify <m>] [--terrain <n>] [--no-markings] [--no-sidewalks]
       build cells (at any level; level 10 and coarser draw less, as cell::Options::for_level; the flags override it):
       <out>/<token>/ (default out: data/rust-cells), pictures in target/. With --ways, from those ways
-      (JSON, as the TS RoadWayInput) instead of the database: no water, terrain flat at --height (default 0)
+      (JSON, as the TS RoadWayInput) instead of the cell files: no water, terrain flat at --height (default 0)
   cellgen buildings <token> [--gap <m>] [--simplify <m>] [--outline <m>]
                                                 a tile's buildings merged into massing: target/buildings.png
   cellgen fetch <token | lat,lon>               an area's raw OSM (Overpass, cached in data/osm/s2/), parsed: counts
   cellgen extract <token | lat,lon>             an area's roads, buildings, water, airports, points of interest: counts
-  cellgen import <token | lat,lon>              an area's OSM (fetched if need be) into Postgres: rows upserted, deleted
   cellgen region <lat,lon> [--download]          the Geofabrik region holding a point (its extract, downloaded once)
-  cellgen compare <token | lat,lon>             a cell's inputs from Postgres and from the cell files: what differs
-  cellgen terrain <token | lat,lon>             a cell's terrain.arrow (the drawn ground's lattice heights) in
-                                                target/, compared with the TS server's in data/export/cells/
-  cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
+  cellgen serve [--port <port>]                 cell server and live air traffic on 127.0.0.1 (default port 5175)
 
-The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
-is GAME_DATA (default: the repo's data/, found from here up).";
+The data directory (dem/, the cell files and the caches) is GAME_DATA (default: the repo's data/, found from here
+up).";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().position(|a| a == name);
-    let db = std::env::var("CELLGEN_DB")
-        .unwrap_or_else(|_| "host=/var/run/postgresql user=game dbname=game".into());
     match args.first().map(String::as_str) {
         Some("cell") => {
             let value = |name: &str| flag(name).map(|i| args.get(i + 1).ok_or(USAGE)).transpose();
@@ -107,23 +100,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 o.sidewalks &= flag("--no-sidewalks").is_none();
                 o
             };
-            let (pool, data) = match fixture {
-                Some(_) => (None, None),
-                None => (Some(pool(&db)?), Some(data_dir()?)),
+            let data = match fixture {
+                Some(_) => None,
+                None => Some(data_dir()?),
             };
-            let runtime = tokio::runtime::Runtime::new()?;
             let out = match value("--out")? {
                 Some(o) => PathBuf::from(o),
                 None => data.clone().unwrap_or(data_dir()?).join("rust-cells"),
             };
             for c in &cells {
                 let started = std::time::Instant::now();
-                let inputs = match (&fixture, &pool, data.as_deref()) {
-                    (Some(ways), _, _) => cell::Inputs::fixture(ways, height, c),
-                    (None, Some(pool), Some(data)) if flag("--postgres").is_some() => runtime
-                        .block_on(cell::Inputs::load(pool, data, c, &options(c)))
-                        .map_err(|e| e.to_string())?,
-                    (None, Some(_), Some(data)) => {
+                let inputs = match (&fixture, data.as_deref()) {
+                    (Some(ways), _) => cell::Inputs::fixture(ways, height, c),
+                    (None, Some(data)) => {
                         cell::Inputs::from_files(data, c, &options(c)).map_err(|e| e.to_string())?
                     }
                     _ => unreachable!(),
@@ -165,14 +154,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let what = args.get(1).ok_or(USAGE)?;
             let c = cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?;
             let started = std::time::Instant::now();
-            let pool = pool(&db)?;
             let box_ = s2::lat_lon_bounds(c.face, c.square, 0.0);
-            let b = tokio::runtime::Runtime::new()?
-                .block_on(async {
-                    let db = pool.get().await?;
-                    buildings::load(&db, box_, |lon, lat| c.owns(lon, lat)).await
-                })
-                .map_err(|e| e.to_string())?;
+            let osm = local::load_box(&local::cells_dir(&data_dir()?), box_)
+                .map_err(|e| e.to_string())?
+                .ok_or("no cell files for that tile")?;
+            let b = buildings::from_extracted(&osm, &extract::extract(&osm), box_, |lon, lat| {
+                c.owns(lon, lat)
+            });
             let loaded = started.elapsed();
             let metric = s2::cell_metric(c.face, c.square);
             let gap: f64 = flag("--gap")
@@ -346,48 +334,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  points of interest, e.g.: {}", sample.join(", "));
             Ok(())
         }
-        Some("import") => {
-            let what = args.get(1).ok_or(USAGE)?;
-            let c = match what.split_once(',') {
-                Some((lat, lon)) => fetch::fetch_cell(lat.trim().parse()?, lon.trim().parse()?),
-                None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
-            };
-            let data = data_dir()?;
-            let pool = pool(&db)?;
-            let started = std::time::Instant::now();
-            let counts = tokio::runtime::Runtime::new()?
-                .block_on(async {
-                    // --local: from the cell files under data/osm/cells (local.rs), not Overpass.
-                    let (raw, source, osm) = if args.get(2).map(String::as_str) == Some("--local") {
-                        let cells = local::cells_dir(&data);
-                        let loaded = local::load(&cells, &c)?.ok_or(format!(
-                            "no cell files for {} under {}",
-                            c.token,
-                            cells.display()
-                        ))?;
-                        (loaded.identity, loaded.source, loaded.osm)
-                    } else {
-                        let raw = fetch::fetch(&data, &c, |m| println!("{m}")).await?;
-                        let osm = osm::parse(&raw)?;
-                        (raw, fetch::OVERPASS_URL.to_string(), osm)
-                    };
-                    let x = extract::extract(&osm);
-                    let area = format!("s2:{}", c.token);
-                    let snapshot = import::Snapshot {
-                        area: &area,
-                        bbox: fetch::padded_box(&c),
-                        source: &source,
-                        raw: &raw,
-                    };
-                    let mut db = pool.get().await?;
-                    import::import(&mut db, &snapshot, &osm, &x).await
-                })
-                .map_err(|e| e.to_string())?;
-            println!("{} imported in {:.1?}", c.token, started.elapsed());
-            println!("  upserted: {:?}", counts.upserted);
-            println!("  deleted:  {:?}", counts.deleted);
-            Ok(())
-        }
         Some("region") => {
             let (lat, lon) = args.get(1).and_then(|a| a.split_once(',')).ok_or(USAGE)?;
             let (lat, lon): (f64, f64) = (lat.trim().parse()?, lon.trim().parse()?);
@@ -417,472 +363,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| e.to_string())?;
             Ok(())
         }
-        Some("compare") => {
-            // A cell's road ways from Postgres and from the cell files: what differs.
-            let what = args.get(1).ok_or(USAGE)?;
-            let c = match what.split_once(',') {
-                Some((lat, lon)) => cell::Cell::at(lat.trim().parse()?, lon.trim().parse()?),
-                None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
-            };
-            println!("cell {} (level {})", c.token, c.level);
-            let bbox = c.load_box();
-            let started = std::time::Instant::now();
-            let osm = local::load_box(&local::cells_dir(&data_dir()?), bbox)
-                .map_err(|e| e.to_string())?
-                .ok_or("no cell files for that box")?;
-            let x = extract::extract(&osm);
-            let files = ways::RoadWays::from_extracted(&osm, &x, bbox);
-            println!(
-                "files: {} ways ({} OSM ways loaded) in {:.1?}",
-                files.osm_id.len(),
-                osm.ways(),
-                started.elapsed()
-            );
-            let [west, south, east, north] = bbox;
-            let pool = pool(&db)?;
-            let owns = |lon, lat| c.owns(lon, lat);
-            let (db, water, aeroways, buildings, pois, building_inputs, graph_ways) =
-                tokio::runtime::Runtime::new()?
-                    .block_on(async {
-                        let client = pool.get().await?;
-                        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-                            ways::load_road_ways(&client, west, south, east, north).await?,
-                            water::load_water(&client, west, south, east, north, 0.0).await?,
-                            aeroways::load(&client, bbox).await?,
-                            buildings::load(&client, bbox, owns).await?,
-                            pois::load(&client, bbox).await?,
-                            building_inputs::load(&client, bbox).await?,
-                            ways::load_road_ways_touching(&client, c.cell_box(300.0)).await?,
-                        ))
-                    })
-                    .map_err(|e| e.to_string())?;
-            println!("postgres: {} ways", db.osm_id.len());
-            compare_ways(&db, &files);
-            let w = water::Water::from_extracted(&osm, &x, bbox, 0.0);
-            let same = |what: &str, n: (usize, usize), equal: bool| {
-                println!(
-                    "{what}: postgres {}, files {}{}",
-                    n.0,
-                    n.1,
-                    if equal { ", identical" } else { ", DIFFER" }
-                );
-            };
-            same(
-                "waterways",
-                (water.width.len(), w.width.len()),
-                water.width == w.width
-                    && water.line_start == w.line_start
-                    && water.lonlat[..water.ring_start[0] as usize]
-                        == w.lonlat[..w.ring_start[0] as usize],
-            );
-            same(
-                "water rings",
-                (water.ring_start.len() - 1, w.ring_start.len() - 1),
-                water.lonlat == w.lonlat && water.ring_start == w.ring_start,
-            );
-            let a = aeroways::Aeroways::from_extracted(&osm, &x, bbox);
-            same(
-                "airport lines",
-                (aeroways.line_kind.len(), a.line_kind.len()),
-                aeroways.line_kind == a.line_kind
-                    && aeroways.width == a.width
-                    && aeroways.line_start == a.line_start,
-            );
-            same(
-                "airport rings",
-                (aeroways.ring_kind.len(), a.ring_kind.len()),
-                aeroways.ring_kind == a.ring_kind
-                    && aeroways.ring_start == a.ring_start
-                    && aeroways.lonlat == a.lonlat,
-            );
-            let b = buildings::from_extracted(&osm, &x, bbox, owns);
-            same(
-                "buildings",
-                (buildings.osm_id.len(), b.osm_id.len()),
-                buildings.osm_id == b.osm_id
-                    && buildings.height == b.height
-                    && buildings.ring_of == b.ring_of
-                    && buildings.ring_start == b.ring_start
-                    && buildings.lonlat == b.lonlat,
-            );
-            if buildings.osm_id != b.osm_id {
-                let (pa, pb): (
-                    std::collections::HashSet<i64>,
-                    std::collections::HashSet<i64>,
-                ) = (
-                    buildings.osm_id.iter().copied().collect(),
-                    b.osm_id.iter().copied().collect(),
-                );
-                let mut only_a: Vec<_> = pa.difference(&pb).copied().collect();
-                let mut only_b: Vec<_> = pb.difference(&pa).copied().collect();
-                only_a.sort_unstable();
-                only_b.sort_unstable();
-                println!(
-                    "  buildings only in postgres: {} {:?}",
-                    only_a.len(),
-                    &only_a[..only_a.len().min(8)]
-                );
-                println!(
-                    "  buildings only in files:    {} {:?}",
-                    only_b.len(),
-                    &only_b[..only_b.len().min(8)]
-                );
-            }
-            compare_pois(&pois, &pois::PoiInputs::from_extracted(&osm, &x, bbox));
-            // A fine cell's buildings: the parts replacing an outline can lie past the box, so load over the outlines.
-            let reach = building_inputs::reach(&x, bbox);
-            let cells = local::cells_dir(&data_dir()?);
-            let wider = (reach != bbox)
-                .then(|| local::load_box(&cells, reach))
-                .transpose()
-                .map_err(|e| e.to_string())?
-                .flatten();
-            let files = match &wider {
-                Some(osm) => building_inputs::BuildingInputs::from_extracted(
-                    osm,
-                    &extract::extract(osm),
-                    bbox,
-                ),
-                None => building_inputs::BuildingInputs::from_extracted(&osm, &x, bbox),
-            };
-            compare_building_inputs(&building_inputs, &files);
-            // The road graph's ways, over the TS cell box: those in it and every way sharing a node with them.
-            let graph_box = c.cell_box(300.0);
-            let reach = ways::reach(&x, graph_box);
-            let wider = local::load_box(&cells, reach)
-                .map_err(|e| e.to_string())?
-                .ok_or("no cell files over the roads' reach")?;
-            let files = ways::RoadWays::with_touching(&wider, &extract::extract(&wider), graph_box);
-            println!(
-                "graph ways: postgres {}, files {}",
-                graph_ways.osm_id.len(),
-                files.osm_id.len()
-            );
-            compare_ways(&graph_ways, &files);
-            Ok(())
-        }
-        Some("terrain") => {
-            // A cell's terrain table from the drawn ground's lattice, and how it differs from the TS server's.
-            let what = args.get(1).ok_or(USAGE)?;
-            let c = match what.split_once(',') {
-                Some((lat, lon)) => cell::Cell::at(lat.trim().parse()?, lon.trim().parse()?),
-                None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
-            };
-            let data = data_dir()?;
-            let n = cell::Options::for_level(c.level).terrain;
-            let dem = elevation::Elevation::region(&data.join("dem"), c.load_box())?;
-            let rim = cell::rim_heights(|lat, lon| dem.height(lat, lon), c.face, c.square, n);
-            let heights = cell::lattice(&rim, n);
-            let bytes = terrain_arrow::encode(&heights, n, &c.token)?;
-            let out = PathBuf::from("target").join(format!("terrain-{}.arrow", c.token));
-            std::fs::write(&out, &bytes)?;
-            println!(
-                "cell {} (level {}): {} heights ({} without data) → {} ({} bytes)",
-                c.token,
-                c.level,
-                heights.len(),
-                dem.missing.get(),
-                out.display(),
-                bytes.len()
-            );
-            let ts = data
-                .join("export/cells")
-                .join(&c.token)
-                .join("terrain.arrow");
-            let Ok(ts) = std::fs::read(&ts) else {
-                println!("no TS terrain at {}", ts.display());
-                return Ok(());
-            };
-            let (ts_n, ts_h) = terrain_arrow::decode(&ts)?;
-            if ts_n != n {
-                println!("TS lattice is n = {ts_n}, ours n = {n}: not comparable");
-                return Ok(());
-            }
-            // By how much: exact, rounding (under 1 cm), the TS water carve (1 m lower), anything else.
-            let (mut exact, mut rounding, mut carved, mut other, mut worst) = (0, 0, 0, 0, 0.0f64);
-            for (&a, &b) in heights.iter().zip(&ts_h) {
-                let d = b as f64 - a as f32 as f64;
-                worst = f64::max(worst, d.abs());
-                match d {
-                    0.0 => exact += 1,
-                    d if d.abs() < 0.01 => rounding += 1,
-                    d if (d + 1.0).abs() < 0.01 => carved += 1,
-                    _ => other += 1,
-                }
-            }
-            println!(
-                "vs TS ({} bytes): {exact} identical, {rounding} within 1 cm, {carved} 1 m lower (water carve), \
-                 {other} other; largest difference {worst:.3} m",
-                ts.len()
-            );
-            Ok(())
-        }
         Some("serve") => {
             let port = match flag("--port") {
                 Some(i) => args.get(i + 1).ok_or(USAGE)?.parse()?,
                 None => 5175,
             };
-            serve::serve(port, data_dir()?, pool(&db)?)
+            serve::serve(port, data_dir()?)
         }
         _ => Err(USAGE.into()),
     }
-}
-
-/// A pool of Postgres connections from a connection string (as libpq's: "host=… user=… dbname=…").
-/// What differs between two sets of buildings for a fine cell (`a` Postgres's, `b` the files'), the first few of each
-/// kind. Postgres's coordinates come through GeoJSON (9 decimals), so points are compared within 1e-9° too.
-fn compare_building_inputs(
-    a: &building_inputs::BuildingInputs,
-    b: &building_inputs::BuildingInputs,
-) {
-    use std::collections::HashMap;
-    let index = |p: &building_inputs::BuildingInputs| -> HashMap<(u8, i64), usize> {
-        (0..p.osm_id.len())
-            .map(|i| ((p.osm_type[i], p.osm_id[i]), i))
-            .collect()
-    };
-    let (ia, ib) = (index(a), index(b));
-    let only = |x: &HashMap<(u8, i64), usize>, y: &HashMap<(u8, i64), usize>| {
-        let mut keys: Vec<(u8, i64)> = x.keys().filter(|k| !y.contains_key(k)).copied().collect();
-        keys.sort_unstable();
-        keys
-    };
-    let (only_a, only_b) = (only(&ia, &ib), only(&ib, &ia));
-    let same_f = |x: f64, y: f64| x == y || (x.is_nan() && y.is_nan());
-    let (mut exact, mut rounded) = (0, 0);
-    let mut differ: HashMap<&str, Vec<i64>> = HashMap::new();
-    for (k, &i) in &ia {
-        let Some(&j) = ib.get(k) else { continue };
-        let (pa, pb) = (a.points(i), b.points(j));
-        let shape = |p: &building_inputs::BuildingInputs, i: usize| {
-            let s = &p.shape;
-            (s.poly_start[i]..s.poly_start[i + 1])
-                .map(|q| {
-                    (s.ring_start[q as usize]..s.ring_start[q as usize + 1])
-                        .map(|r| s.point_start[r as usize + 1] - s.point_start[r as usize])
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        };
-        let geometry = if shape(a, i) != shape(b, j) {
-            false
-        } else if pa == pb {
-            exact += 1;
-            true
-        } else if pa
-            .iter()
-            .zip(pb)
-            .all(|(p, q)| (p[0] - q[0]).abs() <= 1e-9 && (p[1] - q[1]).abs() <= 1e-9)
-        {
-            rounded += 1;
-            true
-        } else {
-            false
-        };
-        let checks = [
-            ("kind", a.text(Some(a.kind[i])) == b.text(Some(b.kind[j]))),
-            ("is_part", a.is_part[i] == b.is_part[j]),
-            ("height", a.height[i] == b.height[j]),
-            ("min_height", a.min_height[i] == b.min_height[j]),
-            ("height_source", a.height_source[i] == b.height_source[j]),
-            ("levels", same_f(a.levels[i] as f64, b.levels[j] as f64)),
-            ("min_level", same_f(a.min_level[i], b.min_level[j])),
-            (
-                "roof_shape",
-                a.text(a.roof_shape[i]) == b.text(b.roof_shape[j]),
-            ),
-            ("geometry", geometry),
-        ];
-        for (what, ok) in checks {
-            if !ok {
-                differ.entry(what).or_default().push(k.1);
-            }
-        }
-    }
-    let ids = |p: &building_inputs::BuildingInputs| {
-        p.osm_type
-            .iter()
-            .zip(&p.osm_id)
-            .map(|(&t, &id)| (t, id))
-            .collect::<Vec<_>>()
-    };
-    println!(
-        "fine buildings: postgres {}, files {}{}",
-        a.osm_id.len(),
-        b.osm_id.len(),
-        if only_a.is_empty() && only_b.is_empty() && differ.is_empty() && ids(a) == ids(b) {
-            ", identical (same order)"
-        } else {
-            ", DIFFER"
-        }
-    );
-    println!("  geometry: {exact} exact, {rounded} within 1e-9° (GeoJSON's 9 decimals)");
-    println!(
-        "  only in postgres: {} {:?}",
-        only_a.len(),
-        &only_a[..only_a.len().min(8)]
-    );
-    println!(
-        "  only in files:    {} {:?}",
-        only_b.len(),
-        &only_b[..only_b.len().min(8)]
-    );
-    let mut differ: Vec<_> = differ.into_iter().collect();
-    differ.sort_unstable();
-    for (what, mut v) in differ {
-        v.sort_unstable();
-        println!("  {what} differs: {} {:?}", v.len(), &v[..v.len().min(8)]);
-    }
-}
-
-/// What differs between two sets of points of interest (`a` Postgres's, `b` the files'), the first few of each kind.
-fn compare_pois(a: &pois::PoiInputs, b: &pois::PoiInputs) {
-    use std::collections::HashMap;
-    let index = |p: &pois::PoiInputs| -> HashMap<(u8, i64), usize> {
-        (0..p.osm_id.len())
-            .map(|i| ((p.osm_type[i], p.osm_id[i]), i))
-            .collect()
-    };
-    let (ia, ib) = (index(a), index(b));
-    let only = |x: &HashMap<(u8, i64), usize>, y: &HashMap<(u8, i64), usize>| {
-        let mut keys: Vec<(u8, i64)> = x.keys().filter(|k| !y.contains_key(k)).copied().collect();
-        keys.sort_unstable();
-        keys
-    };
-    let (only_a, only_b) = (only(&ia, &ib), only(&ib, &ia));
-    let mut differ: HashMap<&str, Vec<i64>> = HashMap::new();
-    for (k, &i) in &ia {
-        let Some(&j) = ib.get(k) else { continue };
-        let checks = [
-            ("category", a.category[i] == b.category[j]),
-            ("kind", a.text(Some(a.kind[i])) == b.text(Some(b.kind[j]))),
-            ("name", a.text(a.name[i]) == b.text(b.name[j])),
-            ("brand", a.text(a.brand[i]) == b.text(b.brand[j])),
-            ("position", a.lonlat[i] == b.lonlat[j]),
-            ("charity", a.charity[i] == b.charity[j]),
-        ];
-        for (what, ok) in checks {
-            if !ok {
-                differ.entry(what).or_default().push(k.1);
-            }
-        }
-    }
-    let ids = |p: &pois::PoiInputs| {
-        p.osm_type
-            .iter()
-            .zip(&p.osm_id)
-            .map(|(&t, &id)| (t, id))
-            .collect::<Vec<_>>()
-    };
-    println!(
-        "points of interest: postgres {}, files {}{}",
-        a.osm_id.len(),
-        b.osm_id.len(),
-        if only_a.is_empty() && only_b.is_empty() && differ.is_empty() && ids(a) == ids(b) {
-            ", identical (same order)"
-        } else {
-            ", DIFFER"
-        }
-    );
-    println!(
-        "  only in postgres: {} {:?}",
-        only_a.len(),
-        &only_a[..only_a.len().min(8)]
-    );
-    println!(
-        "  only in files:    {} {:?}",
-        only_b.len(),
-        &only_b[..only_b.len().min(8)]
-    );
-    let mut differ: Vec<_> = differ.into_iter().collect();
-    differ.sort_unstable();
-    for (what, mut v) in differ {
-        v.sort_unstable();
-        println!("  {what} differs: {} {:?}", v.len(), &v[..v.len().min(8)]);
-    }
-}
-
-/// What differs between two sets of road ways (`a` Postgres's, `b` the files'), way by way, the first few of each kind.
-fn compare_ways(a: &ways::RoadWays, b: &ways::RoadWays) {
-    use std::collections::HashMap;
-    let index = |w: &ways::RoadWays| -> HashMap<i64, usize> {
-        w.osm_id
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| (id, i))
-            .collect()
-    };
-    let (ia, ib) = (index(a), index(b));
-    let only = |x: &HashMap<i64, usize>, y: &HashMap<i64, usize>| {
-        let mut ids: Vec<i64> = x.keys().filter(|id| !y.contains_key(id)).copied().collect();
-        ids.sort_unstable();
-        ids
-    };
-    let (only_a, only_b) = (only(&ia, &ib), only(&ib, &ia));
-    println!(
-        "only in postgres: {} {:?}",
-        only_a.len(),
-        &only_a[..only_a.len().min(8)]
-    );
-    println!(
-        "only in files:    {} {:?}",
-        only_b.len(),
-        &only_b[..only_b.len().min(8)]
-    );
-    let mut differ: HashMap<&str, Vec<i64>> = HashMap::new();
-    for (&id, &i) in &ia {
-        let Some(&j) = ib.get(&id) else { continue };
-        let nodes =
-            |w: &ways::RoadWays, k: usize| w.node_start[k] as usize..w.node_start[k + 1] as usize;
-        let checks = [
-            ("class", a.class[i] == b.class[j]),
-            (
-                "name",
-                a.names[a.name[i] as usize] == b.names[b.name[j] as usize],
-            ),
-            ("nodes", a.node_id[nodes(a, i)] == b.node_id[nodes(b, j)]),
-            (
-                "coordinates",
-                a.lonlat[nodes(a, i)] == b.lonlat[nodes(b, j)],
-            ),
-            (
-                "lanes",
-                (a.lanes_fwd[i], a.lanes_back[i]) == (b.lanes_fwd[j], b.lanes_back[j]),
-            ),
-            ("sidewalks", a.sidewalks[i] == b.sidewalks[j]),
-            ("speed", a.speed[i] == b.speed[j]),
-            ("structure", a.structure[i] == b.structure[j]),
-        ];
-        for (what, same) in checks {
-            if !same {
-                differ.entry(what).or_default().push(id);
-            }
-        }
-    }
-    let mut kinds: Vec<_> = differ.into_iter().collect();
-    kinds.sort();
-    for (what, mut ids) in kinds {
-        ids.sort_unstable();
-        println!(
-            "{what} differs: {} {:?}",
-            ids.len(),
-            &ids[..ids.len().min(8)]
-        );
-    }
-}
-
-fn pool(db: &str) -> Result<deadpool_postgres::Pool, Box<dyn std::error::Error>> {
-    let config: tokio_postgres::Config = db.parse()?;
-    let manager = deadpool_postgres::Manager::from_config(
-        config,
-        tokio_postgres::NoTls,
-        deadpool_postgres::ManagerConfig {
-            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
-        },
-    );
-    Ok(deadpool_postgres::Pool::builder(manager)
-        .max_size(32)
-        .build()?)
 }
 
 /// GAME_DATA, or the nearest data/ with a dem/ in it, from the working directory up.

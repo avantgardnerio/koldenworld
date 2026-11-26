@@ -2,11 +2,11 @@
 //! buildings.arrow and buildings_triangles.arrow massing, a fine cell's buildings.arrow, pois.arrow, nodes.arrow and edges.arrow), built on a miss and cached as files under data/rust-cells/<token>/:
 //! the inputs from the cell files and elevation data (Inputs::from_files), then built, both on Tokio's blocking pool.
 //! Requests for a cell being built wait for that one build.
-//! GET /ensure/<area token> imports an area's OSM into Postgres (areas.rs), for the TS cell server.
+//! GET /aircraft?lat=&lon=&nm= answers with live air traffic around a point (aircraft.rs).
 
-use crate::areas::Areas;
+use crate::aircraft::Aircraft;
 use crate::cell::{self, Cell};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
@@ -29,30 +29,23 @@ const TABLES: [&str; 8] = [
 struct App {
     data: PathBuf,                                                 // data/ (dem/ under it)
     cache: PathBuf,                                                // data/rust-cells/
-    areas: Areas,                                                  // OSM areas imported on demand
+    aircraft: Aircraft,                                            // live air traffic, rate-limited
     building: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, // a lock per cell being asked for
 }
 
 /// Serves on 127.0.0.1:`port` until stopped.
-pub fn serve(
-    port: u16,
-    data: PathBuf,
-    pool: deadpool_postgres::Pool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn serve(port: u16, data: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let aircraft = Aircraft::new()?;
     tokio::runtime::Runtime::new()?.block_on(async {
-        let areas = Areas::new(data.clone(), pool)
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        println!("{} OSM areas imported", areas.imported());
         let app = Arc::new(App {
             cache: data.join("rust-cells"),
             data,
-            areas,
+            aircraft,
             building: Mutex::default(),
         });
         let router = Router::new()
             .route("/cells/{token}/{table}", get(table))
-            .route("/ensure/{token}", get(ensure))
+            .route("/aircraft", get(air_traffic))
             .with_state(app);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         println!(
@@ -64,14 +57,29 @@ pub fn serve(
     Ok(())
 }
 
-/// An OSM download area imported (fetched first if need be), for the TS cell server.
-async fn ensure(State(app): State<Arc<App>>, Path(token): Path<String>) -> Response {
-    match app.areas.ensure(&token).await {
-        Ok(()) => (StatusCode::OK, "imported\n").into_response(),
-        Err(e) => {
-            eprintln!("area {token}: {e}");
-            (StatusCode::BAD_GATEWAY, format!("{e}\n")).into_response()
-        }
+/// Live air traffic around a point: ?lat=&lon=&nm= (nautical miles).
+async fn air_traffic(
+    State(app): State<Arc<App>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let number = |k: &str| {
+        q.get(k)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+    };
+    let (Some(lat), Some(lon), Some(nm)) = (number("lat"), number("lon"), number("nm")) else {
+        return (StatusCode::BAD_REQUEST, "lat, lon and nm are required\n").into_response();
+    };
+    match app.aircraft.around(lat, lon, nm).await {
+        Ok(body) => (
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{e}\n")).into_response(),
     }
 }
 

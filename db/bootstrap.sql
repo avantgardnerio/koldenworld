@@ -31,7 +31,8 @@ GRANT CONNECT ON DATABASE game TO game_migrations, game;
 \connect game
 
 -- PostGIS is not a trusted extension, so it must be created by a superuser.
--- Migration 0001 repeats this with IF NOT EXISTS so a skipped bootstrap fails loudly.
+-- (Nothing uses it since the OSM tables went, 2026-11-26; migrations will
+-- move to Rust and start again at 0001.)
 CREATE EXTENSION postgis;
 
 -- Everything game_migrations creates in public is usable by the runtime role.

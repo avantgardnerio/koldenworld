@@ -1,5 +1,5 @@
-//! What a lon/lat box query returns, as PostGIS answers it, for features loaded from the cell files instead of
-//! Postgres: lines and polygons that intersect the box (ST_Intersects), outlines whose bounding box overlaps it (&&),
+//! What a lon/lat box query returned, as PostGIS answered it when the inputs came from Postgres, for features from the
+//! cell files: lines and polygons that intersect the box (ST_Intersects), outlines whose bounding box overlaps it (&&),
 //! and rings oriented as ST_ForcePolygonCCW leaves them (outer counterclockwise, holes clockwise). Planar, in degrees,
 //! as the geometry columns are.
 

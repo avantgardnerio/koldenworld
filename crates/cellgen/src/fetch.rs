@@ -1,6 +1,6 @@
 //! Raw OSM downloads from the Overpass API, one level-FETCH_LEVEL S2 cell (about 4.5 km) at a time: everything in the
 //! cell's lon/lat box (padded 50 m: cell edges are great-circle arcs), plus the outside nodes of ways crossing its edge.
-//! Cached under data/osm/s2/<token>.json with a <token>.meta.json beside it (as the TS cell server wrote them), so an
+//! Cached under data/osm/s2/<token>.json with a <token>.meta.json beside it, so an
 //! area is downloaded once.
 
 use crate::cell::Cell;

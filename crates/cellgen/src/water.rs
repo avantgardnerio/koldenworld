@@ -1,5 +1,5 @@
 //! Water: waterway lines (rivers, streams, canals) expanded like roads, each half its width either side, and water
-//! areas (riverbanks, lakes) as they are, loaded from Postgres (waterways, water_areas) in lon/lat.
+//! areas (riverbanks, lakes) as they are, from the cell files, in lon/lat.
 
 use crate::boxes;
 use crate::clip::{UNITS, point};
@@ -8,10 +8,8 @@ use crate::geom::Metric;
 use crate::osm::Osm;
 use crate::polygon::MADE;
 use crate::s2;
-use crate::ways::wkb_line_string;
 use clipper2_rust::{EndType, FillRule, JoinType, Paths64, inflate_paths_64, union_subjects_64};
 use glam::DVec2;
-use tokio_postgres::Client;
 
 /// Water as columns: lines with a width, and area rings (outer rings counterclockwise, holes clockwise), each a run
 /// of points (CSR).
@@ -23,52 +21,8 @@ pub struct Water {
     pub lonlat: Vec<[f64; 2]>, // the lines' points, then the rings'
 }
 
-/// Every waterway at least `min_width` m wide and every water area intersecting a lon/lat box.
-pub async fn load_water(
-    db: &Client,
-    west: f64,
-    south: f64,
-    east: f64,
-    north: f64,
-    min_width: f64,
-) -> Result<Water, Box<dyn std::error::Error + Send + Sync>> {
-    let mut water = Water {
-        line_start: vec![0],
-        ring_start: vec![],
-        ..Default::default()
-    };
-    let lines = db
-        .query(
-            "SELECT width_m, ST_AsBinary(geom) FROM waterways
-         WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326)) AND width_m >= $5 ORDER BY osm_way_id",
-            &[&west, &south, &east, &north, &(min_width as f32)],
-        )
-        .await?;
-    for row in &lines {
-        let width: f32 = row.get(0);
-        wkb_line_string(row.get(1), &mut water.lonlat)?;
-        water.width.push(width as f64);
-        water.line_start.push(water.lonlat.len() as u32);
-    }
-    // Each area's rings as line strings, outer rings counterclockwise and holes clockwise (so a nonzero fill of them
-    // all has the holes).
-    let rings = db.query(
-        "SELECT ST_AsBinary(ST_ExteriorRing((r).geom)) FROM (
-           SELECT ST_DumpRings((ST_Dump(ST_ForcePolygonCCW(geom))).geom) AS r FROM water_areas
-           WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326)) ORDER BY osm_type, osm_id
-         ) rings",
-        &[&west, &south, &east, &north],
-    ).await?;
-    water.ring_start.push(water.lonlat.len() as u32);
-    for row in &rings {
-        wkb_line_string(row.get(0), &mut water.lonlat)?;
-        water.ring_start.push(water.lonlat.len() as u32);
-    }
-    Ok(water)
-}
-
 impl Water {
-    /// The water of OSM loaded for a box (local::load_box) and extracted, as load_water returns it from Postgres.
+    /// The water of OSM loaded for a box (local::load_box) and extracted: waterways and areas intersecting it.
     pub fn from_extracted(osm: &Osm, x: &Extracted, bbox: [f64; 4], min_width: f64) -> Water {
         let mut water = Water {
             line_start: vec![0],

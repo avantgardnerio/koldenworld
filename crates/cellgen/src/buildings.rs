@@ -3,7 +3,7 @@
 //! gap, unioned, shrunk back: a closing), each merged shape at the area-weighted mean height of the buildings in it;
 //! towers stay their own shapes at their own heights (and keep their ids, so one can change on its own).
 //!
-//! Loaded from Postgres (buildings: outlines, not building:parts); a tile has the buildings it owns, by the same point
+//! From the cell files (outlines, not building:parts); a tile has the buildings it owns, by the same point
 //! as the TS (the area centroid of the first outer ring), so each building is in exactly one tile, the parent of its
 //! fine cell. Extruded as prisms (walls from just below the lowest ground under the outline, a flat roof at the mean
 //! ground height plus the height) in the tile's frame, sorted by which of the tile's 64 fine cells each shape is in (a
@@ -21,13 +21,11 @@ use crate::polygon::MADE;
 use crate::s2;
 use crate::simplify;
 use crate::terrain::Terrain;
-use crate::ways::wkb_line_string;
 use clipper2_rust::{
     EndType, FillRule, JoinType, Path64, Paths64, Point64, PointInPolygonResult, inflate_paths_64,
     point_in_polygon, union_subjects_64,
 };
 use glam::DVec2;
-use tokio_postgres::Client;
 
 /// Merged where closer than this, m.
 pub const GAP: f64 = 10.0;
@@ -111,53 +109,8 @@ pub struct Massing {
     pub tower: Vec<Option<i64>>, // the building's OSM id, for a tower's paths
 }
 
-/// Every building whose footprint touches a lon/lat box and whose owner point `owns` (lon, lat).
-pub async fn load(
-    db: &Client,
-    [west, south, east, north]: [f64; 4],
-    owns: impl Fn(f64, f64) -> bool,
-) -> Result<Buildings, Box<dyn std::error::Error + Send + Sync>> {
-    let rows = db.query(
-        "SELECT osm_id, height_m, (r).path[1], ST_AsBinary(ST_ExteriorRing((r).geom)) FROM (
-           SELECT osm_id, height_m, ST_DumpRings((ST_Dump(ST_ForcePolygonCCW(geom))).geom) AS r FROM buildings
-           WHERE NOT is_part AND geom && ST_MakeEnvelope($1, $2, $3, $4, 4326)
-           ORDER BY osm_type, osm_id
-         ) rings",
-        &[&west, &south, &east, &north],
-    ).await?;
-    let mut b = Buildings {
-        ring_start: vec![0],
-        ring_of: vec![0],
-        ..Default::default()
-    };
-    for row in &rows {
-        let id: i64 = row.get(0);
-        if b.osm_id.last() != Some(&id) {
-            if !b.osm_id.is_empty() {
-                b.ring_of.push((b.ring_start.len() - 1) as u32);
-            }
-            b.osm_id.push(id);
-            b.height.push(row.get::<_, f32>(1) as f64);
-        }
-        wkb_line_string(row.get(3), &mut b.lonlat)?;
-        b.ring_start.push(b.lonlat.len() as u32);
-    }
-    if !b.osm_id.is_empty() {
-        b.ring_of.push((b.ring_start.len() - 1) as u32);
-    }
-    let owned: Vec<usize> = (0..b.osm_id.len())
-        .filter(|&k| {
-            let r = b.ring_of[k] as usize;
-            let [lon, lat] =
-                owner_point(&b.lonlat[b.ring_start[r] as usize..b.ring_start[r + 1] as usize]);
-            owns(lon, lat)
-        })
-        .collect();
-    Ok(b.only(&owned))
-}
-
-/// The buildings of OSM loaded for a box (local::load_box) and extracted, as load returns them from Postgres: outlines
-/// (not building:parts) whose bounding box overlaps the box and whose owner point `owns` (lon, lat).
+/// The buildings of OSM loaded for a box (local::load_box) and extracted: outlines (not building:parts) whose bounding
+/// box overlaps the box (&&) and whose owner point `owns` (lon, lat).
 pub fn from_extracted(
     osm: &Osm,
     x: &Extracted,
