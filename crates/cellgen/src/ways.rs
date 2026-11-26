@@ -1,5 +1,7 @@
 //! Road ways, the input: OSM ways tagged highway=*, loaded from Postgres (road_ways) into columns.
 
+use crate::extract::Extracted;
+use crate::osm::Osm;
 use tokio_postgres::Client;
 
 /// OSM highway=* values we store, as in packages/world/src/road-graph.ts; a way's class is an index into this.
@@ -120,6 +122,42 @@ pub async fn load_road_ways(
 }
 
 impl RoadWays {
+    /// The road ways of OSM loaded for a box (local::load_box) and extracted, as Postgres would return them: ordered
+    /// by OSM id, named by name=* or else ref=* (as the import stores them), nodes in the direction of travel.
+    pub fn from_extracted(osm: &Osm, x: &Extracted) -> RoadWays {
+        let r = &x.roads;
+        let text = |w: usize, key: &str| {
+            let k = osm.strings.find(key)?;
+            osm.way_tags
+                .get(w, k)
+                .map(|v| osm.strings.text[v as usize].as_str())
+        };
+        let mut order: Vec<usize> = (0..r.way.len()).collect();
+        order.sort_by_key(|&i| osm.way_id[r.way[i] as usize]);
+        let mut ways = RoadWays::empty();
+        let mut name_index = std::collections::HashMap::new();
+        for i in order {
+            let w = r.way[i] as usize;
+            let nodes = r.node_start[i] as usize..r.node_start[i + 1] as usize;
+            ways.osm_id.push(osm.way_id[w]);
+            ways.class.push(r.class[i]);
+            ways.name.push(match text(w, "name").or(text(w, "ref")) {
+                None | Some("") => 0,
+                Some(n) => *name_index.entry(n.to_string()).or_insert_with(|| {
+                    ways.names.push(n.to_string());
+                    (ways.names.len() - 1) as u32
+                }),
+            });
+            ways.node_id.extend_from_slice(&r.node_id[nodes.clone()]);
+            ways.lonlat.extend_from_slice(&r.lonlat[nodes]);
+            ways.node_start.push(ways.node_id.len() as u32);
+            ways.lanes_fwd.push(r.lanes_fwd[i]);
+            ways.lanes_back.push(r.lanes_back[i]);
+            ways.sidewalks.push(r.sidewalks[i]);
+        }
+        ways
+    }
+
     /// No ways at all.
     pub fn empty() -> RoadWays {
         RoadWays {

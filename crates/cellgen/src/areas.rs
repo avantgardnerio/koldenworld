@@ -79,7 +79,7 @@ impl Areas {
             .into());
         }
         let started = std::time::Instant::now();
-        let cells = self.data.join("osm").join("cells");
+        let cells = local::cells_dir(&self.data);
         let c2 = Cell::from_token(token).ok_or_else(|| format!("{token} isn't a cell token"))?;
         let loaded = tokio::task::spawn_blocking(move || local::load(&cells, &c2)).await??;
         let (raw, source, osm) = match loaded {

@@ -22,6 +22,7 @@ mod mesh;
 mod osm;
 mod polygon;
 mod s2;
+mod s3;
 mod serve;
 mod simplify;
 mod terrain;
@@ -43,6 +44,7 @@ const USAGE: &str = "usage:
   cellgen extract <token | lat,lon>             an area's roads, buildings, water, airports, points of interest: counts
   cellgen import <token | lat,lon>              an area's OSM (fetched if need be) into Postgres: rows upserted, deleted
   cellgen region <lat,lon> [--download]          the Geofabrik region holding a point (its extract, downloaded once)
+  cellgen compare <token>                       a cell's road ways from Postgres and from the cell files: what differs
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
 The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
@@ -222,7 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
             };
             let osm = if args.get(2).map(String::as_str) == Some("--local") {
-                let cells = data_dir()?.join("osm").join("cells");
+                let cells = local::cells_dir(&data_dir()?);
                 let loaded = local::load(&cells, &c)
                     .map_err(|e| e.to_string())?
                     .ok_or(format!(
@@ -334,7 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .block_on(async {
                     // --local: from the cell files under data/osm/cells (local.rs), not Overpass.
                     let (raw, source, osm) = if args.get(2).map(String::as_str) == Some("--local") {
-                        let cells = data.join("osm").join("cells");
+                        let cells = local::cells_dir(&data);
                         let loaded = local::load(&cells, &c)?.ok_or(format!(
                             "no cell files for {} under {}",
                             c.token,
@@ -392,6 +394,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| e.to_string())?;
             Ok(())
         }
+        Some("compare") => {
+            // A cell's road ways from Postgres and from the cell files: what differs.
+            let token = args.get(1).ok_or(USAGE)?;
+            let c = cell::Cell::from_token(token).ok_or(format!("{token} isn't a cell token"))?;
+            let bbox = c.load_box();
+            let started = std::time::Instant::now();
+            let osm = local::load_box(&local::cells_dir(&data_dir()?), bbox)
+                .map_err(|e| e.to_string())?
+                .ok_or("no cell files for that box")?;
+            let x = extract::extract(&osm);
+            let files = ways::RoadWays::from_extracted(&osm, &x);
+            println!(
+                "files: {} ways ({} OSM ways loaded) in {:.1?}",
+                files.osm_id.len(),
+                osm.ways(),
+                started.elapsed()
+            );
+            let [west, south, east, north] = bbox;
+            let pool = pool(&db)?;
+            let db = tokio::runtime::Runtime::new()?
+                .block_on(async {
+                    let client = pool.get().await?;
+                    ways::load_road_ways(&client, west, south, east, north).await
+                })
+                .map_err(|e| e.to_string())?;
+            println!("postgres: {} ways", db.osm_id.len());
+            compare_ways(&db, &files);
+            Ok(())
+        }
         Some("serve") => {
             let port = match flag("--port") {
                 Some(i) => args.get(i + 1).ok_or(USAGE)?.parse()?,
@@ -404,6 +435,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// A pool of Postgres connections from a connection string (as libpq's: "host=… user=… dbname=…").
+/// What differs between two sets of road ways (`a` Postgres's, `b` the files'), way by way, the first few of each kind.
+fn compare_ways(a: &ways::RoadWays, b: &ways::RoadWays) {
+    use std::collections::HashMap;
+    let index = |w: &ways::RoadWays| -> HashMap<i64, usize> {
+        w.osm_id
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect()
+    };
+    let (ia, ib) = (index(a), index(b));
+    let only = |x: &HashMap<i64, usize>, y: &HashMap<i64, usize>| {
+        let mut ids: Vec<i64> = x.keys().filter(|id| !y.contains_key(id)).copied().collect();
+        ids.sort_unstable();
+        ids
+    };
+    let (only_a, only_b) = (only(&ia, &ib), only(&ib, &ia));
+    println!(
+        "only in postgres: {} {:?}",
+        only_a.len(),
+        &only_a[..only_a.len().min(8)]
+    );
+    println!(
+        "only in files:    {} {:?}",
+        only_b.len(),
+        &only_b[..only_b.len().min(8)]
+    );
+    let mut differ: HashMap<&str, Vec<i64>> = HashMap::new();
+    for (&id, &i) in &ia {
+        let Some(&j) = ib.get(&id) else { continue };
+        let nodes =
+            |w: &ways::RoadWays, k: usize| w.node_start[k] as usize..w.node_start[k + 1] as usize;
+        let checks = [
+            ("class", a.class[i] == b.class[j]),
+            (
+                "name",
+                a.names[a.name[i] as usize] == b.names[b.name[j] as usize],
+            ),
+            ("nodes", a.node_id[nodes(a, i)] == b.node_id[nodes(b, j)]),
+            (
+                "coordinates",
+                a.lonlat[nodes(a, i)] == b.lonlat[nodes(b, j)],
+            ),
+            (
+                "lanes",
+                (a.lanes_fwd[i], a.lanes_back[i]) == (b.lanes_fwd[j], b.lanes_back[j]),
+            ),
+            ("sidewalks", a.sidewalks[i] == b.sidewalks[j]),
+        ];
+        for (what, same) in checks {
+            if !same {
+                differ.entry(what).or_default().push(id);
+            }
+        }
+    }
+    let mut kinds: Vec<_> = differ.into_iter().collect();
+    kinds.sort();
+    for (what, mut ids) in kinds {
+        ids.sort_unstable();
+        println!(
+            "{what} differs: {} {:?}",
+            ids.len(),
+            &ids[..ids.len().min(8)]
+        );
+    }
+}
+
 fn pool(db: &str) -> Result<deadpool_postgres::Pool, Box<dyn std::error::Error>> {
     let config: tokio_postgres::Config = db.parse()?;
     let manager = deadpool_postgres::Manager::from_config(

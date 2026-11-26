@@ -6,23 +6,16 @@
 //! are areas, float32 in tiles, and only the tiles a box needs are read. Oceans have no tiles.
 //! data/dem/us_nga_egm08_25.tif is EGM2008 for the world: a node-registered 2.5' grid from 180° W, read the same way.
 //!
-//! A tile missing on disk is fetched first from CELLGEN_DEM_S3 (default below; empty turns it off) with the AWS CLI,
-//! so the usual credentials apply (AWS_PROFILE, or an instance's role). A tile S3 doesn't have (the oceans) leaves a
-//! `.none` file beside where it would be, so it's asked for once.
+//! A tile missing on disk is fetched first from CELLGEN_DEM_S3 (default below; empty turns it off), as s3.rs does.
+//! The oceans have no tiles.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, LazyLock, Mutex};
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 
 const DEM_S3: &str = "s3://koldenworld-data-2/dem/fabdem-v1-2/tiles/";
-
-/// Tiles being fetched, by name: cells building side by side wait for one fetch rather than each making their own.
-static FETCHES: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = LazyLock::new(Default::default);
 
 /// Samples of a raster window: rows run south.
 struct Grid {
@@ -105,67 +98,14 @@ impl Elevation {
     }
 }
 
-/// A FABDEM tile on disk, fetched from S3 first if it isn't there; None where there's no tile (or the fetch failed,
-/// which is logged and tried again next time).
+/// A FABDEM tile on disk, fetched from S3 first if it isn't there (s3::local_copy); None where there's no tile.
 fn local_tile(dir: &Path, name: &str) -> Option<PathBuf> {
-    let file = dir.join(name);
-    let none = file.with_extension("none");
-    let known = || (file.exists() || none.exists()).then(|| file.exists().then(|| file.clone()));
-    if let Some(found) = known() {
-        return found;
-    }
     let source = std::env::var("CELLGEN_DEM_S3").unwrap_or_else(|_| DEM_S3.into());
+    let file = dir.join(name);
     if source.is_empty() {
-        return None;
+        return file.exists().then_some(file);
     }
-    let lock = FETCHES
-        .lock()
-        .unwrap()
-        .entry(name.into())
-        .or_default()
-        .clone();
-    let _fetching = lock.lock().unwrap();
-    if let Some(found) = known() {
-        return found; // fetched while we waited
-    }
-    let part = file.with_extension(format!("part{}", std::process::id()));
-    let fetched = std::fs::create_dir_all(dir)
-        .map_err(|e| e.to_string())
-        .and_then(|_| {
-            Command::new("aws")
-                .args(["s3", "cp", "--only-show-errors", &format!("{source}{name}")])
-                .arg(&part)
-                .output()
-                .map_err(|e| format!("aws: {e}"))
-        });
-    match fetched {
-        Ok(out) if out.status.success() => match std::fs::rename(&part, &file) {
-            Ok(()) => {
-                eprintln!("elevation: fetched {name}");
-                Some(file)
-            }
-            Err(e) => {
-                eprintln!("elevation: {name}: {e}");
-                None
-            }
-        },
-        Ok(out) if String::from_utf8_lossy(&out.stderr).contains("(404)") => {
-            File::create(&none).ok();
-            None
-        }
-        Ok(out) => {
-            eprintln!(
-                "elevation: {name} from {source}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            std::fs::remove_file(&part).ok();
-            None
-        }
-        Err(e) => {
-            eprintln!("elevation: {name}: {e}");
-            None
-        }
-    }
+    crate::s3::local_copy(&format!("{source}{name}"), &file)
 }
 
 type Tiff = Decoder<BufReader<File>>;
