@@ -60,12 +60,19 @@ How to do it, one table at a time, the way 1a–1c went:
   `(osm_type, osm_id)`. Check each against Postgres
   with `cellgen compare`, on cells whose areas were imported from the same OSM version (Colorado Springs areas
   came from `s3://koldenworld-data-2/osm/test/colorado-box`; many Denver areas from the Colorado extract too).
-- **Then each table**, in this order (simplest first): `terrain`, `pois`, `buildings`, `nodes`/`edges`. For each,
+- **Then each table**, in this order (simplest first): `terrain`, `buildings`, `pois` (it points at `buildings`
+  rows), `nodes`/`edges`. For each,
   build the cell in TS and Rust and `cmp` the `.arrow` bytes; where floats differ only by evaluation order, compare
   decoded columns with a tolerance and say so.
 - **Then serve them** from `cellgen serve` at the same paths and `.cell` blob, point the viewer's `CELL_SERVER`
   (`packages/viewer/vite.config.ts`) at 5175, and delete `packages/cli/src/{server,cells,cell-pool,cell-worker,
-  elevation}.ts`, `packages/db`'s loaders, `areas.rs`/`/ensure`/`import.rs`, and the Postgres dependency.
+  elevation}.ts`, `packages/db`'s loaders, `areas.rs`/`/ensure`/`import.rs`, and the Postgres dependency. Also the
+  Postgres code kept only for checking: every `load` in cellgen that queries Postgres (`ways::load_road_ways`,
+  `water::load_water`, `aeroways::load`, `buildings::load`, `pois::load`, marked TEMPORARY where new),
+  `cellgen compare`, `cell … --postgres` and `Inputs::load`.
+- **Done in 1d:** `terrain` (served by `cellgen serve`, from the drawn ground's lattice; no 1 m water carve); the POI
+  input from the files (`pois.rs`, `charity_weight`). The `pois` table waits for `buildings`: each row is its
+  building's row in that table.
 - **Keep in TS:** everything the browser runs. The viewer generates the near building meshes itself
   (`solid-layer.ts` → building meshes, interiors, furniture); per the fine-buildings rule those stay TS. The viewer
   only imports geodesy, frames, people placement, walls, sign and class constants from `@game/world`.

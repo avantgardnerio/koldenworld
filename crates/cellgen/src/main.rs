@@ -21,6 +21,7 @@ mod local;
 mod markings;
 mod mesh;
 mod osm;
+mod pois;
 mod polygon;
 mod s2;
 mod s3;
@@ -426,7 +427,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let [west, south, east, north] = bbox;
             let pool = pool(&db)?;
             let owns = |lon, lat| c.owns(lon, lat);
-            let (db, water, aeroways, buildings) = tokio::runtime::Runtime::new()?
+            let (db, water, aeroways, buildings, pois) = tokio::runtime::Runtime::new()?
                 .block_on(async {
                     let client = pool.get().await?;
                     Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
@@ -434,6 +435,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         water::load_water(&client, west, south, east, north, 0.0).await?,
                         aeroways::load(&client, bbox).await?,
                         buildings::load(&client, bbox, owns).await?,
+                        pois::load(&client, bbox).await?,
                     ))
                 })
                 .map_err(|e| e.to_string())?;
@@ -509,6 +511,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &only_b[..only_b.len().min(8)]
                 );
             }
+            compare_pois(&pois, &pois::PoiInputs::from_extracted(&osm, &x, bbox));
             Ok(())
         }
         Some("terrain") => {
@@ -579,6 +582,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// A pool of Postgres connections from a connection string (as libpq's: "host=… user=… dbname=…").
+/// What differs between two sets of points of interest (`a` Postgres's, `b` the files'), the first few of each kind.
+fn compare_pois(a: &pois::PoiInputs, b: &pois::PoiInputs) {
+    use std::collections::HashMap;
+    let index = |p: &pois::PoiInputs| -> HashMap<(u8, i64), usize> {
+        (0..p.osm_id.len())
+            .map(|i| ((p.osm_type[i], p.osm_id[i]), i))
+            .collect()
+    };
+    let (ia, ib) = (index(a), index(b));
+    let only = |x: &HashMap<(u8, i64), usize>, y: &HashMap<(u8, i64), usize>| {
+        let mut keys: Vec<(u8, i64)> = x.keys().filter(|k| !y.contains_key(k)).copied().collect();
+        keys.sort_unstable();
+        keys
+    };
+    let (only_a, only_b) = (only(&ia, &ib), only(&ib, &ia));
+    let mut differ: HashMap<&str, Vec<i64>> = HashMap::new();
+    for (k, &i) in &ia {
+        let Some(&j) = ib.get(k) else { continue };
+        let checks = [
+            ("category", a.category[i] == b.category[j]),
+            ("kind", a.text(Some(a.kind[i])) == b.text(Some(b.kind[j]))),
+            ("name", a.text(a.name[i]) == b.text(b.name[j])),
+            ("brand", a.text(a.brand[i]) == b.text(b.brand[j])),
+            ("position", a.lonlat[i] == b.lonlat[j]),
+            ("charity", a.charity[i] == b.charity[j]),
+        ];
+        for (what, ok) in checks {
+            if !ok {
+                differ.entry(what).or_default().push(k.1);
+            }
+        }
+    }
+    let ids = |p: &pois::PoiInputs| {
+        p.osm_type
+            .iter()
+            .zip(&p.osm_id)
+            .map(|(&t, &id)| (t, id))
+            .collect::<Vec<_>>()
+    };
+    println!(
+        "points of interest: postgres {}, files {}{}",
+        a.osm_id.len(),
+        b.osm_id.len(),
+        if only_a.is_empty() && only_b.is_empty() && differ.is_empty() && ids(a) == ids(b) {
+            ", identical (same order)"
+        } else {
+            ", DIFFER"
+        }
+    );
+    println!(
+        "  only in postgres: {} {:?}",
+        only_a.len(),
+        &only_a[..only_a.len().min(8)]
+    );
+    println!(
+        "  only in files:    {} {:?}",
+        only_b.len(),
+        &only_b[..only_b.len().min(8)]
+    );
+    let mut differ: Vec<_> = differ.into_iter().collect();
+    differ.sort_unstable();
+    for (what, mut v) in differ {
+        v.sort_unstable();
+        println!("  {what} differs: {} {:?}", v.len(), &v[..v.len().min(8)]);
+    }
+}
+
 /// What differs between two sets of road ways (`a` Postgres's, `b` the files'), way by way, the first few of each kind.
 fn compare_ways(a: &ways::RoadWays, b: &ways::RoadWays) {
     use std::collections::HashMap;
