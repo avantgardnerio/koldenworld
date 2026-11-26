@@ -1,11 +1,12 @@
-// Ground heights for the cell server (decision 24): USGS 3DEP 1/3 arc-second
-// tiles (bare earth, ~10 m, NAVD88 heights) plus the GEOID18 model, giving
-// heights above the WGS84 ellipsoid (h = H + N).
+// Ground heights for the cell server (decision 24): FABDEM V1-2 tiles
+// (Copernicus GLO-30 with buildings and forests removed: bare earth, ~30 m,
+// EGM2008 heights) plus the EGM2008 geoid, giving heights above the WGS84
+// ellipsoid (h = H + N).
 //
-// data/dem/usgs13/USGS_13_n40w106.tif covers 39–40° N, 105–106° W (named by
-// its northwest corner) with a 6-pixel overlap on each side.
-// data/dem/us_noaa_g2018u0.tif is GEOID18 for the conterminous US (1' grid,
-// longitudes 230–300°).
+// data/dem/fabdem/N39W106_FABDEM_V1-2.tif covers 39–40° N, 106–105° W (named
+// by its southwest corner). Oceans have no tiles.
+// data/dem/us_nga_egm08_25.tif is EGM2008 for the world (node-registered 2.5'
+// grid from 180° W), read in blocks like the tiles.
 //
 // region(bbox) reads just the windows a box needs and returns a synchronous
 // sampler for that box: bilinear between pixel centers. Points without data
@@ -50,10 +51,21 @@ async function readBlock(image: GeoTIFFImage, bx: number, by: number): Promise<G
   const [rx, ry] = image.getResolution() as number[];
   const c0 = bx * BLOCK, r0 = by * BLOCK;
   const c1 = Math.min(image.getWidth(), c0 + BLOCK + 1), r1 = Math.min(image.getHeight(), r0 + BLOCK + 1);
-  const data = (await image.readRasters({ window: [c0, r0, c1, r1], interleave: true })) as unknown as Float32Array;
+  // Area pixels: the first sample is a pixel's center. Point pixels (RasterPixelIsPoint): the tie point is a sample.
+  const half = image.getGeoKeys()?.GTRasterTypeGeoKey === 2 ? 0 : 0.5;
+  const raw = (await image.readRasters({ window: [c0, r0, c1, r1], interleave: true })) as unknown as Float32Array;
+  // At the image's east or south edge, repeat the last column or row: that covers the gap to the next tile, whose
+  // first sample is one step on.
+  const pw = c1 - c0, ph = r1 - r0, w = pw + (c1 === image.getWidth() ? 1 : 0), h = ph + (r1 === image.getHeight() ? 1 : 0);
+  const data = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const from = Math.min(y, ph - 1) * pw;
+    data.set(raw.subarray(from, from + pw), y * w);
+    if (w > pw) data[y * w + pw] = raw[from + pw - 1]!;
+  }
   return {
-    data: Float32Array.from(data), w: c1 - c0, h: r1 - r0,
-    x0: ox! + (c0 + 0.5) * rx!, y0: oy! + (r0 + 0.5) * ry!, dx: rx!, dy: ry!,
+    data, w, h,
+    x0: ox! + (c0 + half) * rx!, y0: oy! + (r0 + half) * ry!, dx: rx!, dy: ry!,
     nodata: image.getGDALNoData(),
   };
 }
@@ -76,7 +88,6 @@ function blocksFor(image: GeoTIFFImage, b: Bbox): [number, number][] {
 export class Elevation {
   private dir = path.join(DATA_DIR, "dem");
   private images = new Map<string, Promise<GeoTIFFImage | null>>();
-  private geoid?: Promise<Grid>;
   private blocks = new Map<string, Promise<Grid>>();  // LRU by insertion order
   private maxBlocks: number;
 
@@ -104,39 +115,31 @@ export class Elevation {
     return p;
   }
 
-  private loadGeoid(): Promise<Grid> {
-    this.geoid ??= (async () => {
-      const im = await this.image(path.join(this.dir, "us_noaa_g2018u0.tif"));
-      if (!im) throw new Error("GEOID18 grid missing: data/dem/us_noaa_g2018u0.tif (https://cdn.proj.org/us_noaa_g2018u0.tif)");
-      const [ox, oy] = im.getOrigin() as number[];
-      const [rx, ry] = im.getResolution() as number[];
-      const data = (await im.readRasters({ interleave: true })) as unknown as Float32Array;
-      // A node-registered grid: the origin is the first node, not a pixel corner.
-      return { data: Float32Array.from(data), w: im.getWidth(), h: im.getHeight(), x0: ox!, y0: oy!, dx: rx!, dy: ry!, nodata: null };
-    })();
-    return this.geoid;
-  }
-
   /** Loads what a box needs and returns a sampler for points in it: meters above the WGS84 ellipsoid. */
   async region(b: Bbox): Promise<HeightFn> {
-    const geoid = await this.loadGeoid();
+    const geoidFile = path.join(this.dir, "us_nga_egm08_25.tif");
+    const geoidImage = await this.image(geoidFile);
+    if (!geoidImage) throw new Error("EGM2008 grid missing: data/dem/us_nga_egm08_25.tif (https://cdn.proj.org/us_nga_egm08_25.tif)");
+    const geoid = await Promise.all(blocksFor(geoidImage, b).map(([bx, by]) => this.block(geoidFile, geoidImage, bx, by)));
     const grids: Grid[] = [];
     for (let lat = Math.floor(b.south); lat < b.north; lat++) {
       for (let lon = Math.floor(b.west); lon < b.east; lon++) {
-        const name = `${lat + 1 >= 0 ? "n" : "s"}${String(Math.abs(lat + 1)).padStart(2, "0")}${lon < 0 ? "w" : "e"}${String(Math.abs(lon)).padStart(3, "0")}`;
-        const file = path.join(this.dir, "usgs13", `USGS_13_${name}.tif`);
+        const name = `${lat >= 0 ? "N" : "S"}${String(Math.abs(lat)).padStart(2, "0")}${lon < 0 ? "W" : "E"}${String(Math.abs(lon)).padStart(3, "0")}`;
+        const file = path.join(this.dir, "fabdem", `${name}_FABDEM_V1-2.tif`);
         const im = await this.image(file);
         if (!im) continue;
         grids.push(...await Promise.all(blocksFor(im, b).map(([bx, by]) => this.block(file, im, bx, by))));
       }
     }
-    return (lat, lon) => {
-      let H = NaN;
-      for (const g of grids) {
-        H = sample(g, lat, lon);
-        if (!Number.isNaN(H)) break;
+    const first = (gs: Grid[], lat: number, lon: number) => {
+      for (const g of gs) {
+        const v = sample(g, lat, lon);
+        if (!Number.isNaN(v)) return v;
       }
-      const N = sample(geoid, lat, lon + 360);
+      return NaN;
+    };
+    return (lat, lon) => {
+      const H = first(grids, lat, lon), N = first(geoid, lat, lon);
       if (Number.isNaN(H) || Number.isNaN(N)) {
         this.missing++;
         return 0;

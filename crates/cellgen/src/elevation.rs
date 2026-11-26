@@ -1,9 +1,10 @@
-//! Ground heights (decision 24), as packages/cli/src/elevation.ts: USGS 3DEP 1/3 arc-second tiles (bare earth,
-//! ~10 m, NAVD88 heights) plus the GEOID18 model, giving heights above the WGS84 ellipsoid (h = H + N).
+//! Ground heights (decision 24), as packages/cli/src/elevation.ts: FABDEM V1-2 tiles (Copernicus GLO-30 with
+//! buildings and forests removed: bare earth, ~30 m, EGM2008 heights) plus the EGM2008 geoid, giving heights above
+//! the WGS84 ellipsoid (h = H + N).
 //!
-//! data/dem/usgs13/USGS_13_n40w106.tif covers 39–40° N, 105–106° W (named by its northwest corner) with a 6-pixel
-//! overlap on each side; its pixels are areas, LZW float32 in 512-pixel tiles, and only the tiles a box needs are read.
-//! data/dem/us_noaa_g2018u0.tif is GEOID18 for the conterminous US: a node-registered 1' grid, longitudes 230–300°.
+//! data/dem/fabdem/N39W106_FABDEM_V1-2.tif covers 39–40° N, 106–105° W (named by its southwest corner); its pixels
+//! are areas, float32 in tiles, and only the tiles a box needs are read. Oceans have no tiles.
+//! data/dem/us_nga_egm08_25.tif is EGM2008 for the world: a node-registered 2.5' grid from 180° W, read the same way.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -15,7 +16,8 @@ use tiff::tags::Tag;
 struct Grid {
     data: Vec<f32>,
     w: usize,
-    h: usize,
+    cols: usize, // samples in the image, from the window's first (the rest is padding)
+    rows: usize,
     x0: f64, // lon of the first sample
     y0: f64, // lat of the first sample
     dx: f64, // degrees per sample, east
@@ -24,16 +26,18 @@ struct Grid {
 }
 
 impl Grid {
-    /// Bilinear between samples; None outside the window or on nodata.
+    /// Bilinear between samples; None outside the window or on nodata. Within a sample past the last row or column
+    /// it holds that row or column: the gap to the next tile, whose first sample is one step on.
     fn sample(&self, lat: f64, lon: f64) -> Option<f64> {
         let (fx, fy) = ((lon - self.x0) / self.dx, (lat - self.y0) / self.dy);
         let (i, j) = (fx.floor(), fy.floor());
-        if i < 0.0 || j < 0.0 || i as usize + 1 >= self.w || j as usize + 1 >= self.h {
+        if i < 0.0 || j < 0.0 || i as usize >= self.cols || j as usize >= self.rows {
             return None;
         }
         let (u, v, i, j) = (fx - i, fy - j, i as usize, j as usize);
+        let (i1, j1) = ((i + 1).min(self.cols - 1), (j + 1).min(self.rows - 1));
         let at = |x: usize, y: usize| self.data[y * self.w + x];
-        let [a, b, c, e] = [at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1)];
+        let [a, b, c, e] = [at(i, j), at(i1, j), at(i, j1), at(i1, j1)];
         // Nodata, or padding past an image's edge tiles (NaN).
         if self.nodata.is_some_and(|n| [a, b, c, e].contains(&n))
             || [a, b, c, e].iter().any(|x| x.is_nan())
@@ -45,7 +49,7 @@ impl Grid {
     }
 }
 
-/// Heights for a lon/lat box: the USGS windows it needs and the geoid.
+/// Heights for a lon/lat box: the FABDEM windows it needs and the geoid's.
 pub struct Elevation {
     tiles: Vec<Grid>,
     geoid: Grid,
@@ -58,15 +62,15 @@ impl Elevation {
         dir: &Path,
         [west, south, east, north]: [f64; 4],
     ) -> Result<Elevation, Box<dyn std::error::Error>> {
-        let geoid = read_whole(&dir.join("us_noaa_g2018u0.tif"))?;
+        let geoid = read_window(&dir.join("us_nga_egm08_25.tif"), [west, south, east, north])?;
         let mut tiles = Vec::new();
         for lat in south.floor() as i32..north.ceil() as i32 {
             for lon in west.floor() as i32..east.ceil() as i32 {
-                let ns = if lat + 1 >= 0 { 'n' } else { 's' };
-                let ew = if lon < 0 { 'w' } else { 'e' };
-                let file: PathBuf = dir.join("usgs13").join(format!(
-                    "USGS_13_{ns}{:02}{ew}{:03}.tif",
-                    (lat + 1).abs(),
+                let ns = if lat >= 0 { 'N' } else { 'S' };
+                let ew = if lon < 0 { 'W' } else { 'E' };
+                let file: PathBuf = dir.join("fabdem").join(format!(
+                    "{ns}{:02}{ew}{:03}_FABDEM_V1-2.tif",
+                    lat.abs(),
                     lon.abs()
                 ));
                 if file.exists() {
@@ -84,7 +88,7 @@ impl Elevation {
     /// Metres above the WGS84 ellipsoid at a point (0 where there's no data, counted in `missing`).
     pub fn height(&self, lat: f64, lon: f64) -> f64 {
         let h = self.tiles.iter().find_map(|g| g.sample(lat, lon));
-        let n = self.geoid.sample(lat, lon + 360.0);
+        let n = self.geoid.sample(lat, lon);
         match (h, n) {
             (Some(h), Some(n)) => h + n,
             _ => {
@@ -109,6 +113,15 @@ fn georef(d: &mut Tiff) -> Result<[f64; 4], Box<dyn std::error::Error>> {
     ])
 }
 
+/// GTRasterTypeGeoKey (1025) is RasterPixelIsPoint (2): GeoKeyDirectory is a 4-short header, then 4 shorts a key.
+fn pixel_is_point(d: &mut Tiff) -> bool {
+    let keys = d.get_tag_u32_vec(Tag::Unknown(34735)).unwrap_or_default();
+    let (keys, _) = keys.as_chunks::<4>();
+    keys.iter()
+        .skip(1)
+        .any(|&[key, location, _, value]| key == 1025 && location == 0 && value == 2)
+}
+
 fn nodata(d: &mut Tiff) -> Option<f32> {
     d.get_tag_ascii_string(Tag::Unknown(42113))
         .ok()?
@@ -125,32 +138,14 @@ fn floats(r: DecodingResult) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     }
 }
 
-/// The geoid: the whole grid, node-registered (its first sample is the tie point itself).
-fn read_whole(file: &Path) -> Result<Grid, Box<dyn std::error::Error>> {
-    let mut d = Decoder::new(BufReader::new(
-        File::open(file).map_err(|e| format!("{}: {e}", file.display()))?,
-    ))?;
-    let [x0, y0, dx, dy] = georef(&mut d)?;
-    let (w, h) = d.dimensions()?;
-    let data = floats(d.read_image()?)?;
-    Ok(Grid {
-        data,
-        w: w as usize,
-        h: h as usize,
-        x0,
-        y0,
-        dx,
-        dy,
-        nodata: None,
-    })
-}
-
-/// The tiles of a USGS image a box touches (plus a pixel of margin), as one window of pixel centers.
+/// The tiles of an image a box touches (plus a pixel of margin), as one window of samples.
 fn read_window(
     file: &Path,
     [west, south, east, north]: [f64; 4],
 ) -> Result<Grid, Box<dyn std::error::Error>> {
-    let mut d = Decoder::new(BufReader::new(File::open(file)?))?;
+    let mut d = Decoder::new(BufReader::new(
+        File::open(file).map_err(|e| format!("{}: {e}", file.display()))?,
+    ))?;
     let [ox, oy, dx, dy] = georef(&mut d)?;
     let nodata = nodata(&mut d);
     let (iw, ih) = d.dimensions()?;
@@ -177,13 +172,15 @@ fn read_window(
             }
         }
     }
-    // Pixels are areas: the first sample is the center of the window's first pixel.
+    // Area pixels: the first sample is the center of the window's first pixel. Point pixels: the tie point is a sample.
+    let half = if pixel_is_point(&mut d) { 0.0 } else { 0.5 };
     Ok(Grid {
         data,
         w,
-        h,
-        x0: ox + ((tx0 * tw) as f64 + 0.5) * dx,
-        y0: oy + ((ty0 * th) as f64 + 0.5) * dy,
+        cols: w.min(iw as usize - tx0 * tw),
+        rows: h.min(ih as usize - ty0 * th),
+        x0: ox + ((tx0 * tw) as f64 + half) * dx,
+        y0: oy + ((ty0 * th) as f64 + half) * dy,
         dx,
         dy,
         nodata,
