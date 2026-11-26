@@ -96,21 +96,40 @@ How to do it, one table at a time, the way 1a–1c went:
   (`solid-layer.ts` → building meshes, interiors, furniture); per the fine-buildings rule those stay TS. The viewer
   only imports geodesy, frames, people placement, walls, sign and class constants from `@game/world`.
 
-## Step 2: hosting
+## Step 2: hosting, as one container (decided 2026-11-26)
 
-- One Rust Lambda (arm64) behind CloudFront; S3 holds built cells (`cells/<data version>/<token>/…`, immutable),
-  the viewer's static files, and the inputs. CloudFront serves hits from S3 and sends misses to the Lambda (or the
-  Lambda writes to S3 and redirects; synchronous Lambda responses are capped at a few MB unless streamed).
-- Replace the AWS CLI calls (`s3.rs`, `packages/cli/src/elevation.ts`) with `object_store`/the SDK and range reads
-  (Parquet row-group pruning by the bbox statistics, COG blocks); `/tmp` as a per-instance cache.
-- Idle cost ≈ S3 storage: ~$7/month FABDEM + ~$7 planet cells. A cell build ≈ 1 s at 2 GB ≈ $0.00003.
-- Not Lambda: the NPC dialogue model (GPU, on-demand instance), the planet splitter (EC2 batch).
+One Docker image, run the same way locally and on Lambda, the only thing to deploy:
 
-## Step 3 (optional): WASM
+- **`cellgen serve` does everything:** the viewer's static release build (`vite build`) at `/`, cells at
+  `/ground/<token>/<table>.arrow`, live air traffic at `/aircraft`. Vite's dev server stays for development only.
+- **The bucket stays private:** only the container's credentials reach S3 (locally your `koldenworld` SSO profile,
+  `~/.aws` mounted read-only; on Lambda the function's role). No anonymous or CloudFront-direct access to the data.
+- **S3 through the AWS SDK only** (`aws-sdk-s3`), locally too: never the `aws` CLI. The client uses the bucket's
+  region (us-east-2) whatever the profile says. **Done:** `s3.rs` (FABDEM tiles, cell files).
+- **S3-centric, no local disk** (Lambda's `/tmp` is per instance, small and wiped on recycle; the level-6 cell
+  files are 0.5–2 GB): dev runs the same path as Lambda.
+  - **Built cells in S3**, shared by every instance and player: `cells/<version>/<token>/<table>.arrow`, the version
+    from the table versions, so a format change never serves stale cells. On a request: S3, else build (inputs from
+    S3), write to S3, answer.
+  - **FABDEM by range reads:** tiles are 256×256 deflate blocks; a cell needs 1–4 blocks (~100–250 KB) and the
+    header, not the 23 MB tile.
+  - **Cell files by range reads:** an async Parquet reader over S3, footer first, row groups pruned by their
+    statistics, only the columns needed. Nodes are sorted by S2 cell (tight row groups); ways' row groups span
+    nearly the whole level-6 area in bbox (876d: 727 row groups), so measure first and fix the sort in the splitter
+    if need be.
+- **Remotely: Lambda first** (arm64, container image, AWS Lambda Web Adapter so the axum server runs unchanged;
+  a function URL). Scales to zero: idle cost ≈ S3 storage (~$7/month FABDEM + ~$7 planet cells); a cell build
+  ≈ 1 s at 2 GB ≈ $0.00003. Responses under Lambda's 6 MB buffered cap (the largest table, fine ground, is ~1 MB).
+  Cold instances download their FABDEM tile and level-6 files first: a few seconds for a new area.
+- Not in the container: the NPC dialogue model (GPU, on-demand instance), the planet splitter (EC2 batch).
 
-The same crate to `wasm32` in Web Workers, reading S3/CloudFront directly (public read; OSM ODbL and FABDEM
-CC BY-NC-SA allow it with attribution). Needs the server-only crates behind a feature and a wasm-friendly Parquet
-codec. No shared cache: every player builds what they visit.
+Order: SDK (done) → built cells in S3 → FABDEM range reads → Parquet range reads → `--static` + Dockerfile, run
+locally → Lambda.
+
+## Step 3 (only if needed): WASM
+
+Only if the browser ever needs Rust code that's in cellgen (sharing it with the TS rather than porting it): the
+crate's pure parts to `wasm32`. Not a way to read the data from the browser: the bucket stays private.
 
 ## Backlog
 
