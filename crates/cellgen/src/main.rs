@@ -49,7 +49,10 @@ const USAGE: &str = "usage:
   cellgen fetch <token | lat,lon>               an area's raw OSM (Overpass, cached in data/osm/s2/), parsed: counts
   cellgen extract <token | lat,lon>             an area's roads, buildings, water, airports, points of interest: counts
   cellgen region <lat,lon> [--download]          the Geofabrik region holding a point (its extract, downloaded once)
-  cellgen serve [--port <port>]                 cell server and live air traffic on 127.0.0.1 (default port 5175)
+  cellgen serve [--host <addr>] [--port <port>] [--static <dir>]
+                                                the server: cells at /ground/, live air traffic at /aircraft, and with
+                                                --static the viewer's release build at / (default 127.0.0.1, port
+                                                PORT or 5175)
 
 Cells are built from S3 (the OSM cell files, CELLGEN_OSM_S3; FABDEM, CELLGEN_DEM_S3; the geoid, CELLGEN_GEOID_S3) and
 served cells kept there (CELLGEN_CELLS_S3), with the AWS SDK's usual credentials (AWS_PROFILE). The local data directory,
@@ -358,11 +361,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some("serve") => {
-            let port = match flag("--port") {
-                Some(i) => args.get(i + 1).ok_or(USAGE)?.parse()?,
-                None => 5175,
+            let value = |name: &str| flag(name).map(|i| args.get(i + 1).ok_or(USAGE)).transpose();
+            // PORT is what the Lambda Web Adapter (and most container hosts) set.
+            let port: u16 = match value("--port")? {
+                Some(p) => p.parse()?,
+                None => std::env::var("PORT").map_or(Ok(5175), |p| p.parse())?,
             };
-            serve::serve(port)
+            let host = value("--host")?.map_or("127.0.0.1", String::as_str);
+            serve::serve(host, port, value("--static")?.map(PathBuf::from))
         }
         _ => Err(USAGE.into()),
     }

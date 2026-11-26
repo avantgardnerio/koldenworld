@@ -133,8 +133,14 @@ One Docker image, run the same way locally and on Lambda, the only thing to depl
   Cold instances download their FABDEM tile and level-6 files first: a few seconds for a new area.
 - Not in the container: the NPC dialogue model (GPU, on-demand instance), the planet splitter (EC2 batch).
 
-Order: SDK (done) → built cells in S3 → FABDEM range reads → Parquet range reads → `--static` + Dockerfile, run
-locally → Lambda.
+Order: SDK (done) → built cells in S3 (done) → FABDEM range reads (done) → Parquet range reads (done) →
+`--static` + Dockerfile, run locally → Lambda.
+
+- **The container:** `Dockerfile` at the repo root (`.dockerignore` lists only what it needs: `data/` is tens of
+  GB): the viewer's `vite build` (Node stage), cellgen release (Rust stage), on debian slim with CA certificates.
+  `cellgen serve --host 0.0.0.0 --static /site`, port `PORT` (8080). Locally:
+  `docker run --rm -p 8080:8080 -v ~/.aws:/root/.aws:ro -e AWS_PROFILE=koldenworld koldenworld`. The server now
+  answers `/ground/<token>/<table>.arrow` itself (Vite proxies it unchanged) and the viewer's files at `/`.
 
 ## Step 3 (only if needed): WASM
 

@@ -1,4 +1,5 @@
-//! The cell server: GET /cells/<token>/ground.arrow, ground_triangles.arrow and terrain.arrow (and a coarse tile's
+//! The game's server, the one thing deployed (the container): with --static, the viewer's release build (vite build)
+//! at /, and the cells: GET /ground/<token>/ground.arrow, ground_triangles.arrow and terrain.arrow (and a coarse tile's
 //! buildings.arrow and buildings_triangles.arrow massing, a fine cell's buildings.arrow, pois.arrow, nodes.arrow and
 //! edges.arrow). Built cells live in S3, shared by every instance: cells/<data>/<format>/<token>/<table>.arrow under
 //! CELLGEN_CELLS_S3 (default CELLS_S3), where <data> names the OSM cell files they're built from and <format> the
@@ -39,8 +40,12 @@ struct App {
     building: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, // a lock per cell being asked for
 }
 
-/// Serves on 127.0.0.1:`port` until stopped.
-pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+/// Serves on `host`:`port` until stopped; with `site`, its files at / (index.html for a directory).
+pub fn serve(
+    host: &str,
+    port: u16,
+    site: Option<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let aircraft = Aircraft::new()?;
     tokio::runtime::Runtime::new()?.block_on(async {
         let cells = format!(
@@ -59,13 +64,17 @@ pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             aircraft,
             building: Mutex::default(),
         });
-        let router = Router::new()
-            .route("/cells/{token}/{table}", get(table))
+        let mut router = Router::new()
+            .route("/ground/{token}/{table}", get(table))
             .route("/aircraft", get(air_traffic))
             .with_state(app);
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+        if let Some(site) = &site {
+            router = router.fallback_service(tower_http::services::ServeDir::new(site));
+            println!("the viewer from {}", site.display());
+        }
+        let listener = tokio::net::TcpListener::bind((host, port)).await?;
         println!(
-            "cell server on http://127.0.0.1:{port}/cells/<token>/{{{}}}",
+            "on http://{host}:{port}/: /ground/<token>/{{{}}}, /aircraft",
             TABLES.join(",")
         );
         axum::serve(listener, router).await

@@ -1,0 +1,10 @@
+# Only what the game's image is built from (data/ alone is tens of GB).
+*
+!package.json
+!package-lock.json
+!tsconfig.base.json
+!packages/
+packages/*/node_modules
+packages/viewer/dist
+!crates/
+crates/*/target

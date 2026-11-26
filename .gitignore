@@ -1,7 +1,10 @@
 node_modules/
-# downloaded and generated data (OSM extracts, census files); re-fetch with `npm run cli -- fetch-osm`
+# local data: `cellgen cell` output, Overpass and Geofabrik caches (cells themselves are built from S3)
 data/
 *.tsbuildinfo
 # Rust build output
 target/
 .env
+
+# The viewer's release build (vite build), served by cellgen serve --static.
+packages/viewer/dist/
