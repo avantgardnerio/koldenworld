@@ -792,6 +792,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "axum",
+ "bytes",
  "clipper2-rust",
  "earcutr",
  "glam",

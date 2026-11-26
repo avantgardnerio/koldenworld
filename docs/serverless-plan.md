@@ -119,7 +119,14 @@ One Docker image, run the same way locally and on Lambda, the only thing to depl
   - **Cell files by range reads:** an async Parquet reader over S3, footer first, row groups pruned by their
     statistics, only the columns needed. Nodes are sorted by S2 cell (tight row groups); ways' row groups span
     nearly the whole level-6 area in bbox (876d: 727 row groups), so measure first and fix the sort in the splitter
-    if need be.
+    if need be. **Done:** measured, the ways prune fine too (one wide row group was the outlier): a cell's box keeps
+    19 of 727 way row groups (12 of 506 MB) and 14 of 328 node row groups. `local.rs` reads only S3 (default the
+    planet, `osm/planet-261116/raw`): footers once per file (kept), row groups by their stats, one range request each,
+    side by side, kept in a row-group cache (CELLGEN_ROW_GROUP_CACHE_MB, 512; a build loads its box, then its reach).
+    Output byte-identical to the disk build. A first Denver cell: 17 MB; a neighbor: 13 MB more. From home a cold
+    cell takes ~10 s, the next ~1.4 s (release). The server reads and writes nothing on disk (`s3::local_copy` is
+    gone); only the dev tools (`cellgen fetch`/`region`, Overpass and Geofabrik caches) and `cellgen cell`'s output
+    use `data/`, and `data/dem`, `data/osm/cells` are no longer read.
 - **Remotely: Lambda first** (arm64, container image, AWS Lambda Web Adapter so the axum server runs unchanged;
   a function URL). Scales to zero: idle cost ≈ S3 storage (~$7/month FABDEM + ~$7 planet cells); a cell build
   ≈ 1 s at 2 GB ≈ $0.00003. Responses under Lambda's 6 MB buffered cap (the largest table, fine ground, is ~1 MB).

@@ -252,10 +252,10 @@ impl Inputs {
     /// OSM extracted once, each kind kept as its old Postgres query did (boxes.rs). A far tile has no OSM, terrain only: reading
     /// 70 km of cell files for a few wide rivers and lakes takes seconds (a water-only file per level-6 cell, from the
     /// splitter, would bring them back cheaply). Blocking (reads files and decodes them).
-    pub fn from_files(data: &Path, c: &Cell, options: &Options) -> Result<Inputs, LoadError> {
+    pub fn from_files(c: &Cell, options: &Options) -> Result<Inputs, LoadError> {
         let bbox = c.load_box();
         let osm = if c.level > FAR_LEVEL {
-            crate::local::load_box(&crate::local::cells_dir(data), bbox)?
+            crate::local::load_box(bbox)?
         } else {
             None
         };
@@ -311,7 +311,7 @@ impl Inputs {
                     b[3].max(r[3]),
                 ];
                 let wider = (reach != bbox)
-                    .then(|| crate::local::load_box(&crate::local::cells_dir(data), reach))
+                    .then(|| crate::local::load_box(reach))
                     .transpose()?
                     .flatten();
                 let wider_x = wider.as_ref().map(crate::extract::extract);

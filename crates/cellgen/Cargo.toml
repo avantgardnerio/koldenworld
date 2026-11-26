@@ -11,6 +11,7 @@ arrow-schema = "60.2.0"
 aws-config = { version = "1.13.4", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1.162.0"
 axum = "0.8.9"
+bytes = "1"
 clipper2-rust = { version = "1.2.0", features = ["using_z"] }
 earcutr = "0.5.0"
 glam = "0.34.3"

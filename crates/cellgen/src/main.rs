@@ -51,7 +51,9 @@ const USAGE: &str = "usage:
   cellgen region <lat,lon> [--download]          the Geofabrik region holding a point (its extract, downloaded once)
   cellgen serve [--port <port>]                 cell server and live air traffic on 127.0.0.1 (default port 5175)
 
-The data directory (dem/, the cell files and the caches) is GAME_DATA (default: the repo's data/, found from here
+Cells are built from S3 (the OSM cell files, CELLGEN_OSM_S3; FABDEM, CELLGEN_DEM_S3; the geoid, CELLGEN_GEOID_S3) and
+served cells kept there (CELLGEN_CELLS_S3), with the AWS SDK's usual credentials (AWS_PROFILE). The local data directory,
+for `cell`'s output and the Overpass and Geofabrik caches, is GAME_DATA (default: the repo's data/, found from here
 up).";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -100,22 +102,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 o.sidewalks &= flag("--no-sidewalks").is_none();
                 o
             };
-            let data = match fixture {
-                Some(_) => None,
-                None => Some(data_dir()?),
-            };
             let out = match value("--out")? {
                 Some(o) => PathBuf::from(o),
-                None => data.clone().unwrap_or(data_dir()?).join("rust-cells"),
+                None => data_dir()?.join("rust-cells"),
             };
             for c in &cells {
                 let started = std::time::Instant::now();
-                let inputs = match (&fixture, data.as_deref()) {
-                    (Some(ways), _) => cell::Inputs::fixture(ways, height, c),
-                    (None, Some(data)) => {
-                        cell::Inputs::from_files(data, c, &options(c)).map_err(|e| e.to_string())?
-                    }
-                    _ => unreachable!(),
+                let inputs = match &fixture {
+                    Some(ways) => cell::Inputs::fixture(ways, height, c),
+                    None => cell::Inputs::from_files(c, &options(c)).map_err(|e| e.to_string())?,
                 };
                 let loaded = started.elapsed();
                 let built = cell::build(inputs, c, &options(c), pictures.as_deref())?;
@@ -157,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let c = cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?;
             let started = std::time::Instant::now();
             let box_ = s2::lat_lon_bounds(c.face, c.square, 0.0);
-            let osm = local::load_box(&local::cells_dir(&data_dir()?), box_)
+            let osm = local::load_box(box_)
                 .map_err(|e| e.to_string())?
                 .ok_or("no cell files for that tile")?;
             let b = buildings::from_extracted(&osm, &extract::extract(&osm), box_, |lon, lat| {
@@ -237,14 +232,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
             };
             let osm = if args.get(2).map(String::as_str) == Some("--local") {
-                let cells = local::cells_dir(&data_dir()?);
-                let loaded = local::load(&cells, &c)
-                    .map_err(|e| e.to_string())?
-                    .ok_or(format!(
-                        "no cell files for {} under {}",
-                        c.token,
-                        cells.display()
-                    ))?;
+                let loaded = local::load(&c).map_err(|e| e.to_string())?.ok_or(format!(
+                    "no cell files for {} in {}",
+                    c.token,
+                    local::source()
+                ))?;
                 println!(
                     "{}: {} nodes, {} ways from {}",
                     c.token,
@@ -370,20 +362,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(i) => args.get(i + 1).ok_or(USAGE)?.parse()?,
                 None => 5175,
             };
-            serve::serve(port, data_dir()?)
+            serve::serve(port)
         }
         _ => Err(USAGE.into()),
     }
 }
 
-/// GAME_DATA, or the nearest data/ with a dem/ in it, from the working directory up.
+/// GAME_DATA, or the nearest data/ beside a .git, from the working directory up (the repo's).
 fn data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Ok(dir) = std::env::var("GAME_DATA") {
         return Ok(dir.into());
     }
     let here = std::env::current_dir()?;
     here.ancestors()
+        .find(|d| d.join(".git").exists())
         .map(|d| d.join("data"))
-        .find(|d| d.join("dem").is_dir())
-        .ok_or_else(|| "no data/dem found from here up; set GAME_DATA".into())
+        .ok_or_else(|| "not in the repo (no .git found from here up); set GAME_DATA".into())
 }

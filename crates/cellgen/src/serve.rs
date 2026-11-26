@@ -15,7 +15,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Every cell's tables, and a coarse tile's buildings.
@@ -35,14 +34,13 @@ const CELLS_S3: &str = "s3://koldenworld-data-2/cells";
 const ARROW: &str = "application/vnd.apache.arrow.file";
 
 struct App {
-    data: PathBuf,                                                 // data/ (dem/ under it)
-    cells: String, // s3://…/cells/<data>/<format>: where this server's built cells are
+    cells: String,      // s3://…/cells/<data>/<format>: where this server's built cells are
     aircraft: Aircraft, // live air traffic, rate-limited
     building: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, // a lock per cell being asked for
 }
 
 /// Serves on 127.0.0.1:`port` until stopped.
-pub fn serve(port: u16, data: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let aircraft = Aircraft::new()?;
     tokio::runtime::Runtime::new()?.block_on(async {
         let cells = format!(
@@ -58,7 +56,6 @@ pub fn serve(port: u16, data: PathBuf) -> Result<(), Box<dyn std::error::Error>>
         println!("built cells in {cells}/<token>/");
         let app = Arc::new(App {
             cells,
-            data,
             aircraft,
             building: Mutex::default(),
         });
@@ -175,8 +172,8 @@ async fn build(app: Arc<App>, c: Cell) -> Result<HashMap<&'static str, Vec<u8>>,
     let started = std::time::Instant::now();
     let options = cell::Options::for_level(c.level);
     let inputs = {
-        let (data, c, options) = (app.data.clone(), c.clone(), options.clone());
-        tokio::task::spawn_blocking(move || cell::Inputs::from_files(&data, &c, &options)).await??
+        let (c, options) = (c.clone(), options.clone());
+        tokio::task::spawn_blocking(move || cell::Inputs::from_files(&c, &options)).await??
     };
     let loaded = started.elapsed();
     let token = c.token.clone();

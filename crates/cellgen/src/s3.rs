@@ -1,19 +1,18 @@
-//! Local copies of S3 objects, fetched on first use with the AWS SDK, so the usual credentials apply (AWS_PROFILE and
-//! its SSO session locally, the function's role on Lambda). The region is the bucket's, BUCKET_REGION (or
-//! CELLGEN_S3_REGION), whatever the profile's is: S3 answers a request to another region with a redirect. An object S3 doesn't have leaves a `.none` file beside where its copy would be, so it's asked for
-//! once; a fetch that fails otherwise (credentials, network) is logged and tried again next time.
+//! S3 with the AWS SDK (never the aws CLI), read in memory, never into files: the usual credentials apply (AWS_PROFILE
+//! and its SSO session locally, the function's role on Lambda). The region is the bucket's, BUCKET_REGION (or
+//! CELLGEN_S3_REGION), whatever the profile's is: S3 answers a request to another region with a redirect.
 //!
-//! Callers are synchronous (cell builds run on blocking threads): each request runs on this module's own runtime, from
-//! a thread of its own, so it works with or without a Tokio runtime around the caller.
+//! - `get` and `put`: whole objects, for async callers (built cells).
+//! - `size` and `ranges`: an object's size (remembered) and byte ranges fetched side by side (Parquet row groups).
+//! - `open`: a Read + Seek over an object that fetches it PAGE bytes at a time as they're read, kept in a cache shared
+//!   by the process (CELLGEN_PAGE_CACHE_MB, default PAGE_CACHE_MB; the oldest pages go first), so a tiled GeoTIFF costs
+//!   its header and the blocks a box needs, and the next cell in the same tile reuses them.
 //!
-//! Ranged: `open` gives a Read + Seek over an object that fetches it PAGE bytes at a time as they're read, kept in a
-//! cache shared by the process (CELLGEN_PAGE_CACHE_MB, default PAGE_CACHE_MB; the oldest pages go first), so a
-//! tiled GeoTIFF costs its header and the blocks a box needs, and the next cell in the same tile reuses them.
+//! The synchronous ones are for cell builds, which run on blocking threads: each request runs on this module's own
+//! runtime, from a thread of its own, so it works with or without a Tokio runtime around the caller.
 
 use aws_config::BehaviorVersion;
 use std::collections::HashMap;
-use std::fs::File;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::runtime::Runtime;
 
@@ -46,9 +45,6 @@ pub fn fetched() -> (u64, u64) {
 /// Each object's size once known; None for one S3 doesn't have.
 static SIZES: LazyLock<Mutex<HashMap<Arc<str>, Option<u64>>>> = LazyLock::new(Default::default);
 
-/// Copies being fetched, by file: callers side by side wait for one fetch rather than each making their own.
-static FETCHES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = LazyLock::new(Default::default);
-
 static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -64,57 +60,6 @@ static CLIENT: LazyLock<aws_sdk_s3::Client> = LazyLock::new(|| {
         .load());
     aws_sdk_s3::Client::new(&config)
 });
-
-/// `file`, fetched from `url` (`s3://bucket/key`) first if it isn't there; None where S3 has no such object, or the
-/// fetch failed.
-pub fn local_copy(url: &str, file: &Path) -> Option<PathBuf> {
-    let none = file.with_extension("none");
-    let known =
-        || (file.exists() || none.exists()).then(|| file.exists().then(|| file.to_path_buf()));
-    if let Some(found) = known() {
-        return found;
-    }
-    let lock = FETCHES
-        .lock()
-        .unwrap()
-        .entry(file.to_path_buf())
-        .or_default()
-        .clone();
-    let _fetching = lock.lock().unwrap();
-    if let Some(found) = known() {
-        return found; // fetched while we waited
-    }
-    let Some((bucket, key)) = split(url) else {
-        eprintln!("s3: {url} isn't an s3://bucket/key URL");
-        return None;
-    };
-    let part = file.with_extension(format!("part{}", std::process::id()));
-    if let Err(e) = std::fs::create_dir_all(file.parent()?) {
-        eprintln!("s3: {}: {e}", file.display());
-        return None;
-    }
-    match run(download(bucket, key, &part)) {
-        Ok(true) => match std::fs::rename(&part, file) {
-            Ok(()) => {
-                eprintln!("s3: fetched {url}");
-                Some(file.to_path_buf())
-            }
-            Err(e) => {
-                eprintln!("s3: {}: {e}", file.display());
-                None
-            }
-        },
-        Ok(false) => {
-            File::create(&none).ok();
-            None
-        }
-        Err(e) => {
-            eprintln!("s3: {url}: {e}");
-            std::fs::remove_file(&part).ok();
-            None
-        }
-    }
-}
 
 /// An object's bytes, or None where S3 has no such object. For async callers (on any runtime: the request runs on
 /// this module's).
@@ -152,6 +97,57 @@ pub async fn put(url: &str, bytes: Vec<u8>, content_type: &str) -> Result<(), St
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| aws_sdk_s3::error::DisplayErrorContext(e).to_string())
+}
+
+/// An object's size (asked once, then remembered); None where S3 has no such object.
+pub fn size(url: &str) -> Result<Option<u64>, String> {
+    let url: Arc<str> = url.into();
+    if let Some(&known) = SIZES.lock().unwrap().get(&url) {
+        return Ok(known);
+    }
+    let (bucket, key) = split(&url).ok_or(format!("{url} isn't an s3://bucket/key URL"))?;
+    let size = run(async {
+        match CLIENT.head_object().bucket(bucket).key(key).send().await {
+            Ok(o) => Ok(o.content_length().map(|n| n as u64)),
+            Err(e) if e.raw_response().is_some_and(|r| r.status().as_u16() == 404) => Ok(None),
+            Err(e) => Err(aws_sdk_s3::error::DisplayErrorContext(e).to_string()),
+        }
+    })?;
+    SIZES.lock().unwrap().insert(url, size);
+    Ok(size)
+}
+
+/// Byte ranges of an object ((start, length) each), fetched side by side; in the same order.
+pub fn ranges(url: &str, ranges: &[(u64, u64)]) -> Result<Vec<bytes::Bytes>, String> {
+    let (bucket, key) = split(url).ok_or(format!("{url} isn't an s3://bucket/key URL"))?;
+    let fetched = run(async {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, &(start, len)) in ranges.iter().enumerate() {
+            let request = CLIENT
+                .get_object()
+                .bucket(bucket)
+                .key(key)
+                .range(format!("bytes={start}-{}", start + len - 1));
+            set.spawn(async move {
+                let o = request
+                    .send()
+                    .await
+                    .map_err(|e| aws_sdk_s3::error::DisplayErrorContext(e).to_string())?;
+                let body = o.body.collect().await.map_err(|e| e.to_string())?;
+                Ok::<_, String>((i, body.into_bytes()))
+            });
+        }
+        let mut out = vec![bytes::Bytes::new(); ranges.len()];
+        while let Some(done) = set.join_next().await {
+            let (i, b) = done.map_err(|e| e.to_string())??;
+            out[i] = b;
+        }
+        Ok::<_, String>(out)
+    })?;
+    FETCHED[0].fetch_add(ranges.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    let bytes: u64 = fetched.iter().map(|b| b.len() as u64).sum();
+    FETCHED[1].fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    Ok(fetched)
 }
 
 /// A reader over an object, fetched in pages as it's read (see the module's notes); None where S3 has no such object.
@@ -268,28 +264,6 @@ fn page(url: &Arc<str>, index: u64) -> Result<Option<Page>, String> {
         }
     }
     Ok(Some((bytes, size)))
-}
-
-/// Where `url` (`s3://bucket/prefix`) is mirrored under `dir`: `dir/bucket/prefix`.
-pub fn mirror(dir: &Path, url: &str) -> PathBuf {
-    dir.join(url.trim_start_matches("s3://").trim_end_matches('/'))
-}
-
-/// An object into `file`: true, or false where S3 has no such object.
-async fn download(bucket: &str, key: &str, file: &Path) -> Result<bool, String> {
-    let object = match CLIENT.get_object().bucket(bucket).key(key).send().await {
-        Ok(o) => o,
-        Err(e) if e.raw_response().is_some_and(|r| r.status().as_u16() == 404) => return Ok(false),
-        Err(e) => return Err(aws_sdk_s3::error::DisplayErrorContext(e).to_string()),
-    };
-    let mut body = object.body.into_async_read();
-    let mut out = tokio::fs::File::create(file)
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::io::copy(&mut body, &mut out)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(true)
 }
 
 /// `s3://bucket/key` → (bucket, key).
