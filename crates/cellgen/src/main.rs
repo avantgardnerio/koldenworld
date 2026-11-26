@@ -138,10 +138,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::fs::write(dir.join("buildings.arrow"), v)?;
                     std::fs::write(dir.join("buildings_triangles.arrow"), t)?;
                 }
+                let (requests, bytes) = s3::fetched();
                 println!(
-                    "cell {} built in {:.0?} (loaded in {loaded:.0?})",
+                    "cell {} built in {:.0?} (loaded in {loaded:.0?}; S3 ranges so far: {requests} requests, {:.1} MB)",
                     c.token,
-                    started.elapsed()
+                    started.elapsed(),
+                    bytes as f64 / 1e6
                 );
                 for line in &built.log {
                     println!("  {line}");

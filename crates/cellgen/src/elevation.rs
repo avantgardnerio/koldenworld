@@ -2,20 +2,18 @@
 //! buildings and forests removed: bare earth, ~30 m, EGM2008 heights) plus the EGM2008 geoid, giving heights above
 //! the WGS84 ellipsoid (h = H + N).
 //!
-//! data/dem/fabdem/N39W106_FABDEM_V1-2.tif covers 39–40° N, 106–105° W (named by its southwest corner); its pixels
-//! are areas, float32 in tiles, and only the tiles a box needs are read. Oceans have no tiles.
-//! data/dem/us_nga_egm08_25.tif is EGM2008 for the world: a node-registered 2.5' grid from 180° W, read the same way.
-//!
-//! A tile missing on disk is fetched first from CELLGEN_DEM_S3 (default below; empty turns it off), as s3.rs does.
-//! The oceans have no tiles.
+//! Read from S3 by range (s3::open), only the 256×256 blocks a box needs and the headers, never whole files:
+//! N39W106_FABDEM_V1-2.tif under CELLGEN_DEM_S3 (default DEM_S3) covers 39–40° N, 106–105° W (named by its southwest
+//! corner); its pixels are areas, float32 in tiles. Oceans have no tiles (S3 has no object). CELLGEN_GEOID_S3
+//! (default GEOID_S3) is EGM2008 for the world: a node-registered 2.5' grid from 180° W, read the same way.
 
-use std::fs::File;
-use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use crate::s3;
+use std::io::{Read, Seek};
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 
 const DEM_S3: &str = "s3://koldenworld-data-2/dem/fabdem-v1-2/tiles/";
+const GEOID_S3: &str = "s3://koldenworld-data-2/dem/geoid/us_nga_egm08_25.tif";
 
 /// Samples of a raster window: rows run south.
 struct Grid {
@@ -62,20 +60,24 @@ pub struct Elevation {
 }
 
 impl Elevation {
-    /// Loads what a box (west, south, east, north) needs from `dir` (data/dem).
+    /// Loads what a box (west, south, east, north) needs, from S3.
     pub fn region(
-        dir: &Path,
         [west, south, east, north]: [f64; 4],
     ) -> Result<Elevation, Box<dyn std::error::Error>> {
-        let geoid = read_window(&dir.join("us_nga_egm08_25.tif"), [west, south, east, north])?;
+        let var = |k: &str, default: &str| std::env::var(k).unwrap_or_else(|_| default.into());
+        let geoid_url = var("CELLGEN_GEOID_S3", GEOID_S3);
+        let geoid = s3::open(&geoid_url)?.ok_or(format!("no EGM2008 grid at {geoid_url}"))?;
+        let geoid = read_window(geoid, &geoid_url, [west, south, east, north])?;
+        let source = var("CELLGEN_DEM_S3", DEM_S3);
         let mut tiles = Vec::new();
         for lat in south.floor() as i32..north.ceil() as i32 {
             for lon in west.floor() as i32..east.ceil() as i32 {
                 let ns = if lat >= 0 { 'N' } else { 'S' };
                 let ew = if lon < 0 { 'W' } else { 'E' };
                 let name = format!("{ns}{:02}{ew}{:03}_FABDEM_V1-2.tif", lat.abs(), lon.abs());
-                if let Some(file) = local_tile(&dir.join("fabdem"), &name) {
-                    tiles.push(read_window(&file, [west, south, east, north])?);
+                let url = format!("{source}{name}");
+                if let Some(tile) = s3::open(&url)? {
+                    tiles.push(read_window(tile, &url, [west, south, east, north])?);
                 }
             }
         }
@@ -98,20 +100,8 @@ impl Elevation {
     }
 }
 
-/// A FABDEM tile on disk, fetched from S3 first if it isn't there (s3::local_copy); None where there's no tile.
-fn local_tile(dir: &Path, name: &str) -> Option<PathBuf> {
-    let source = std::env::var("CELLGEN_DEM_S3").unwrap_or_else(|_| DEM_S3.into());
-    let file = dir.join(name);
-    if source.is_empty() {
-        return file.exists().then_some(file);
-    }
-    crate::s3::local_copy(&format!("{source}{name}"), &file)
-}
-
-type Tiff = Decoder<BufReader<File>>;
-
 /// Where a raster sits: (lon, lat of its top-left corner, degrees per pixel east, per pixel south (negative)).
-fn georef(d: &mut Tiff) -> Result<[f64; 4], Box<dyn std::error::Error>> {
+fn georef<R: Read + Seek>(d: &mut Decoder<R>) -> Result<[f64; 4], Box<dyn std::error::Error>> {
     let scale = d.get_tag_f64_vec(Tag::Unknown(33550))?; // ModelPixelScale: sx, sy, sz
     let tie = d.get_tag_f64_vec(Tag::Unknown(33922))?; // ModelTiepoint: i, j, k, x, y, z
     Ok([
@@ -123,7 +113,7 @@ fn georef(d: &mut Tiff) -> Result<[f64; 4], Box<dyn std::error::Error>> {
 }
 
 /// GTRasterTypeGeoKey (1025) is RasterPixelIsPoint (2): GeoKeyDirectory is a 4-short header, then 4 shorts a key.
-fn pixel_is_point(d: &mut Tiff) -> bool {
+fn pixel_is_point<R: Read + Seek>(d: &mut Decoder<R>) -> bool {
     let keys = d.get_tag_u32_vec(Tag::Unknown(34735)).unwrap_or_default();
     let (keys, _) = keys.as_chunks::<4>();
     keys.iter()
@@ -131,7 +121,7 @@ fn pixel_is_point(d: &mut Tiff) -> bool {
         .any(|&[key, location, _, value]| key == 1025 && location == 0 && value == 2)
 }
 
-fn nodata(d: &mut Tiff) -> Option<f32> {
+fn nodata<R: Read + Seek>(d: &mut Decoder<R>) -> Option<f32> {
     d.get_tag_ascii_string(Tag::Unknown(42113))
         .ok()?
         .trim()
@@ -147,14 +137,13 @@ fn floats(r: DecodingResult) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     }
 }
 
-/// The tiles of an image a box touches (plus a pixel of margin), as one window of samples.
-fn read_window(
-    file: &Path,
+/// The tiles of an image (`name`, for errors) a box touches (plus a pixel of margin), as one window of samples.
+fn read_window<R: Read + Seek>(
+    image: R,
+    name: &str,
     [west, south, east, north]: [f64; 4],
 ) -> Result<Grid, Box<dyn std::error::Error>> {
-    let mut d = Decoder::new(BufReader::new(
-        File::open(file).map_err(|e| format!("{}: {e}", file.display()))?,
-    ))?;
+    let mut d = Decoder::new(image).map_err(|e| format!("{name}: {e}"))?;
     let [ox, oy, dx, dy] = georef(&mut d)?;
     let nodata = nodata(&mut d);
     let (iw, ih) = d.dimensions()?;

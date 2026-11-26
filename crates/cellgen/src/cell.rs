@@ -347,8 +347,7 @@ impl Inputs {
             }
             _ => (None, None),
         };
-        let heights =
-            elevation::Elevation::region(&data.join("dem"), region).map_err(|e| e.to_string())?;
+        let heights = elevation::Elevation::region(region).map_err(|e| e.to_string())?;
         Ok(Inputs {
             ways,
             water,
