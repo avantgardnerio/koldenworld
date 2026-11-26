@@ -150,6 +150,8 @@ pub fn split(ways: &RoadWays) -> (RoadWays, Crossings) {
         out.lanes_fwd.push(ways.lanes_fwd[w]);
         out.lanes_back.push(ways.lanes_back[w]);
         out.sidewalks.push(ways.sidewalks[w]);
+        out.speed.push(ways.speed[w]);
+        out.structure.push(ways.structure[w]);
     }
     (out, stats)
 }

@@ -37,6 +37,8 @@ pub struct RoadWays {
     pub lanes_fwd: Vec<u8>,    // lanes in the way's direction
     pub lanes_back: Vec<u8>,   // lanes against it; 0 = one-way
     pub sidewalks: Vec<u8>,    // bits: SIDEWALK_LEFT, SIDEWALK_RIGHT of the way's direction
+    pub speed: Vec<f32>,       // speed limit, m/s
+    pub structure: Vec<u8>,    // 0 on the ground, 1 bridge, 2 tunnel (as the TS ROAD_STRUCTURES)
     pub names: Vec<String>,    // names[0] = ""
 }
 
@@ -63,13 +65,49 @@ pub async fn load_road_ways(
     east: f64,
     north: f64,
 ) -> Result<RoadWays, Box<dyn std::error::Error + Send + Sync>> {
+    load(
+        db,
+        [west, south, east, north],
+        "ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))",
+    )
+    .await
+}
+
+/// TEMPORARY, for `cellgen compare`: delete with Postgres (step 1d). As the TS loadRoadWays queries them: the road
+/// ways intersecting a box plus every way sharing a node with one of them, ordered by OSM id.
+pub async fn load_road_ways_touching(
+    db: &Client,
+    bbox: [f64; 4],
+) -> Result<RoadWays, Box<dyn std::error::Error + Send + Sync>> {
+    load(
+        db,
+        bbox,
+        "osm_way_id IN (
+           WITH hit AS (
+             SELECT osm_way_id, node_ids FROM road_ways WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+           )
+           SELECT osm_way_id FROM hit
+           UNION
+           SELECT r.osm_way_id FROM road_ways r
+           WHERE r.node_ids && (SELECT array_agg(DISTINCT n) FROM hit, unnest(hit.node_ids) n)
+         )",
+    )
+    .await
+}
+
+/// The road ways where `filter` holds (an SQL condition on road_ways, with the box as $1..$4), ordered by OSM id.
+async fn load(
+    db: &Client,
+    [west, south, east, north]: [f64; 4],
+    filter: &str,
+) -> Result<RoadWays, Box<dyn std::error::Error + Send + Sync>> {
     let rows = db.query(
-        "SELECT osm_way_id, class, name, node_ids, ST_AsBinary(geom), lanes_fwd, lanes_back, speed_limit_mps,
+        &format!("SELECT osm_way_id, class, name, node_ids, ST_AsBinary(geom), lanes_fwd, lanes_back, speed_limit_mps,
                 tags ->> 'sidewalk', tags ->> 'sidewalk:both', tags ->> 'sidewalk:left', tags ->> 'sidewalk:right',
-                tags ->> 'oneway', tags ->> 'tunnel'
+                tags ->> 'oneway', tags ->> 'tunnel', tags ->> 'bridge'
          FROM road_ways
-         WHERE ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
-         ORDER BY osm_way_id",
+         WHERE {filter}
+         ORDER BY osm_way_id"),
         &[&west, &south, &east, &north],
     ).await?;
     let mut ways = RoadWays {
@@ -117,6 +155,9 @@ pub async fn load_road_ways(
             tag(12),
             tag(13),
         ));
+        ways.speed.push(speed);
+        ways.structure
+            .push(crate::extract::structure(tag(14), tag(13)));
     }
     Ok(ways)
 }
@@ -127,18 +168,38 @@ impl RoadWays {
     /// them), nodes in the direction of travel.
     pub fn from_extracted(osm: &Osm, x: &Extracted, bbox: [f64; 4]) -> RoadWays {
         let r = &x.roads;
+        RoadWays::of(
+            osm,
+            x,
+            (0..r.way.len()).filter(|&i| meets(x, i, bbox)).collect(),
+        )
+    }
+
+    /// As the TS loadRoadWays returns them, for a road graph that's cut the same way whichever cell builds it: the
+    /// road ways intersecting the box plus every way sharing a node with one of them, wherever it is (OSM loaded
+    /// over `reach(x, bbox)` has them all), ordered by OSM id.
+    pub fn with_touching(osm: &Osm, x: &Extracted, bbox: [f64; 4]) -> RoadWays {
+        let r = &x.roads;
+        let nodes = |i: usize| &r.node_id[r.node_start[i] as usize..r.node_start[i + 1] as usize];
+        let hit: std::collections::HashSet<i64> = (0..r.way.len())
+            .filter(|&i| meets(x, i, bbox))
+            .flat_map(|i| nodes(i).iter().copied())
+            .collect();
+        let order = (0..r.way.len())
+            .filter(|&i| nodes(i).iter().any(|n| hit.contains(n)))
+            .collect();
+        RoadWays::of(osm, x, order)
+    }
+
+    /// The extracted roads at these indices, ordered by OSM id.
+    fn of(osm: &Osm, x: &Extracted, mut order: Vec<usize>) -> RoadWays {
+        let r = &x.roads;
         let text = |w: usize, key: &str| {
             let k = osm.strings.find(key)?;
             osm.way_tags
                 .get(w, k)
                 .map(|v| osm.strings.text[v as usize].as_str())
         };
-        let mut order: Vec<usize> = (0..r.way.len())
-            .filter(|&i| {
-                let points = r.node_start[i] as usize..r.node_start[i + 1] as usize;
-                crate::boxes::line_meets_box(&r.lonlat[points], bbox)
-            })
-            .collect();
         order.sort_by_key(|&i| osm.way_id[r.way[i] as usize]);
         let mut ways = RoadWays::empty();
         let mut name_index = std::collections::HashMap::new();
@@ -160,6 +221,8 @@ impl RoadWays {
             ways.lanes_fwd.push(r.lanes_fwd[i]);
             ways.lanes_back.push(r.lanes_back[i]);
             ways.sidewalks.push(r.sidewalks[i]);
+            ways.speed.push(r.speed[i]);
+            ways.structure.push(r.structure[i]);
         }
         ways
     }
@@ -217,9 +280,38 @@ impl RoadWays {
             out.lanes_fwd.push(self.lanes_fwd[w]);
             out.lanes_back.push(self.lanes_back[w]);
             out.sidewalks.push(self.sidewalks[w]);
+            out.speed.push(self.speed[w]);
+            out.structure.push(self.structure[w]);
         }
         out
     }
+}
+
+/// How far the roads intersecting the box reach (the box grown to cover them): every road sharing a node with them
+/// overlaps it, so an OSM load over it (local::load_box) has them all.
+pub fn reach(x: &Extracted, bbox: [f64; 4]) -> [f64; 4] {
+    let r = &x.roads;
+    let mut out = bbox;
+    for i in (0..r.way.len()).filter(|&i| meets(x, i, bbox)) {
+        for &[lon, lat] in &r.lonlat[r.node_start[i] as usize..r.node_start[i + 1] as usize] {
+            out = [
+                out[0].min(lon),
+                out[1].min(lat),
+                out[2].max(lon),
+                out[3].max(lat),
+            ];
+        }
+    }
+    out
+}
+
+/// Whether extracted road i intersects the box (ST_Intersects).
+fn meets(x: &Extracted, i: usize, bbox: [f64; 4]) -> bool {
+    let r = &x.roads;
+    crate::boxes::line_meets_box(
+        &r.lonlat[r.node_start[i] as usize..r.node_start[i + 1] as usize],
+        bbox,
+    )
 }
 
 /// Road ways from JSON: an array of the TS RoadWayInput (osmWayId, nodeIds, points as [lon, lat], class, name,
@@ -281,6 +373,17 @@ pub fn from_json(text: &str) -> Result<RoadWays, Box<dyn std::error::Error>> {
             .push(field("lanesBack")?.as_u64().unwrap_or(0) as u8);
         ways.sidewalks
             .push(w.get("sidewalks").and_then(|s| s.as_u64()).unwrap_or(0) as u8);
+        ways.speed.push(
+            w.get("speedLimitMps")
+                .and_then(|s| s.as_f64())
+                .unwrap_or(0.0) as f32,
+        );
+        ways.structure
+            .push(match w.get("structure").and_then(|s| s.as_str()) {
+                Some("bridge") => 1,
+                Some("tunnel") => 2,
+                _ => 0,
+            });
     }
     Ok(ways)
 }

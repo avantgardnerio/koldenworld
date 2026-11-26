@@ -436,7 +436,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let [west, south, east, north] = bbox;
             let pool = pool(&db)?;
             let owns = |lon, lat| c.owns(lon, lat);
-            let (db, water, aeroways, buildings, pois, building_inputs) =
+            let (db, water, aeroways, buildings, pois, building_inputs, graph_ways) =
                 tokio::runtime::Runtime::new()?
                     .block_on(async {
                         let client = pool.get().await?;
@@ -447,6 +447,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             buildings::load(&client, bbox, owns).await?,
                             pois::load(&client, bbox).await?,
                             building_inputs::load(&client, bbox).await?,
+                            ways::load_road_ways_touching(&client, c.cell_box(300.0)).await?,
                         ))
                     })
                     .map_err(|e| e.to_string())?;
@@ -540,6 +541,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => building_inputs::BuildingInputs::from_extracted(&osm, &x, bbox),
             };
             compare_building_inputs(&building_inputs, &files);
+            // The road graph's ways, over the TS cell box: those in it and every way sharing a node with them.
+            let graph_box = c.cell_box(300.0);
+            let reach = ways::reach(&x, graph_box);
+            let wider = local::load_box(&cells, reach)
+                .map_err(|e| e.to_string())?
+                .ok_or("no cell files over the roads' reach")?;
+            let files = ways::RoadWays::with_touching(&wider, &extract::extract(&wider), graph_box);
+            println!(
+                "graph ways: postgres {}, files {}",
+                graph_ways.osm_id.len(),
+                files.osm_id.len()
+            );
+            compare_ways(&graph_ways, &files);
             Ok(())
         }
         Some("terrain") => {
@@ -831,6 +845,8 @@ fn compare_ways(a: &ways::RoadWays, b: &ways::RoadWays) {
                 (a.lanes_fwd[i], a.lanes_back[i]) == (b.lanes_fwd[j], b.lanes_back[j]),
             ),
             ("sidewalks", a.sidewalks[i] == b.sidewalks[j]),
+            ("speed", a.speed[i] == b.speed[j]),
+            ("structure", a.structure[i] == b.structure[j]),
         ];
         for (what, same) in checks {
             if !same {

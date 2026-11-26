@@ -64,11 +64,16 @@ How to do it, one table at a time, the way 1a–1c went:
   rows), `nodes`/`edges`. For each,
   build the cell in TS and Rust and `cmp` the `.arrow` bytes; where floats differ only by evaluation order, compare
   decoded columns with a tolerance and say so.
+- **`nodes`/`edges` (decided 2026-11-26):** the topology exactly as the TS (checked field by field). The heights
+  deliberately differ: every node and point at the drawn ground (`cell::Ground`), with a point added wherever the
+  centreline crosses a lattice row, column or diagonal. Bridges and tunnels stay on the ground too, as the ground
+  draws them; `drop` is 0 (no road meshes read it); `ROAD_GRAPH_VERSION` 5. No OSM `ele`/`layer`.
 - **Then serve them** from `cellgen serve` at the same paths and `.cell` blob, point the viewer's `CELL_SERVER`
   (`packages/viewer/vite.config.ts`) at 5175, and delete `packages/cli/src/{server,cells,cell-pool,cell-worker,
   elevation}.ts`, `packages/db`'s loaders, `areas.rs`/`/ensure`/`import.rs`, and the Postgres dependency. Also the
   Postgres code kept only for checking: every `load` in cellgen that queries Postgres (`ways::load_road_ways`,
-  `water::load_water`, `aeroways::load`, `buildings::load`, `pois::load`, `building_inputs::load`, marked TEMPORARY
+  `ways::load_road_ways_touching`, `water::load_water`, `aeroways::load`, `buildings::load`, `pois::load`,
+  `building_inputs::load`, marked TEMPORARY
   where new),
   `cellgen compare`, `cell … --postgres` and `Inputs::load`.
 - **Done in 1d:** `terrain` (served by `cellgen serve`, from the drawn ground's lattice; no 1 m water carve); the POI
@@ -101,6 +106,11 @@ CC BY-NC-SA allow it with attribution). Needs the server-only crates behind a fe
 codec. No shared cache: every player builds what they visit.
 
 ## Backlog
+
+- **Flat roads** (after 1d): the ground generator keeps every road level across its centreline, at the centreline's
+  FABDEM height (as the road graph has it from 1d on), and moves the terrain at the road's edges to meet it. The
+  drawn road, the graph and cars at any lane then agree. Later still, **overpasses**: bridge decks raised by OSM
+  `bridge`/`layer` (read from the cell files' tags then), drawn as decks instead of painted on the ground.
 
 - **Far-tile water:** the splitter writes a small water-only file per level-6 cell (waterways ≥ 15 m, water areas)
   so far tiles get rivers and lakes back cheaply. Fold into the next planet run.

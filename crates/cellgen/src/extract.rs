@@ -786,7 +786,7 @@ fn sidewalks<'a>(tag: &impl Fn(&str) -> Option<&'a str>, class: &str, speed: f64
 }
 
 /// 1 bridge, 2 tunnel (not a building passage: a gap under a building at ground level), else 0.
-fn structure(bridge: Option<&str>, tunnel: Option<&str>) -> u8 {
+pub fn structure(bridge: Option<&str>, tunnel: Option<&str>) -> u8 {
     if bridge.is_some_and(|b| b != "no") {
         1
     } else if tunnel.is_some_and(|t| t != "no" && t != "building_passage") {
