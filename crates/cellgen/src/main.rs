@@ -23,6 +23,7 @@ mod local;
 mod markings;
 mod mesh;
 mod osm;
+mod poi_table;
 mod pois;
 mod polygon;
 mod s2;
@@ -135,6 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::write(dir.join("terrain.arrow"), &built.terrain)?;
                 if let Some(b) = &built.fine_buildings {
                     std::fs::write(dir.join("buildings.arrow"), b)?;
+                }
+                if let Some(p) = &built.fine_pois {
+                    std::fs::write(dir.join("pois.arrow"), p)?;
                 }
                 if let Some((v, t)) = &built.buildings {
                     std::fs::write(dir.join("buildings.arrow"), v)?;

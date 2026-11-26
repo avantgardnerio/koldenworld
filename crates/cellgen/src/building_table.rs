@@ -73,14 +73,9 @@ pub struct Table {
     pub kinds: Vec<String>,
 }
 
-/// The table of the buildings whose owner point `owns` (lon, lat), in `frame`, draped on `ground` (lat, lon → m above
-/// the ellipsoid; the drawn ground's, cell::Ground).
-pub fn build(
-    b: &BuildingInputs,
-    owns: impl Fn(f64, f64) -> bool,
-    frame: &Frame,
-    mut ground: impl FnMut(f64, f64) -> f64,
-) -> Table {
+/// The table of the buildings whose owner point `owns` (lon, lat), projected to `frame`, not yet draped (base 0, as
+/// the TS buildBuildings: what points of interest are assigned on).
+pub fn build(b: &BuildingInputs, owns: impl Fn(f64, f64) -> bool, frame: &Frame) -> Table {
     let s = &b.shape;
     let mut t = Table {
         ring_start: vec![0],
@@ -130,24 +125,8 @@ pub fn build(
             if rings.is_empty() {
                 continue;
             }
-            // Draped: every point at the lowest ground under the outer ring, placed at its true height.
-            let low = rings[0]
-                .iter()
-                .map(|&[x, y]| {
-                    let [lon, lat] = frame.lon_lat(x as f64, y as f64);
-                    ground(lat, lon)
-                })
-                .fold(f64::INFINITY, f64::min);
-            let place = |[x, y]: [f32; 2]| {
-                let [lon, lat] = frame.lon_lat(x as f64, y as f64);
-                frame.local(geodesy::ecef(lat, lon, low))
-            };
-            let base = place(rings[0][0]).z as f32; // the outer ring's first point
             for xy in &rings {
-                for &p in xy {
-                    let q = place(p);
-                    t.points.push([q.x as f32, q.y as f32]);
-                }
+                t.points.extend_from_slice(xy);
                 t.point_start.push(t.points.len() as i32);
             }
             t.ring_start.push((t.point_start.len() - 1) as i32);
@@ -158,7 +137,7 @@ pub fn build(
             t.is_part.push(u8::from(b.is_part[i]));
             t.height.push(b.height[i]);
             t.min_height.push(b.min_height[i]);
-            t.base.push(base);
+            t.base.push(0.0);
             t.height_source.push(b.height_source[i]);
             t.levels.push(b.levels[i]);
             t.min_level.push(if b.min_level[i].is_nan() {
@@ -173,6 +152,37 @@ pub fn build(
             );
         }
     }
+    t
+}
+
+/// The table draped on `ground` (lat, lon → m above the ellipsoid; the drawn ground's, cell::Ground), as the TS
+/// drapeBuildings: each row's points at the lowest ground under its outer ring, placed at their true height, and its
+/// base that height in the frame (at the outer ring's first point).
+pub fn drape(mut t: Table, frame: &Frame, mut ground: impl FnMut(f64, f64) -> f64) -> Table {
+    let mut points = Vec::with_capacity(t.points.len());
+    let mut base = Vec::with_capacity(t.base.len());
+    for r in 0..t.osm_id.len() {
+        let rings = t.ring_start[r] as usize..t.ring_start[r + 1] as usize;
+        let outer = t.point_start[rings.start] as usize..t.point_start[rings.start + 1] as usize;
+        let low = t.points[outer.clone()]
+            .iter()
+            .map(|&[x, y]| {
+                let [lon, lat] = frame.lon_lat(x as f64, y as f64);
+                ground(lat, lon)
+            })
+            .fold(f64::INFINITY, f64::min);
+        let place = |[x, y]: [f32; 2]| {
+            let [lon, lat] = frame.lon_lat(x as f64, y as f64);
+            frame.local(geodesy::ecef(lat, lon, low))
+        };
+        base.push(place(t.points[outer.start]).z as f32);
+        let all = outer.start..t.point_start[rings.end] as usize;
+        points.extend(t.points[all].iter().map(|&p| {
+            let q = place(p);
+            [q.x as f32, q.y as f32]
+        }));
+    }
+    (t.points, t.base) = (points, base);
     t
 }
 

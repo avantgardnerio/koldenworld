@@ -9,11 +9,12 @@
 //!    buffers in the cell's ENU frame (mesh.rs), checked against the cell's own area at the ground's height.
 
 use crate::building_inputs::{self, BuildingInputs};
+use crate::pois::PoiInputs;
 use crate::ways::{ROAD_CLASSES, RoadWays};
 use crate::{
     aeroways, building_table, buildings, clip, crossings, draw, elevation, faces, geodesy, geom,
-    graph, ground_arrow, markings, mesh, polygon, s2, simplify, terrain, terrain_arrow, water,
-    ways, widths,
+    graph, ground_arrow, markings, mesh, poi_table, polygon, s2, simplify, terrain, terrain_arrow,
+    water, ways, widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
 use deadpool_postgres::Pool;
@@ -141,6 +142,7 @@ pub struct Built {
     pub triangles: Vec<u8>,
     pub terrain: Vec<u8>, // terrain.arrow: the lattice the ground is draped on, for what stands on it
     pub fine_buildings: Option<Vec<u8>>, // a fine cell's buildings.arrow (building_table.rs)
+    pub fine_pois: Option<Vec<u8>>, // a fine cell's pois.arrow (poi_table.rs)
     pub buildings: Option<(Vec<u8>, Vec<u8>)>, // coarse tiles: the massing, as buildings.arrow and buildings_triangles.arrow
     pub log: Vec<String>,
 }
@@ -183,6 +185,27 @@ impl Cell {
                 == s2::cell_id(self.face, self.center(), self.level)
     }
 
+    /// A lon/lat box around the cell's corners, grown by a margin in metres, as the TS cellBox (the TS cell server
+    /// loaded a cell's inputs over cellBox(cell, 300)).
+    pub fn cell_box(&self, margin_m: f64) -> [f64; 4] {
+        let [s0, t0, s1, t1] = self.square;
+        let corners =
+            [[s0, t0], [s1, t0], [s1, t1], [s0, t1]].map(|st| s2::st_to_lat_lon(self.face, st));
+        let lat = s2::st_to_lat_lon(self.face, self.center()).0;
+        let d_lat = margin_m / 110_574.0;
+        let d_lon =
+            margin_m / (111_320.0 * f64::max(0.01, (lat * std::f64::consts::PI / 180.0).cos()));
+        let (lats, lons) = (corners.map(|c| c.0), corners.map(|c| c.1));
+        let min = |v: [f64; 4]| v.into_iter().fold(f64::INFINITY, f64::min);
+        let max = |v: [f64; 4]| v.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        [
+            min(lons) - d_lon,
+            f64::max(-90.0, min(lats) - d_lat),
+            max(lons) + d_lon,
+            f64::min(90.0, max(lats) + d_lat),
+        ]
+    }
+
     /// The lon/lat box everything for the cell is loaded from: its square and a quarter of a cell further each way.
     pub fn load_box(&self) -> [f64; 4] {
         let cell = self.square;
@@ -207,6 +230,7 @@ pub struct Inputs {
     heights: Heights,
     buildings: Option<buildings::Buildings>,
     fine_buildings: Option<BuildingInputs>, // a fine cell's, for its buildings table
+    fine_pois: Option<PoiInputs>,           // a fine cell's, for its points of interest table
 }
 
 /// An error that can cross an await (loading runs concurrently).
@@ -269,6 +293,7 @@ impl Inputs {
             heights: Heights::Dem(heights),
             buildings,
             fine_buildings: None,
+            fine_pois: None,
         })
     }
 
@@ -348,6 +373,11 @@ impl Inputs {
             aeroways,
             heights: Heights::Dem(heights),
             buildings,
+            fine_pois: fine_buildings.is_some().then(|| match (&osm, &x) {
+                // In the TS cell box (inside the load box: the TS loaded every input there).
+                (Some(osm), Some(x)) => PoiInputs::from_extracted(osm, x, c.cell_box(300.0)),
+                _ => PoiInputs::default(),
+            }),
             fine_buildings,
         })
     }
@@ -362,6 +392,7 @@ impl Inputs {
             heights: Heights::Flat(height),
             buildings: (c.level == COARSE_LEVEL).then(buildings::Buildings::default),
             fine_buildings: None,
+            fine_pois: None,
         }
     }
 }
@@ -408,6 +439,7 @@ pub fn build(
         heights,
         buildings: owned,
         fine_buildings,
+        fine_pois,
     } = inputs;
     if let Some(min) = options.min_class {
         ways = ways.keep(|w| ways.class[w] <= min);
@@ -645,28 +677,31 @@ pub fn build(
     let (ground, triangles) = ground_arrow::encode(&mesh, &KINDS, &c.token, center)?;
     let terrain_table = terrain_arrow::encode(&terrain.heights, n, &c.token)?;
 
-    // 6. A fine cell's buildings table, draped on the drawn ground (this cell's lattice and its neighbors').
-    let fine_buildings = match &fine_buildings {
-        Some(b) => {
+    // 6. A fine cell's buildings table, its points of interest assigned to its rows, then the buildings draped on the
+    // drawn ground (this cell's lattice and its neighbors').
+    let (fine_buildings, fine_pois) = match (&fine_buildings, &fine_pois) {
+        (Some(b), Some(p)) => {
             let started = Instant::now();
             let frame = geodesy::Frame::at(center.0, center.1, 0.0);
+            let table = building_table::build(b, |lon, lat| c.owns(lon, lat), &frame);
+            let pois = poi_table::build(p, &table, &frame);
             let mut ground = Ground::new(|lat, lon| heights.height(lat, lon), c.level, n);
-            let table = building_table::build(
-                b,
-                |lon, lat| c.owns(lon, lat),
-                &frame,
-                |lat, lon| ground.at(lat, lon),
-            );
+            let table = building_table::drape(table, &frame, |lat, lon| ground.at(lat, lon));
             log.push(format!(
-                "fine buildings in {:.0?}: {} rows from {} inputs, on {} cells' lattices",
+                "fine buildings in {:.0?}: {} rows from {} inputs, on {} cells' lattices; {} of {} points of interest in them",
                 started.elapsed(),
                 table.osm_id.len(),
                 b.osm_id.len(),
-                ground.lattices.len()
+                ground.lattices.len(),
+                pois.osm_id.len(),
+                p.osm_id.len()
             ));
-            Some(building_table::encode(&table, &c.token)?)
+            (
+                Some(building_table::encode(&table, &c.token)?),
+                Some(poi_table::encode(&pois, &c.token)?),
+            )
         }
-        None => None,
+        _ => (None, None),
     };
 
     // 7. Coarse tiles: the buildings as massing.
@@ -745,6 +780,7 @@ pub fn build(
         triangles,
         terrain: terrain_table,
         fine_buildings,
+        fine_pois,
         buildings,
         log,
     })
