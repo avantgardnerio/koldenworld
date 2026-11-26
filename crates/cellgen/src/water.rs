@@ -1,8 +1,11 @@
 //! Water: waterway lines (rivers, streams, canals) expanded like roads, each half its width either side, and water
 //! areas (riverbanks, lakes) as they are, loaded from Postgres (waterways, water_areas) in lon/lat.
 
+use crate::boxes;
 use crate::clip::{UNITS, point};
+use crate::extract::{self, Extracted};
 use crate::geom::Metric;
+use crate::osm::Osm;
 use crate::polygon::MADE;
 use crate::s2;
 use crate::ways::wkb_line_string;
@@ -65,6 +68,38 @@ pub async fn load_water(
 }
 
 impl Water {
+    /// The water of OSM loaded for a box (local::load_box) and extracted, as load_water returns it from Postgres.
+    pub fn from_extracted(osm: &Osm, x: &Extracted, bbox: [f64; 4], min_width: f64) -> Water {
+        let mut water = Water {
+            line_start: vec![0],
+            ..Default::default()
+        };
+        let l = &x.waterways;
+        let points = |i: usize| &l.lonlat[l.point_start[i] as usize..l.point_start[i + 1] as usize];
+        let mut lines: Vec<usize> = (0..l.way.len())
+            .filter(|&i| l.width[i] >= min_width as f32 && boxes::line_meets_box(points(i), bbox))
+            .collect();
+        lines.sort_by_key(|&i| osm.way_id[l.way[i] as usize]);
+        for i in lines {
+            water.lonlat.extend_from_slice(points(i));
+            water.width.push(l.width[i] as f64);
+            water.line_start.push(water.lonlat.len() as u32);
+        }
+        let a = &x.water_areas;
+        water.ring_start.push(water.lonlat.len() as u32);
+        for f in extract::by_type_and_id(osm, &a.relation, &a.element) {
+            let rings = a.shape.rings(f);
+            if !boxes::polygon_meets_box(rings.clone().map(|(_, r)| r), bbox) {
+                continue;
+            }
+            for (outer, ring) in rings {
+                boxes::push_ring(ring, outer, &mut water.lonlat);
+                water.ring_start.push(water.lonlat.len() as u32);
+            }
+        }
+        water
+    }
+
     /// The water with only the points marked in `keep` (one per point).
     pub fn keep_points(&self, keep: &[bool]) -> Water {
         let mut out = Water {

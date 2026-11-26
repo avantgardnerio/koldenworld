@@ -1,5 +1,6 @@
 mod aeroways;
 mod areas;
+mod boxes;
 mod buildings;
 mod cell;
 mod clip;
@@ -44,7 +45,7 @@ const USAGE: &str = "usage:
   cellgen extract <token | lat,lon>             an area's roads, buildings, water, airports, points of interest: counts
   cellgen import <token | lat,lon>              an area's OSM (fetched if need be) into Postgres: rows upserted, deleted
   cellgen region <lat,lon> [--download]          the Geofabrik region holding a point (its extract, downloaded once)
-  cellgen compare <token>                       a cell's road ways from Postgres and from the cell files: what differs
+  cellgen compare <token | lat,lon>             a cell's inputs from Postgres and from the cell files: what differs
   cellgen serve [--port <port>]                 cell server on 127.0.0.1 (default port 5175)
 
 The database is CELLGEN_DB (default: the local socket, as the game role); the data directory (dem/ and the cache)
@@ -396,15 +397,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("compare") => {
             // A cell's road ways from Postgres and from the cell files: what differs.
-            let token = args.get(1).ok_or(USAGE)?;
-            let c = cell::Cell::from_token(token).ok_or(format!("{token} isn't a cell token"))?;
+            let what = args.get(1).ok_or(USAGE)?;
+            let c = match what.split_once(',') {
+                Some((lat, lon)) => cell::Cell::at(lat.trim().parse()?, lon.trim().parse()?),
+                None => cell::Cell::from_token(what).ok_or(format!("{what} isn't a cell token"))?,
+            };
+            println!("cell {} (level {})", c.token, c.level);
             let bbox = c.load_box();
             let started = std::time::Instant::now();
             let osm = local::load_box(&local::cells_dir(&data_dir()?), bbox)
                 .map_err(|e| e.to_string())?
                 .ok_or("no cell files for that box")?;
             let x = extract::extract(&osm);
-            let files = ways::RoadWays::from_extracted(&osm, &x);
+            let files = ways::RoadWays::from_extracted(&osm, &x, bbox);
             println!(
                 "files: {} ways ({} OSM ways loaded) in {:.1?}",
                 files.osm_id.len(),
@@ -413,14 +418,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let [west, south, east, north] = bbox;
             let pool = pool(&db)?;
-            let db = tokio::runtime::Runtime::new()?
+            let owns = |lon, lat| c.owns(lon, lat);
+            let (db, water, aeroways, buildings) = tokio::runtime::Runtime::new()?
                 .block_on(async {
                     let client = pool.get().await?;
-                    ways::load_road_ways(&client, west, south, east, north).await
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+                        ways::load_road_ways(&client, west, south, east, north).await?,
+                        water::load_water(&client, west, south, east, north, 0.0).await?,
+                        aeroways::load(&client, bbox).await?,
+                        buildings::load(&client, bbox, owns).await?,
+                    ))
                 })
                 .map_err(|e| e.to_string())?;
             println!("postgres: {} ways", db.osm_id.len());
             compare_ways(&db, &files);
+            let w = water::Water::from_extracted(&osm, &x, bbox, 0.0);
+            let same = |what: &str, n: (usize, usize), equal: bool| {
+                println!(
+                    "{what}: postgres {}, files {}{}",
+                    n.0,
+                    n.1,
+                    if equal { ", identical" } else { ", DIFFER" }
+                );
+            };
+            same(
+                "waterways",
+                (water.width.len(), w.width.len()),
+                water.width == w.width
+                    && water.line_start == w.line_start
+                    && water.lonlat[..water.ring_start[0] as usize]
+                        == w.lonlat[..w.ring_start[0] as usize],
+            );
+            same(
+                "water rings",
+                (water.ring_start.len() - 1, w.ring_start.len() - 1),
+                water.lonlat == w.lonlat && water.ring_start == w.ring_start,
+            );
+            let a = aeroways::Aeroways::from_extracted(&osm, &x, bbox);
+            same(
+                "airport lines",
+                (aeroways.line_kind.len(), a.line_kind.len()),
+                aeroways.line_kind == a.line_kind
+                    && aeroways.width == a.width
+                    && aeroways.line_start == a.line_start,
+            );
+            same(
+                "airport rings",
+                (aeroways.ring_kind.len(), a.ring_kind.len()),
+                aeroways.ring_kind == a.ring_kind
+                    && aeroways.ring_start == a.ring_start
+                    && aeroways.lonlat == a.lonlat,
+            );
+            let b = buildings::from_extracted(&osm, &x, bbox, owns);
+            same(
+                "buildings",
+                (buildings.osm_id.len(), b.osm_id.len()),
+                buildings.osm_id == b.osm_id
+                    && buildings.height == b.height
+                    && buildings.ring_of == b.ring_of
+                    && buildings.ring_start == b.ring_start
+                    && buildings.lonlat == b.lonlat,
+            );
+            if buildings.osm_id != b.osm_id {
+                let (pa, pb): (
+                    std::collections::HashSet<i64>,
+                    std::collections::HashSet<i64>,
+                ) = (
+                    buildings.osm_id.iter().copied().collect(),
+                    b.osm_id.iter().copied().collect(),
+                );
+                let mut only_a: Vec<_> = pa.difference(&pb).copied().collect();
+                let mut only_b: Vec<_> = pb.difference(&pa).copied().collect();
+                only_a.sort_unstable();
+                only_b.sort_unstable();
+                println!(
+                    "  buildings only in postgres: {} {:?}",
+                    only_a.len(),
+                    &only_a[..only_a.len().min(8)]
+                );
+                println!(
+                    "  buildings only in files:    {} {:?}",
+                    only_b.len(),
+                    &only_b[..only_b.len().min(8)]
+                );
+            }
             Ok(())
         }
         Some("serve") => {

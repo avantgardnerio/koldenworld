@@ -10,10 +10,13 @@
 //! range each), so a viewer draws only where it doesn't have the fine cells' own buildings. Shapes under MIN_AREA are
 //! left out.
 
+use crate::boxes;
 use crate::clip::{UNITS, point};
+use crate::extract::{self, Extracted};
 use crate::geodesy::{self, Frame};
 use crate::geom::Metric;
 use crate::mesh::Mesh;
+use crate::osm::Osm;
 use crate::polygon::MADE;
 use crate::s2;
 use crate::simplify;
@@ -151,6 +154,49 @@ pub async fn load(
         })
         .collect();
     Ok(b.only(&owned))
+}
+
+/// The buildings of OSM loaded for a box (local::load_box) and extracted, as load returns them from Postgres: outlines
+/// (not building:parts) whose bounding box overlaps the box and whose owner point `owns` (lon, lat).
+pub fn from_extracted(
+    osm: &Osm,
+    x: &Extracted,
+    bbox: [f64; 4],
+    owns: impl Fn(f64, f64) -> bool,
+) -> Buildings {
+    let x = &x.buildings;
+    let mut b = Buildings {
+        ring_start: vec![0],
+        ring_of: vec![0],
+        ..Default::default()
+    };
+    for f in extract::by_type_and_id(osm, &x.relation, &x.element) {
+        let rings = x.shape.rings(f);
+        if x.is_part[f] || !rings.clone().any(|(_, r)| boxes::bounds_overlap(r, bbox)) {
+            continue;
+        }
+        let e = x.element[f] as usize;
+        b.osm_id.push(if x.relation[f] {
+            osm.relation_id[e]
+        } else {
+            osm.way_id[e]
+        });
+        b.height.push(x.height[f] as f64);
+        for (outer, ring) in rings {
+            boxes::push_ring(ring, outer, &mut b.lonlat);
+            b.ring_start.push(b.lonlat.len() as u32);
+        }
+        b.ring_of.push((b.ring_start.len() - 1) as u32);
+    }
+    let owned: Vec<usize> = (0..b.osm_id.len())
+        .filter(|&k| {
+            let r = b.ring_of[k] as usize;
+            let [lon, lat] =
+                owner_point(&b.lonlat[b.ring_start[r] as usize..b.ring_start[r + 1] as usize]);
+            owns(lon, lat)
+        })
+        .collect();
+    b.only(&owned)
 }
 
 /// A building's owner point: the area centroid of its first outer ring (lon, lat), as cell.ts ownerPoint.

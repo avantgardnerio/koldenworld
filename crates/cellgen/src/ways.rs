@@ -122,9 +122,10 @@ pub async fn load_road_ways(
 }
 
 impl RoadWays {
-    /// The road ways of OSM loaded for a box (local::load_box) and extracted, as Postgres would return them: ordered
-    /// by OSM id, named by name=* or else ref=* (as the import stores them), nodes in the direction of travel.
-    pub fn from_extracted(osm: &Osm, x: &Extracted) -> RoadWays {
+    /// The road ways of OSM loaded for a box (local::load_box) and extracted, as load_road_ways returns them from
+    /// Postgres: those intersecting the box, ordered by OSM id, named by name=* or else ref=* (as the import stores
+    /// them), nodes in the direction of travel.
+    pub fn from_extracted(osm: &Osm, x: &Extracted, bbox: [f64; 4]) -> RoadWays {
         let r = &x.roads;
         let text = |w: usize, key: &str| {
             let k = osm.strings.find(key)?;
@@ -132,7 +133,12 @@ impl RoadWays {
                 .get(w, k)
                 .map(|v| osm.strings.text[v as usize].as_str())
         };
-        let mut order: Vec<usize> = (0..r.way.len()).collect();
+        let mut order: Vec<usize> = (0..r.way.len())
+            .filter(|&i| {
+                let points = r.node_start[i] as usize..r.node_start[i + 1] as usize;
+                crate::boxes::line_meets_box(&r.lonlat[points], bbox)
+            })
+            .collect();
         order.sort_by_key(|&i| osm.way_id[r.way[i] as usize]);
         let mut ways = RoadWays::empty();
         let mut name_index = std::collections::HashMap::new();

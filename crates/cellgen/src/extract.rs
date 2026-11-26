@@ -156,6 +156,35 @@ pub struct Polygons {
     pub lonlat: Vec<[f64; 2]>,
 }
 
+impl Polygons {
+    /// Feature f's rings, each with whether it's an outer ring (a polygon's first).
+    pub fn rings(&self, f: usize) -> impl Iterator<Item = (bool, &[[f64; 2]])> + Clone {
+        (self.poly_start[f] as usize..self.poly_start[f + 1] as usize).flat_map(move |p| {
+            (self.ring_start[p] as usize..self.ring_start[p + 1] as usize).map(move |r| {
+                let points = self.point_start[r] as usize..self.point_start[r + 1] as usize;
+                (r == self.ring_start[p] as usize, &self.lonlat[points])
+            })
+        })
+    }
+}
+
+/// Features in Postgres's `ORDER BY osm_type, osm_id`: relations, then ways, each by id.
+pub fn by_type_and_id(osm: &Osm, relation: &[bool], element: &[u32]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..element.len()).collect();
+    order.sort_by_key(|&f| {
+        let e = element[f] as usize;
+        (
+            !relation[f],
+            if relation[f] {
+                osm.relation_id[e]
+            } else {
+                osm.way_id[e]
+            },
+        )
+    });
+    order
+}
+
 /// Areas (water, airports): their source (a way or a relation), kind, and polygons.
 #[derive(Default)]
 pub struct Areas {

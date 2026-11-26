@@ -2,8 +2,11 @@
 //! roads, half their width either side (runways with flat ends, as painted thresholds; taxiways round, so their bends
 //! join smoothly), and areas are as they are; loaded from Postgres (aeroway_lines, aeroway_areas) in lon/lat.
 
+use crate::boxes;
 use crate::clip::{UNITS, point};
+use crate::extract::{self, Extracted};
 use crate::geom::Metric;
+use crate::osm::Osm;
 use crate::polygon::MADE;
 use crate::s2;
 use crate::ways::wkb_line_string;
@@ -72,6 +75,40 @@ pub async fn load(
 }
 
 impl Aeroways {
+    /// The airports of OSM loaded for a box (local::load_box) and extracted, as load returns them from Postgres.
+    pub fn from_extracted(osm: &Osm, x: &Extracted, bbox: [f64; 4]) -> Aeroways {
+        let mut a = Aeroways {
+            line_start: vec![0],
+            ..Default::default()
+        };
+        let l = &x.aeroway_lines;
+        let points = |i: usize| &l.lonlat[l.point_start[i] as usize..l.point_start[i + 1] as usize];
+        let mut lines: Vec<usize> = (0..l.way.len())
+            .filter(|&i| boxes::line_meets_box(points(i), bbox))
+            .collect();
+        lines.sort_by_key(|&i| osm.way_id[l.way[i] as usize]);
+        for i in lines {
+            a.lonlat.extend_from_slice(points(i));
+            a.line_kind.push(l.kind[i] as u8);
+            a.width.push(l.width[i] as f64);
+            a.line_start.push(a.lonlat.len() as u32);
+        }
+        let areas = &x.aeroway_areas;
+        a.ring_start.push(a.lonlat.len() as u32);
+        for f in extract::by_type_and_id(osm, &areas.relation, &areas.element) {
+            let rings = areas.shape.rings(f);
+            if !boxes::polygon_meets_box(rings.clone().map(|(_, r)| r), bbox) {
+                continue;
+            }
+            for (outer, ring) in rings {
+                boxes::push_ring(ring, outer, &mut a.lonlat);
+                a.ring_kind.push(areas.kind[f]);
+                a.ring_start.push(a.lonlat.len() as u32);
+            }
+        }
+        a
+    }
+
     /// No airports at all.
     pub fn empty() -> Aeroways {
         Aeroways {
