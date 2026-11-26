@@ -26,6 +26,7 @@ mod osm;
 mod poi_table;
 mod pois;
 mod polygon;
+mod road_table;
 mod s2;
 mod s3;
 mod serve;
@@ -139,6 +140,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if let Some(p) = &built.fine_pois {
                     std::fs::write(dir.join("pois.arrow"), p)?;
+                }
+                if let Some((nodes, edges)) = &built.fine_graph {
+                    std::fs::write(dir.join("nodes.arrow"), nodes)?;
+                    std::fs::write(dir.join("edges.arrow"), edges)?;
                 }
                 if let Some((v, t)) = &built.buildings {
                     std::fs::write(dir.join("buildings.arrow"), v)?;

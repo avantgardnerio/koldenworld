@@ -13,8 +13,8 @@ use crate::pois::PoiInputs;
 use crate::ways::{ROAD_CLASSES, RoadWays};
 use crate::{
     aeroways, building_table, buildings, clip, crossings, draw, elevation, faces, geodesy, geom,
-    graph, ground_arrow, markings, mesh, poi_table, polygon, s2, simplify, terrain, terrain_arrow,
-    water, ways, widths,
+    graph, ground_arrow, markings, mesh, poi_table, polygon, road_table, s2, simplify, terrain,
+    terrain_arrow, water, ways, widths,
 };
 use clipper2_rust::{FillRule, Paths64, difference_64, intersect_64, union_subjects_64};
 use deadpool_postgres::Pool;
@@ -143,6 +143,7 @@ pub struct Built {
     pub terrain: Vec<u8>, // terrain.arrow: the lattice the ground is draped on, for what stands on it
     pub fine_buildings: Option<Vec<u8>>, // a fine cell's buildings.arrow (building_table.rs)
     pub fine_pois: Option<Vec<u8>>, // a fine cell's pois.arrow (poi_table.rs)
+    pub fine_graph: Option<(Vec<u8>, Vec<u8>)>, // a fine cell's nodes.arrow and edges.arrow (road_table.rs)
     pub buildings: Option<(Vec<u8>, Vec<u8>)>, // coarse tiles: the massing, as buildings.arrow and buildings_triangles.arrow
     pub log: Vec<String>,
 }
@@ -183,6 +184,12 @@ impl Cell {
         face == self.face
             && s2::cell_id(face, st, self.level)
                 == s2::cell_id(self.face, self.center(), self.level)
+    }
+
+    /// The cell's frame (as the TS cellFrame): east-north-up at its center, on the ellipsoid.
+    pub fn frame(&self) -> geodesy::Frame {
+        let (lat, lon) = s2::st_to_lat_lon(self.face, self.center());
+        geodesy::Frame::at(lat, lon, 0.0)
     }
 
     /// A lon/lat box around the cell's corners, grown by a margin in metres, as the TS cellBox (the TS cell server
@@ -231,6 +238,7 @@ pub struct Inputs {
     buildings: Option<buildings::Buildings>,
     fine_buildings: Option<BuildingInputs>, // a fine cell's, for its buildings table
     fine_pois: Option<PoiInputs>,           // a fine cell's, for its points of interest table
+    fine_graph: Option<road_table::Graph>, // a fine cell's road graph, cut and kept, not yet draped
 }
 
 /// An error that can cross an await (loading runs concurrently).
@@ -294,6 +302,7 @@ impl Inputs {
             buildings,
             fine_buildings: None,
             fine_pois: None,
+            fine_graph: None,
         })
     }
 
@@ -335,35 +344,66 @@ impl Inputs {
         };
         // A fine cell's buildings, with the parts that replace outlines wherever they are (a load over the outlines'
         // reach), and the heights over every cell they reach into, whole: they're draped on those cells' lattices.
+        //
+        // The road graph likewise: the roads in the TS cell box and every road sharing a node with them (the OSM over
+        // their reach has them all), cut and kept by midpoint here, so the heights cover every cell its edges cross.
         let mut region = bbox;
-        let fine_buildings = match (&osm, &x) {
+        let mut grow = |lon: f64, lat: f64| {
+            let (face, st) = s2::lat_lon_to_face_st(lat, lon);
+            let whole = s2::lat_lon_bounds(face, s2::cell_square(st, c.level), 0.001);
+            region = [
+                region[0].min(whole[0]),
+                region[1].min(whole[1]),
+                region[2].max(whole[2]),
+                region[3].max(whole[3]),
+            ];
+        };
+        let (fine_buildings, fine_graph) = match (&osm, &x) {
             (Some(osm), Some(x)) if c.level == s2::CELL_LEVEL => {
-                let reach = building_inputs::reach(x, bbox);
-                let b = match (reach != bbox)
+                let graph_box = c.cell_box(300.0);
+                let [b, r] = [building_inputs::reach(x, bbox), ways::reach(x, graph_box)];
+                let reach = [
+                    b[0].min(r[0]),
+                    b[1].min(r[1]),
+                    b[2].max(r[2]),
+                    b[3].max(r[3]),
+                ];
+                let wider = (reach != bbox)
                     .then(|| crate::local::load_box(&crate::local::cells_dir(data), reach))
                     .transpose()?
-                    .flatten()
-                {
-                    Some(wider) => BuildingInputs::from_extracted(
-                        &wider,
-                        &crate::extract::extract(&wider),
-                        bbox,
-                    ),
-                    None => BuildingInputs::from_extracted(osm, x, bbox),
+                    .flatten();
+                let wider_x = wider.as_ref().map(crate::extract::extract);
+                let (osm, x) = match (&wider, &wider_x) {
+                    (Some(o), Some(x)) => (o, x),
+                    _ => (osm, x),
                 };
+                let b = BuildingInputs::from_extracted(osm, x, bbox);
                 for &[lon, lat] in &b.shape.lonlat {
-                    let (face, st) = s2::lat_lon_to_face_st(lat, lon);
-                    let whole = s2::lat_lon_bounds(face, s2::cell_square(st, c.level), 0.001);
-                    region = [
-                        region[0].min(whole[0]),
-                        region[1].min(whole[1]),
-                        region[2].max(whole[2]),
-                        region[3].max(whole[3]),
-                    ];
+                    grow(lon, lat);
                 }
-                Some(b)
+                let frame = c.frame();
+                let g = road_table::build(
+                    &RoadWays::with_touching(osm, x, graph_box),
+                    |lon, lat| c.owns(lon, lat),
+                    &frame,
+                );
+                // Every ~50 m along each edge: a long straight piece crosses cells between its points.
+                for e in 0..g.from.len() {
+                    let pts = &g.points[g.point_start[e] as usize..g.point_start[e + 1] as usize];
+                    for w in pts.windows(2) {
+                        let (a, b) = (w[0].map(f64::from), w[1].map(f64::from));
+                        let steps = ((a[0] - b[0]).hypot(a[1] - b[1]) / 50.0).ceil().max(1.0);
+                        for k in 0..=steps as usize {
+                            let t = k as f64 / steps;
+                            let [lon, lat] =
+                                frame.lon_lat(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+                            grow(lon, lat);
+                        }
+                    }
+                }
+                (Some(b), Some(g))
             }
-            _ => None,
+            _ => (None, None),
         };
         let heights =
             elevation::Elevation::region(&data.join("dem"), region).map_err(|e| e.to_string())?;
@@ -379,6 +419,7 @@ impl Inputs {
                 _ => PoiInputs::default(),
             }),
             fine_buildings,
+            fine_graph,
         })
     }
 
@@ -393,6 +434,7 @@ impl Inputs {
             buildings: (c.level == COARSE_LEVEL).then(buildings::Buildings::default),
             fine_buildings: None,
             fine_pois: None,
+            fine_graph: None,
         }
     }
 }
@@ -440,6 +482,7 @@ pub fn build(
         buildings: owned,
         fine_buildings,
         fine_pois,
+        fine_graph,
     } = inputs;
     if let Some(min) = options.min_class {
         ways = ways.keep(|w| ways.class[w] <= min);
@@ -682,7 +725,7 @@ pub fn build(
     let (fine_buildings, fine_pois) = match (&fine_buildings, &fine_pois) {
         (Some(b), Some(p)) => {
             let started = Instant::now();
-            let frame = geodesy::Frame::at(center.0, center.1, 0.0);
+            let frame = c.frame();
             let table = building_table::build(b, |lon, lat| c.owns(lon, lat), &frame);
             let pois = poi_table::build(p, &table, &frame);
             let mut ground = Ground::new(|lat, lon| heights.height(lat, lon), c.level, n);
@@ -702,6 +745,25 @@ pub fn build(
             )
         }
         _ => (None, None),
+    };
+    // And its road graph, on the same ground.
+    let fine_graph = match fine_graph {
+        Some(g) => {
+            let started = Instant::now();
+            let mut ground = Ground::new(|lat, lon| heights.height(lat, lon), c.level, n);
+            let (edges, before) = (g.from.len(), g.points.len());
+            let g = road_table::drape(g, &c.frame(), |lat, lon| ground.at(lat, lon));
+            log.push(format!(
+                "road graph in {:.0?}: {} nodes, {edges} edges, {before} points draped as {} (lattice crossings added), \
+                 on {} cells' lattices",
+                started.elapsed(),
+                g.node_osm.len(),
+                g.points.len(),
+                ground.lattices.len()
+            ));
+            Some(road_table::encode(&g, &c.token)?)
+        }
+        None => None,
     };
 
     // 7. Coarse tiles: the buildings as massing.
@@ -781,6 +843,7 @@ pub fn build(
         terrain: terrain_table,
         fine_buildings,
         fine_pois,
+        fine_graph,
         buildings,
         log,
     })

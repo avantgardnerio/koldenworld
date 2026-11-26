@@ -10,9 +10,9 @@
 // MAX_RADIUS), coarse tiles (level 10, ~9 km: streets, water, airports, coarse
 // terrain) out to COARSE_DISTANCE, with their buildings as massing (blocks and
 // towers), and fine cells (level 13, ~1.1 km: everything)
-// within FINE_DISTANCE of the camera, with their roads, buildings and terrain
-// from the cell server (/cells/<token>…; a cell with none, 404, is bare
-// ground). Only what's in view loads: far tiles first, then coarse tiles, then
+// within FINE_DISTANCE of the camera, with their roads, buildings, points of
+// interest and terrain from the same generator (/ground/<token>/<table>.arrow;
+// a cell missing any, 404, is bare ground). Only what's in view loads: far tiles first, then coarse tiles, then
 // fine cells, each nearest first. Each tier covers the coarser ground under it
 // (stencil),
 // and hide the massing in them (each massing shape knows its fine cell), so a
@@ -28,7 +28,7 @@
 import {
   AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, furnish, interiorMesh, layoutFor, POI_CATEGORIES, PROPS, PROPS_PALETTE, propMeshes, shopUnits, type Doors,
   type Furniture, type Layout, type Staff, type Units, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
-  frameToFrame, groundFromArrow, unpackCellFiles, horizonDistance, roadLineMesh, terrainHeightAt,
+  frameToFrame, groundFromArrow, horizonDistance, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, NEAR, viewProjection, yawPitch } from "./camera.ts";
@@ -281,15 +281,8 @@ async function start(): Promise<void> {
         counts: { ...zero, surfaceTriangles: mesh.indices.length / 3, buildingTriangles: massing ? massing.indices.length / 3 : 0 },
       };
     }
-    // Every other table in one response from the cell server; a file per table when served as static files.
-    const packed = await getBlob(`/cells/${token}.cell`);
-    const files = packed && unpackCellFiles(packed);
-    const blobs = files ? CELL_TABLES.map((t) => files[t]) : await Promise.all(CELL_TABLES.map((t) => getBlob(`/cells/${token}/${t}.arrow`)));
-    // While the TS cell server is ported (docs/serverless-plan.md, step 1d): terrain, buildings and points of interest
-    // from the Rust generator.
-    const rust = ["terrain", "buildings", "pois"] as const;
-    const fromRust = await Promise.all(rust.map((t) => getBlob(`/ground/${token}/${t}.arrow`)));
-    rust.forEach((t, i) => { blobs[CELL_TABLES.indexOf(t)] = fromRust[i]!; });
+    // Every other table from the Rust generator too, a file per table.
+    const blobs = await Promise.all(CELL_TABLES.map((t) => getBlob(`/ground/${token}/${t}.arrow`)));
     const missing = blobs.some((b) => b === null);
     const c = missing ? null : cellFromArrow(Object.fromEntries(CELL_TABLES.map((t, i) => [t, blobs[i]!])) as unknown as CellFiles);
     if (c && c.cell !== cell) throw new Error(`/cells/${token} holds cell ${cellToken(c.cell)}`);

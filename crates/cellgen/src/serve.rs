@@ -1,5 +1,5 @@
 //! The cell server: GET /cells/<token>/ground.arrow, ground_triangles.arrow and terrain.arrow (and a coarse tile's
-//! buildings.arrow and buildings_triangles.arrow massing, a fine cell's buildings.arrow and pois.arrow), built on a miss and cached as files under data/rust-cells/<token>/:
+//! buildings.arrow and buildings_triangles.arrow massing, a fine cell's buildings.arrow, pois.arrow, nodes.arrow and edges.arrow), built on a miss and cached as files under data/rust-cells/<token>/:
 //! the inputs from the cell files and elevation data (Inputs::from_files), then built, both on Tokio's blocking pool.
 //! Requests for a cell being built wait for that one build.
 //! GET /ensure/<area token> imports an area's OSM into Postgres (areas.rs), for the TS cell server.
@@ -15,11 +15,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Every cell's tables, and a coarse tile's buildings.
-const TABLES: [&str; 6] = [
+const TABLES: [&str; 8] = [
     "ground.arrow",
     "ground_triangles.arrow",
     "terrain.arrow",
     "pois.arrow",
+    "nodes.arrow",
+    "edges.arrow",
     "buildings.arrow",
     "buildings_triangles.arrow",
 ];
@@ -91,7 +93,7 @@ async fn table(
     let has = match table.as_str() {
         "buildings.arrow" => c.level == cell::COARSE_LEVEL || c.level == crate::s2::CELL_LEVEL,
         "buildings_triangles.arrow" => c.level == cell::COARSE_LEVEL,
-        "pois.arrow" => c.level == crate::s2::CELL_LEVEL,
+        "pois.arrow" | "nodes.arrow" | "edges.arrow" => c.level == crate::s2::CELL_LEVEL,
         _ => true,
     };
     if !has {
@@ -152,6 +154,10 @@ async fn build(app: Arc<App>, c: Cell) -> Result<(), cell::LoadError> {
         }
         if let Some(p) = &built.fine_pois {
             tables.push(("pois.arrow", p));
+        }
+        if let Some((nodes, edges)) = &built.fine_graph {
+            tables.push(("nodes.arrow", nodes));
+            tables.push(("edges.arrow", edges));
         }
         if let Some((v, t)) = &built.buildings {
             tables.push(("buildings.arrow", v));
