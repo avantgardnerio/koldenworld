@@ -3,6 +3,7 @@ export {
   ecefToGeodetic, ecefToLocal, enuFrame, frameToFrame, geodeticToEcef, localToEcef, transformPoint, WGS84_A, WGS84_B,
   WGS84_F, type Frame, type Geodetic, type Vec3,
 } from "./geodesy.ts";
+export { solarAngles, SUN_FADE_DEG, sunNoNight, type SunState } from "./sun.ts";
 export {
   cellCenter, cellChildren, cellContains, cellCorners, cellEdgeNeighbors, cellFace, cellFrame, cellFromInt64,
   cellFractions, cellFromLatLon, cellFromToken, cellLattice, cellLevel, cellOutline, cellParent, cellPoint, cellToInt64, cellToken, MAX_LEVEL, type CellId,

@@ -1,9 +1,11 @@
 // Viewer entry: stream the S2 cells around the camera and fly over them.
 //
-// URL: /?[graph=1][&radius=<m>][&planes=0]#lat,lon,alt,yaw,pitch
+// URL: /?[graph=1][&radius=<m>][&planes=0][&time=<ISO>][&timescale=<n>][&sun=fixed]#lat,lon,alt,yaw,pitch
 //   hash: the camera (without it, a default view of Denver); graph=1: the road
 //   graph overlay (toggle with G); radius: fixed load radius instead of the
-//   horizon; planes=0: no live air traffic. The URL describes the whole view.
+//   horizon; planes=0: no live air traffic; time, timescale: the sun's clock
+//   (default now, real speed; the sun never sets: world sun.ts); sun=fixed:
+//   the old fixed sun. The URL describes the whole view.
 //
 // Three tiers of ground from the Rust generator (/ground/<token>/…): far tiles
 // (S2 level 7, ~70 km: terrain, land cover, lakes) out to the horizon (up to
@@ -28,7 +30,7 @@
 import {
   AIRCRAFT_PALETTE, aircraftMeshes, PEOPLE_PALETTE, personMesh, pistolMesh, placeVagrants, playerMesh, rifleCarryMesh, rifleMesh, slingMesh, vagrantMesh, womanMesh, buildingMesh, DOOR, furnish, interiorMesh, layoutFor, POI_CATEGORIES, PROPS, PROPS_PALETTE, propMeshes, shopUnits, type Doors,
   type Furniture, type Layout, type Staff, type Units, businessSigns, wallGrid, type WallGrid, cellLevel, cellOutline, ecefToLocal, enuUnprojection, geodeticToEcef, streetSigns, CELL_LEVEL, placeVehicles, readGlb, VEHICLE_MODELS, VEHICLE_SCALE, CELL_TABLES, cellFromArrow, cellFrame, cellFromLatLon, cellsWithin, cellToken, flatTerrain,
-  frameToFrame, groundFromArrow, horizonDistance, roadLineMesh, terrainHeightAt,
+  frameToFrame, groundFromArrow, horizonDistance, sunNoNight, roadLineMesh, terrainHeightAt,
   type CellFiles, type CellId, type CellTerrain, type Frame as CellFrame, type Vec3,
 } from "@game/world";
 import { fromYawPitch, MIN_ALTITUDE, NEAR, viewProjection, yawPitch } from "./camera.ts";
@@ -37,6 +39,7 @@ import type { LoadedWorld } from "./local-world.ts";
 import { OnFoot } from "./on-foot.ts";
 import { AirTraffic, emptyAircraftInstances, emptyContrails } from "./air-traffic.ts";
 import { createContrailLayer } from "./contrail-layer.ts";
+import { createSunLayer } from "./sun-layer.ts";
 import { createCarModels, createCarRenderer, type CarInstances, type CarModels, type CarRenderer } from "./car-layer.ts";
 import { BODY, heldGun, ITEMS } from "@game/sim";
 import { gunshot } from "./audio.ts";
@@ -132,6 +135,13 @@ const showCars = params.get("cars") !== "0";
 /** traffic=0: cars stand where they start (tests that look at exact pixels). */
 const moving = showCars && params.get("traffic") !== "0";
 const showPlanes = params.get("planes") !== "0";
+// The sun: where it really is by day, the day's arc again through the night (sunNoNight), so it's never night.
+// ?sun=fixed: the old fixed sun (tests); ?time=<ISO>: the clock starts there; ?timescale=<n>: it runs n times as fast.
+const fixedSun = params.get("sun") === "fixed";
+const clockStart = params.has("time") ? Date.parse(params.get("time")!) : Date.now();
+const timescale = Number(params.get("timescale") ?? 1) || 1;
+const clockOrigin = performance.now();
+const gameTime = () => new Date(clockStart + (performance.now() - clockOrigin) * timescale);
 /** people=0: no pedestrians; with traffic=0, they stand where they start. */
 const showPeople = params.get("people") !== "0";
 const walking = showPeople && params.get("traffic") !== "0";
@@ -419,6 +429,7 @@ async function start(): Promise<void> {
   const effects = new Effects(), effectsLayer = createEffectsLayer(gl);
   const contrails = emptyContrails();
   const contrailLayer = showPlanes ? createContrailLayer(gl) : undefined;
+  const sunLayer = createSunLayer(gl);
   air.onUpdate = () => wake();
 
   // --- which cells: every frame, from what's in view ---
@@ -495,6 +506,11 @@ async function start(): Promise<void> {
   /** Renders a frame; dt (s) advances the traffic. */
   const render = (dt = 0) => {
     const t0 = performance.now();
+    // Toward the sun, as long as its direct light is strong: it fades out at the horizon (shaders take n · sun).
+    const sun: [number, number, number] = fixedSun ? SUN : (() => {
+      const { direction: [e, n, u], strength } = sunNoNight(gameTime(), camera.lat, camera.lon);
+      return [e * strength, n * strength, u * strength];
+    })();
     // Terrain may have arrived under the camera since it last moved.
     const ground = groundAt(camera.lat, camera.lon);
     if (camera.h < ground + MIN_ALTITUDE) camera = { ...camera, h: ground + MIN_ALTITUDE };
@@ -542,17 +558,17 @@ async function start(): Promise<void> {
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
     const drawn = status.drawn;
     drawn.ground = drawn.buildings = drawn.massing = 0;
-    for (const g of visible) if (!g.coarse) drawn.ground += g.ground.draw(f, g.model, SUN);
+    for (const g of visible) if (!g.coarse) drawn.ground += g.ground.draw(f, g.model, sun);
     const coarser = (g: CellGpu) => {
       const n = runsWithout(g.groundRanges!, (child) => !!streamer.get(g.children![child]!), g.runs!);
-      return g.ground.draw(f, g.model, SUN, g.runs, n);
+      return g.ground.draw(f, g.model, sun, g.runs, n);
     };
     gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
     for (const g of visible) if (g.coarse && !g.far) drawn.ground += coarser(g);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
     for (const g of visible) if (g.far) drawn.ground += coarser(g);
     gl.disable(gl.STENCIL_TEST);
-    for (const g of visible) drawn.buildings += g.buildings?.draw(f, g.model, SUN) ?? 0;
+    for (const g of visible) drawn.buildings += g.buildings?.draw(f, g.model, sun) ?? 0;
     // Coarse tiles' massing, less the shapes in fine cells that have their own buildings.
     for (const g of visible) {
       const { massing, children, massingRanges, runs } = g;
@@ -565,9 +581,9 @@ async function start(): Promise<void> {
         const fine = streamer.get(children[child]!);
         return !!fine && !fine.missing;
       }, runs);
-      drawn.massing += massing.draw(f, g.model, SUN, runs, n);
+      drawn.massing += massing.draw(f, g.model, sun, runs, n);
     }
-    for (const g of visible) g.signs?.draw(f, g.model, SUN);
+    for (const g of visible) g.signs?.draw(f, g.model, sun);
     // Shops: their doors (sliding open for someone on foot close by), and the insides of those near the camera.
     propInstances.count.fill(0);
     const walker = foot?.pose(vf).pos;
@@ -585,11 +601,11 @@ async function start(): Promise<void> {
           inside = { shell: createSolidLayer(gl, interiorMesh(u, k, g.doors), INTERIOR_COLORS), ...furnish(u, k, g.doors, layout, kind) };
           g.interiors.set(k, inside);
         }
-        drawn.buildings += inside.shell.draw(f, g.model, SUN);
+        drawn.buildings += inside.shell.draw(f, g.model, sun);
         addFurniture(propInstances, inside.furniture, g.model);
       }
     }
-    propRenderer.draw(f, SUN, 0, propInstances);
+    propRenderer.draw(f, sun, 0, propInstances);
     let carTriangles = 0;
     if (carRenderer && (showCars || drive || foot)) {
       if (showCars) {
@@ -606,16 +622,16 @@ async function start(): Promise<void> {
       if (drive) addCar(carInstances, PLAYER_MODEL, drive.pose(vf));
       const parked = foot?.carPose(vf);
       if (parked) addCar(carInstances, PLAYER_MODEL, parked);
-      carTriangles = carRenderer.draw(f, SUN, ROAD_BIAS, carInstances);
+      carTriangles = carRenderer.draw(f, sun, ROAD_BIAS, carInstances);
     }
     if (foot) {
       foot.instance(vf, playerInstances);
-      playerRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
-      if (foot.holding === "pistol") pistolRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
+      playerRenderer.draw(f, sun, ROAD_BIAS, playerInstances);
+      if (foot.holding === "pistol") pistolRenderer.draw(f, sun, ROAD_BIAS, playerInstances);
       if (foot.holding === "rifle") {
         // Slung; shouldered aiming, patrol ready otherwise.
-        slingRenderer.draw(f, SUN, ROAD_BIAS, playerInstances);
-        (foot.aiming ? rifleRenderer : rifleCarryRenderer).draw(f, SUN, ROAD_BIAS, playerInstances);
+        slingRenderer.draw(f, sun, ROAD_BIAS, playerInstances);
+        (foot.aiming ? rifleRenderer : rifleCarryRenderer).draw(f, sun, ROAD_BIAS, playerInstances);
       }
     }
     let personTriangles = 0;
@@ -626,22 +642,24 @@ async function start(): Promise<void> {
       peopleView.instances(personInstances, womanInstances);
       // Shops' staff, standing behind their counters.
       for (const g of visible) for (const inside of g.interiors?.values() ?? []) addStaff(personInstances, womanInstances, inside.staff, g.model);
-      personTriangles = personRenderer.draw(f, SUN, ROAD_BIAS, personInstances);
-      personTriangles += womanRenderer.draw(f, SUN, ROAD_BIAS, womanInstances);
+      personTriangles = personRenderer.draw(f, sun, ROAD_BIAS, personInstances);
+      personTriangles += womanRenderer.draw(f, sun, ROAD_BIAS, womanInstances);
       vagrantView.update(dt, near, PEOPLE_DISTANCE, 1.3 * PEOPLE_DISTANCE, walking);
       vagrantView.instances(vagrantInstances);
-      personTriangles += vagrantRenderer.draw(f, SUN, ROAD_BIAS, vagrantInstances);
+      personTriangles += vagrantRenderer.draw(f, sun, ROAD_BIAS, vagrantInstances);
     }
     if (planeRenderer) {
       const now = performance.now() / 1000;
       air.refresh(camera.lat, camera.lon, now);
       air.instances(vf, now, planeInstances);
-      planeRenderer.draw(f, SUN, ROAD_BIAS, planeInstances);
+      planeRenderer.draw(f, sun, ROAD_BIAS, planeInstances);
     }
     const cars = traffic.cars.count;
     drawn.cars = carTriangles;
     const people = peopleView.people.count;
     Object.assign(status, { cars, carTriangles, simTime: traffic.simTime, aircraft: air.count, people });
+    // The sun's disc, behind everything drawn (gone with its light at the horizon, where it wraps to sunrise).
+    sunLayer.draw(f, sun, h);
     if (contrailLayer) {
       // Last: blended over everything, without writing depth.
       air.contrails(vf, performance.now() / 1000, contrails);
@@ -741,6 +759,8 @@ async function start(): Promise<void> {
     requestAnimationFrame(frame);
   };
   const keys = attachInput(canvas, wake);
+  // The sun moves: an idle view is redrawn every so often (about each quarter degree of sun, at most every 10 s).
+  if (!fixedSun) setInterval(() => { if (!running) render(); }, Math.max(100, Math.min(10_000, 60_000 / timescale)));
 
   // V: drive a car from the ground under the camera, facing its way; V again (driving or on foot): fly on from the
   // camera. F: out of the car, on foot beside it; back in, near it; flying, on foot on the ground under the camera.

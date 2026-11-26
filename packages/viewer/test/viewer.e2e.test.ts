@@ -95,7 +95,7 @@ beforeAll(async () => {
   const cellDir = path.join(dir, "ground", cellToken(cell));
   await mkdir(cellDir, { recursive: true });
   for (const t of CELL_TABLES) await writeFile(path.join(cellDir, `${t}.arrow`), files[t]);
-  viewer = await openViewer({ dataDir: dir, query: "radius=1000&cars=0", hash: top(0, 1), width: W, height: H });
+  viewer = await openViewer({ dataDir: dir, query: "radius=1000&cars=0&sun=fixed", hash: top(0, 1), width: W, height: H });
 }, 300_000);
 
 async function setHash(hash: string) {
@@ -219,7 +219,7 @@ function firstCar(): [number, number, number, number] {
 describe("vehicles", () => {
   let cars: Session;
   beforeAll(async () => {
-    cars = await openViewer({ dataDir: dir, query: "radius=300&traffic=0", hash: top(0, 1), width: W, height: H });
+    cars = await openViewer({ dataDir: dir, query: "radius=300&traffic=0&sun=fixed", hash: top(0, 1), width: W, height: H });
     await cars.page.waitForFunction(() => window.viewer.carModels > 0, null, { timeout: 30_000 });
   }, 60_000);
   afterAll(async () => { await cars?.close(); });
@@ -255,7 +255,7 @@ describe("traffic", () => {
     await mkdir(cellDir, { recursive: true });
     for (const t of CELL_TABLES) await writeFile(path.join(cellDir, `${t}.arrow`), files[t]);
     const [x, y] = firstCar();
-    moving = await openViewer({ dataDir: highDir, query: "radius=300", hash: at(x, y, GROUND_H + Z * 0.1, 0, -90), width: W, height: H });
+    moving = await openViewer({ dataDir: highDir, query: "radius=300&sun=fixed", hash: at(x, y, GROUND_H + Z * 0.1, 0, -90), width: W, height: H });
   }, 60_000);
   afterAll(async () => {
     await moving?.close();
