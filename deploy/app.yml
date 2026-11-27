@@ -41,8 +41,14 @@ Parameters:
     Type: String
     Default: ""
     Description: Its public key (PEM), for CloudFront's key group.
+  OsmSource:
+    Type: String
+    Default: ""
+    Description: The OSM cell files cells are built from (CELLGEN_OSM_S3), e.g. a splitter run's
+      s3://koldenworld-data-2/osm/planet-261116/runs/<run>/raw; empty is cellgen's default (the planet).
 
 Conditions:
+  HasOsmSource: !Not [!Equals [!Ref OsmSource, ""]]
   HasDomain: !Not [!Equals [!Ref CertificateArn, ""]]
   HasAuth: !And
     - !Not [!Equals [!Ref GoogleClientId, ""]]
@@ -145,16 +151,15 @@ Resources:
       # Instances at most: plenty for players once they must sign in; few while anyone may make cells build.
       ReservedConcurrentExecutions: !If [HasAuth, 20, 5]
       Environment:
-        Variables: !If
-          - HasAuth
-          - AUTH_ORIGIN: !If [HasDomain, !Sub "https://${Domain}", !Ref AWS::NoValue]
-            AUTH_AT_EDGE: "1"
-            GOOGLE_CLIENT_ID: !Ref GoogleClientId
-            GOOGLE_CLIENT_SECRET_SSM: !Ref GoogleSecretParameter
-            CLOUDFRONT_KEY_SSM: !Ref CloudFrontKeyParameter
-            CLOUDFRONT_KEY_PAIR_ID: !Ref SigningKey
-            DSQL_ENDPOINT: !GetAtt Database.Endpoint
-          - !Ref AWS::NoValue
+        Variables:
+          CELLGEN_OSM_S3: !If [HasOsmSource, !Ref OsmSource, !Ref AWS::NoValue]
+          AUTH_ORIGIN: !If [HasAuth, !If [HasDomain, !Sub "https://${Domain}", !Ref AWS::NoValue], !Ref AWS::NoValue]
+          AUTH_AT_EDGE: !If [HasAuth, "1", !Ref AWS::NoValue]
+          GOOGLE_CLIENT_ID: !If [HasAuth, !Ref GoogleClientId, !Ref AWS::NoValue]
+          GOOGLE_CLIENT_SECRET_SSM: !If [HasAuth, !Ref GoogleSecretParameter, !Ref AWS::NoValue]
+          CLOUDFRONT_KEY_SSM: !If [HasAuth, !Ref CloudFrontKeyParameter, !Ref AWS::NoValue]
+          CLOUDFRONT_KEY_PAIR_ID: !If [HasAuth, !Ref SigningKey, !Ref AWS::NoValue]
+          DSQL_ENDPOINT: !If [HasAuth, !GetAtt Database.Endpoint, !Ref AWS::NoValue]
 
   Url:
     Type: AWS::Lambda::Url

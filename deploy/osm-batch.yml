@@ -1,0 +1,187 @@
+# The OSM splitter as an AWS Batch job (docker/osm-cells): a job queue whose compute environment scales from nothing
+# to one on-demand r6id.8xlarge (32 vCPU, 256 GB, 1.9 TB NVMe) for a run, and back to nothing after. The NVMe is
+# formatted and mounted at /scratch at boot (the launch template) and given to the job for the download and the
+# spill. Output goes to the bucket under osm/; the job's stdout (the run's progress, monitor.sh's machine stats) to
+# the log group. Deployed and run by deploy/osm-run.sh.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: koldenworld OSM splitter (AWS Batch)
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: The image to run (this stack's repository and a tag), x86_64.
+  Bucket:
+    Type: String
+    Default: koldenworld-data-2
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets that give instances a public address (the default VPC's), to reach S3, ECR and the planet.
+  InstanceType:
+    Type: String
+    Default: r6id.8xlarge
+  Vcpus:
+    Type: Number
+    Default: 32
+    Description: A job's vCPUs, the whole instance.
+  MaxVcpus:
+    Type: Number
+    Default: 32
+    Description: All jobs' vCPUs at once; 32 runs one job at a time, 64 two side by side.
+  MemoryMiB:
+    Type: Number
+    Default: 245760
+    Description: The job's memory; under what ECS registers for the instance type (256 GiB less the agent's share).
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: koldenworld-osm-cells
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules": [{"rulePriority": 1, "description": "the last 10 images",
+          "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10},
+          "action": {"type": "expire"}}]}
+
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /koldenworld/osm-cells
+      RetentionInDays: 90
+
+  # Out only: S3, ECR and the public planet bucket.
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: koldenworld OSM splitter, egress only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0 }
+
+  # The instances: ECS's own policy (register, pull from ECR, write the log).
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # The job: writes the run's cell files and report under osm/. The planet is public (read unsigned).
+  JobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: osm
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+                Resource: !Sub arn:aws:s3:::${Bucket}/osm/*
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${Bucket}
+
+  # The instance store at /scratch, early in boot (a boothook, before ECS starts and takes the job).
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: |
+            MIME-Version: 1.0
+            Content-Type: multipart/mixed; boundary="==scratch=="
+
+            --==scratch==
+            Content-Type: text/cloud-boothook; charset="us-ascii"
+
+            #!/bin/bash
+            mountpoint -q /scratch && exit 0
+            dev=$(lsblk -dno NAME,MODEL | awk '/Instance Storage/ { print "/dev/" $1; exit }')
+            [ -n "$dev" ] || exit 0
+            mkfs.xfs -f "$dev"
+            mkdir -p /scratch
+            mount -o noatime "$dev" /scratch
+            --==scratch==--
+
+  ComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      State: ENABLED
+      ComputeResources:
+        Type: EC2
+        AllocationStrategy: BEST_FIT_PROGRESSIVE
+        # No DesiredvCpus: Batch sets it, and an update that names it while a job runs is a refused scale-down.
+        MinvCpus: 0
+        MaxvCpus: !Ref MaxVcpus
+        InstanceTypes: [!Ref InstanceType]
+        Subnets: !Ref Subnets
+        SecurityGroupIds: [!Ref SecurityGroup]
+        InstanceRole: !GetAtt InstanceProfile.Arn
+        LaunchTemplate:
+          LaunchTemplateId: !Ref LaunchTemplate
+          Version: !GetAtt LaunchTemplate.LatestVersionNumber
+        Ec2Configuration:
+          - ImageType: ECS_AL2023
+        Tags: { Name: koldenworld-osm-cells }
+
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      JobQueueName: koldenworld-osm
+      Priority: 1
+      ComputeEnvironmentOrder:
+        - { Order: 1, ComputeEnvironment: !Ref ComputeEnvironment }
+
+  # PBF (the planet's s3:// URL) and OUT (the run's folder) are given at submit (osm-run.sh).
+  JobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: koldenworld-osm-cells
+      Type: container
+      PlatformCapabilities: [EC2]
+      RetryStrategy: { Attempts: 1 }
+      Timeout: { AttemptDurationSeconds: 21600 }
+      ContainerProperties:
+        Image: !Ref ImageUri
+        JobRoleArn: !GetAtt JobRole.Arn
+        ResourceRequirements:
+          - { Type: VCPU, Value: !Ref Vcpus }
+          - { Type: MEMORY, Value: !Ref MemoryMiB }
+        Volumes:
+          - { Name: scratch, Host: { SourcePath: /scratch } }
+        MountPoints:
+          - { SourceVolume: scratch, ContainerPath: /scratch }
+        Environment:
+          - { Name: AWS_REGION, Value: !Ref AWS::Region }
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref Logs
+            awslogs-stream-prefix: run
+
+Outputs:
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+  JobQueue:
+    Value: !Ref JobQueue
+  JobDefinition:
+    Value: !Ref JobDefinition

@@ -184,9 +184,12 @@ crate's pure parts to `wasm32`. Not a way to read the data from the browser: the
 
 - **Far-tile water:** the splitter writes a small water-only file per level-6 cell (waterways ≥ 15 m, water areas)
   so far tiles get rivers and lakes back cheaply. Fold into the next planet run.
-- **Next planet run** (on the big box): rebuild sedona-db there first (it has the source in `/data/sedona-db`, build
-  with `--no-default-features --features aws,gcp,azure,http`), `SEDONA_MEMORY_LIMIT_GB=200`,
-  `SEDONA_SPILL_COMPRESSION=lz4_frame`; sketched cuts are on by default. Run script `/data/run-planet.sh`.
+- **Planet runs are an AWS Batch job** (2026-11-27): `deploy/osm-run.sh [planet date]` builds `../sedona-db`'s
+  `osm_cells` example here, puts it in `docker/osm-cells`, updates stack `koldenworld-osm` (`deploy/osm-batch.yml`:
+  one on-demand r6id.8xlarge, NVMe at /scratch) and submits; `deploy/osm-logs.sh <job>` follows it. Each run writes
+  `s3://koldenworld-data-2/osm/planet-<date>/runs/<UTC>-<tag>/{raw,report}` (report: plans with metrics, log);
+  `CELLGEN_OSM_S3=<run>/raw deploy/deploy.sh` points the game at one. Planet 261116: 26.6 min (95 before spilled
+  channels ended the one-core write), the game on run `20261127T171143Z-…` since.
 - **Relations** (multipolygon lakes, buildings) aren't in the cell files; deliberately deferred (only Lake Dylan
   looked missing).
 - **Row-group pruning** in `local.rs` (it reads whole level-6 files; the largest is 2 GB, `coarse=47c7`).

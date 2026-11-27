@@ -9,6 +9,10 @@
 # made here the first time, straight into SSM (/koldenworld/cloudfront-key).
 #
 #   deploy/deploy.sh
+#   CELLGEN_OSM_S3=s3://koldenworld-data-2/osm/planet-261116/runs/<run>/raw deploy/deploy.sh
+#
+# CELLGEN_OSM_S3 points the game at other OSM cell files (a splitter run's, deploy/osm-run.sh); it sticks until set
+# again, and CELLGEN_OSM_S3= (empty) goes back to cellgen's default. Built cells are kept apart per source.
 #
 # Credentials: the AWS CLI's usual ones (AWS_PROFILE=koldenworld by default, after `aws sso login`). Always us-east-2,
 # where the bucket is, whatever AWS_REGION says.
@@ -62,6 +66,7 @@ echo "function and distribution${cert:+ (with the domain)}${client_id:+ (with si
 aws cloudformation deploy --stack-name koldenworld --template-file deploy/app.yml \
   --parameter-overrides "ImageUri=$repo:$tag" "CertificateArn=$cert" \
     "GoogleClientId=$client_id" "CloudFrontPublicKey=$public_key" \
+    ${CELLGEN_OSM_S3+"OsmSource=$CELLGEN_OSM_S3"} \
   --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset
 
 echo "database"
