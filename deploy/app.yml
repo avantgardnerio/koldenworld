@@ -143,7 +143,7 @@ Resources:
       # A cold cell from S3 takes seconds; CloudFront gives up at 60 s anyway.
       Timeout: 60
       # Instances at most: plenty for players once they must sign in; few while anyone may make cells build.
-      ReservedConcurrentExecutions: !If [HasAuth, 100, 5]
+      ReservedConcurrentExecutions: !If [HasAuth, 20, 5]
       Environment:
         Variables: !If
           - HasAuth

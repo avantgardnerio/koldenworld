@@ -152,7 +152,7 @@ Order: SDK (done) → built cells in S3 (done) → FABDEM range reads (done) →
   the whole site, 30 days, refreshed by `/auth/me`). `/ground/*` and `/aircraft` trust the `koldenworld-players` key
   group, so CloudFront refuses them at the edge, before its cache or the function; the server checks the same
   cookies itself where nothing is in front (local dev). The viewer's files stay public: `sign-in.ts` shows the
-  Google button when `/auth/me` answers 401. With sign-in on, reserved concurrency is 100 (5 without).
+  Google button when `/auth/me` answers 401. With sign-in on, reserved concurrency is 20 (5 without): about $3 an hour flat out.
 - **Bans and attribution:** CloudFront's cookies last an hour; the viewer renews them through `/auth/me` every 20
   minutes, and a banned player (`users.banned_at`) is refused there and at sign-in, so `cellgen ban <email>` shuts
   them out within the hour (`unban` lets them back). Each sign-in and renewal records its address and user agent in
