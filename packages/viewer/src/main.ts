@@ -57,6 +57,7 @@ import { createSolidLayer, type SolidLayer } from "./solid-layer.ts";
 import { frustumPlanes, sphereVisible } from "./frustum.ts";
 import { CellStreamer } from "./streaming.ts";
 import { CAR_HALF, emptyInstances, TrafficView, type TrafficCell } from "./traffic-view.ts";
+import { signedIn } from "./sign-in.ts";
 import {
   BUILDING_COLORS_RGB, BUILDING_WINDOWS, GROUND, PAINTS, CLASS_COLORS_RGB, fogRange, INTERIOR_COLORS, MASSING, SKY, SUN, UNIT_COLOR,
 } from "./style.ts";
@@ -841,7 +842,7 @@ async function start(): Promise<void> {
   };
 }
 
-start().catch((err: unknown) => {
+signedIn().then((ok) => (ok ? start() : undefined)).catch((err: unknown) => {
   status.state = "error";
   status.error = err instanceof Error ? err.message : String(err);
   console.error(err);

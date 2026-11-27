@@ -1,5 +1,6 @@
 mod aeroways;
 mod aircraft;
+mod auth;
 mod boxes;
 mod building_inputs;
 mod building_table;
@@ -7,6 +8,7 @@ mod buildings;
 mod cell;
 mod clip;
 mod crossings;
+mod db;
 mod draw;
 mod elevation;
 mod extract;
@@ -52,7 +54,10 @@ const USAGE: &str = "usage:
   cellgen serve [--host <addr>] [--port <port>] [--static <dir>]
                                                 the server: cells at /ground/, live air traffic at /aircraft, and with
                                                 --static the viewer's release build at / (default 127.0.0.1, port
-                                                PORT or 5175)
+                                                PORT or 5175); sign-in with Google when GOOGLE_CLIENT_ID is set
+                                                (auth.rs)
+  cellgen migrate <DSQL endpoint> <role ARN>    the database's migrations, as admin (db.rs); the server's role mapped
+                                                to that IAM role (the function's)
 
 Cells are built from S3 (the OSM cell files, CELLGEN_OSM_S3; FABDEM, CELLGEN_DEM_S3; the geoid, CELLGEN_GEOID_S3) and
 served cells kept there (CELLGEN_CELLS_S3), with the AWS SDK's usual credentials (AWS_PROFILE). The local data directory,
@@ -369,6 +374,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let host = value("--host")?.map_or("127.0.0.1", String::as_str);
             serve::serve(host, port, value("--static")?.map(PathBuf::from))
+        }
+        Some("migrate") => {
+            let (Some(endpoint), Some(role)) = (args.get(1), args.get(2)) else {
+                return Err(USAGE.into());
+            };
+            tokio::runtime::Runtime::new()?.block_on(db::migrate(endpoint, role))?;
+            Ok(())
         }
         _ => Err(USAGE.into()),
     }

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Deploys the game: the image repository (deploy/repo.yml), the arm64 image (Dockerfile) tagged with the commit,
-# then the function behind CloudFront (deploy/app.yml), and clears CloudFront's cache. The same steps a pipeline
-# will run. Once the certificate (deploy/cert.sh) is issued, the distribution answers koldenworld.squarelabs.net too.
+# then the function behind CloudFront (deploy/app.yml), applies the database's migrations, and clears CloudFront's
+# cache. The same steps a pipeline will run. Once the certificate (deploy/cert.sh) is issued, the distribution answers
+# koldenworld.squarelabs.net too.
+#
+# Sign-in with Google is on once SSM has the OAuth client: /koldenworld/google-client-id (String) and
+# /koldenworld/google-client-secret (SecureString), put there by hand once. The key that signs CloudFront cookies is
+# made here the first time, straight into SSM (/koldenworld/cloudfront-key).
 #
 #   deploy/deploy.sh
 #
@@ -38,10 +43,30 @@ if [ "$(aws cloudformation describe-stacks --stack-name koldenworld-cert --regio
         --query 'Stacks[0].StackStatus' --output text 2>/dev/null)" = CREATE_COMPLETE ]; then
   cert="$(output koldenworld-cert CertificateArn us-east-1)"
 fi
-echo "function and distribution${cert:+ (with the domain)}"
+
+# Sign-in: the client's id, if it's there, and the cookie key's public half (the key made once, never on disk).
+client_id="$(aws ssm get-parameter --name /koldenworld/google-client-id --query Parameter.Value --output text \
+  2>/dev/null || true)"
+public_key=""
+if [ -n "$client_id" ]; then
+  if ! aws ssm get-parameter --name /koldenworld/cloudfront-key >/dev/null 2>&1; then
+    echo "making the CloudFront cookie key"
+    openssl genrsa -traditional 2048 2>/dev/null |
+      aws ssm put-parameter --name /koldenworld/cloudfront-key --type SecureString --value file:///dev/stdin >/dev/null
+  fi
+  public_key="$(aws ssm get-parameter --name /koldenworld/cloudfront-key --with-decryption \
+    --query Parameter.Value --output text | openssl rsa -pubout 2>/dev/null)"
+fi
+
+echo "function and distribution${cert:+ (with the domain)}${client_id:+ (with sign-in)}"
 aws cloudformation deploy --stack-name koldenworld --template-file deploy/app.yml \
   --parameter-overrides "ImageUri=$repo:$tag" "CertificateArn=$cert" \
+    "GoogleClientId=$client_id" "CloudFrontPublicKey=$public_key" \
   --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset
+
+echo "database"
+cargo run --quiet --manifest-path crates/cellgen/Cargo.toml -- migrate \
+  "$(output koldenworld DatabaseEndpoint)" "$(output koldenworld RoleArn)"
 
 # New code may answer differently for the same paths: clear CloudFront's copies.
 aws cloudfront create-invalidation --distribution-id "$(output koldenworld DistributionId)" --paths '/*' \

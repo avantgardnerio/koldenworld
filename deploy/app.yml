@@ -3,8 +3,11 @@
 # Control), with a role that reads the data and reads and writes built cells in the bucket. Deployed by
 # deploy/deploy.sh with the image just pushed.
 #
-# Public (no auth) until Google OAuth: anyone can make cells build, so concurrency is capped and CloudFront caches
-# what it can. The server is GET-only (OAC would need signed bodies otherwise).
+# With GoogleClientId and CloudFrontPublicKey (deploy.sh passes both once the client exists), sign-in with Google
+# (crates/cellgen/src/auth.rs): cells and air traffic need CloudFront signed cookies, checked at the edge against the
+# key group, and the players and sessions live in an Aurora DSQL cluster. Without them, everything is public and
+# concurrency stays low. The viewer's files are always public (its sign-in screen). The server is GET-only (OAC would
+# need signed bodies otherwise).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: koldenworld game server (Lambda behind CloudFront)
 
@@ -23,13 +26,27 @@ Parameters:
     Default: ""
     Description: The ACM certificate for Domain (cert.yml, us-east-1), once issued; empty serves only the
       distribution's own *.cloudfront.net name.
-  MaxConcurrency:
-    Type: Number
-    Default: 5
-    Description: Instances at most, which caps what anonymous traffic can cost.
+  GoogleClientId:
+    Type: String
+    Default: ""
+    Description: The Google OAuth web client's id (not secret; its secret is in SSM at GoogleSecretParameter).
+  GoogleSecretParameter:
+    Type: String
+    Default: /koldenworld/google-client-secret
+  CloudFrontKeyParameter:
+    Type: String
+    Default: /koldenworld/cloudfront-key
+    Description: The SSM SecureString holding the private key that signs CloudFront cookies (PKCS#1 PEM).
+  CloudFrontPublicKey:
+    Type: String
+    Default: ""
+    Description: Its public key (PEM), for CloudFront's key group.
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref CertificateArn, ""]]
+  HasAuth: !And
+    - !Not [!Equals [!Ref GoogleClientId, ""]]
+    - !Not [!Equals [!Ref CloudFrontPublicKey, ""]]
 
 Resources:
   Role:
@@ -62,6 +79,24 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !Sub arn:aws:s3:::${Bucket}
+              # Sign-in: the database (as the role db.rs's migrate maps this one to), and the two secrets.
+              - Effect: Allow
+                Action: dsql:DbConnect
+                Resource: !GetAtt Database.ResourceArn
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GoogleSecretParameter}
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${CloudFrontKeyParameter}
+
+  # Players and sessions (crates/cellgen/migrations/, applied by deploy.sh). Serverless: nothing to pay while idle.
+  Database:
+    Type: AWS::DSQL::Cluster
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DeletionProtectionEnabled: true
+      Tags: [{ Key: Name, Value: koldenworld }]
 
   # CloudFront's access logs: every request, cached or not (time, client address, path, status, bytes, user agent),
   # as gzipped files under cloudfront/. Private; kept 90 days. CloudFront's legacy logging writes with an ACL
@@ -107,7 +142,19 @@ Resources:
       MemorySize: 3008
       # A cold cell from S3 takes seconds; CloudFront gives up at 60 s anyway.
       Timeout: 60
-      ReservedConcurrentExecutions: !Ref MaxConcurrency
+      # Instances at most: plenty for players once they must sign in; few while anyone may make cells build.
+      ReservedConcurrentExecutions: !If [HasAuth, 100, 5]
+      Environment:
+        Variables: !If
+          - HasAuth
+          - AUTH_ORIGIN: !If [HasDomain, !Sub "https://${Domain}", !Ref AWS::NoValue]
+            AUTH_AT_EDGE: "1"
+            GOOGLE_CLIENT_ID: !Ref GoogleClientId
+            GOOGLE_CLIENT_SECRET_SSM: !Ref GoogleSecretParameter
+            CLOUDFRONT_KEY_SSM: !Ref CloudFrontKeyParameter
+            CLOUDFRONT_KEY_PAIR_ID: !Ref SigningKey
+            DSQL_ENDPOINT: !GetAtt Database.Endpoint
+          - !Ref AWS::NoValue
 
   Url:
     Type: AWS::Lambda::Url
@@ -132,6 +179,23 @@ Resources:
       Principal: cloudfront.amazonaws.com
       SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
       InvokedViaFunctionUrl: true
+
+  # What CloudFront checks signed cookies against: the public half of the key in CloudFrontKeyParameter.
+  SigningKey:
+    Type: AWS::CloudFront::PublicKey
+    Condition: HasAuth
+    Properties:
+      PublicKeyConfig:
+        Name: koldenworld-cookies
+        CallerReference: koldenworld-cookies
+        EncodedKey: !Ref CloudFrontPublicKey
+  Players:
+    Type: AWS::CloudFront::KeyGroup
+    Condition: HasAuth
+    Properties:
+      KeyGroupConfig:
+        Name: koldenworld-players
+        Items: [!Ref SigningKey]
 
   OriginAccess:
     Type: AWS::CloudFront::OriginAccessControl
@@ -220,6 +284,7 @@ Resources:
             AllowedMethods: [GET, HEAD]
             Compress: true
             CachePolicyId: !Ref CellsCache
+            TrustedKeyGroups: !If [HasAuth, [!Ref Players], !Ref AWS::NoValue]
             OriginRequestPolicyId: acba4595-bd28-49b8-b9fe-13317c0390fa
           - PathPattern: /aircraft
             TargetOriginId: lambda
@@ -227,12 +292,25 @@ Resources:
             AllowedMethods: [GET, HEAD]
             Compress: true
             CachePolicyId: !Ref AircraftCache
+            TrustedKeyGroups: !If [HasAuth, [!Ref Players], !Ref AWS::NoValue]
             OriginRequestPolicyId: acba4595-bd28-49b8-b9fe-13317c0390fa
+          # Sign-in: never cached; the browser's cookies and query reach the server (managed CachingDisabled and
+          # AllViewerExceptHostHeader).
+          - PathPattern: /auth/*
+            TargetOriginId: lambda
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
 
 Outputs:
   DistributionId:
     Value: !Ref Distribution
   DistributionDomain:
     Value: !GetAtt Distribution.DomainName
+  RoleArn:
+    Value: !GetAtt Role.Arn
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint
   Url:
     Value: !If [HasDomain, !Sub "https://${Domain}/", !Sub "https://${Distribution.DomainName}/"]

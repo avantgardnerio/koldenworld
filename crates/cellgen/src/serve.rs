@@ -7,12 +7,14 @@
 //! from the cell files and elevation data, Inputs::from_files, then cell::build, on Tokio's blocking pool), every table
 //! written to S3, and the one asked for answered. Requests here for a cell being built wait for that one build.
 //! GET /aircraft?lat=&lon=&nm= answers with live air traffic around a point (aircraft.rs).
+//! With sign-in configured (auth.rs, at /auth/), cells and air traffic are for signed-in players only.
 
 use crate::aircraft::Aircraft;
+use crate::auth::Auth;
 use crate::cell::{self, Cell};
 use crate::s3;
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use std::collections::HashMap;
@@ -37,6 +39,7 @@ const ARROW: &str = "application/vnd.apache.arrow.file";
 struct App {
     cells: String,      // s3://…/cells/<data>/<format>: where this server's built cells are
     aircraft: Aircraft, // live air traffic, rate-limited
+    auth: Option<Auth>, // sign-in, if configured
     building: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, // a lock per cell being asked for
 }
 
@@ -59,14 +62,26 @@ pub fn serve(
             crate::building_table::BUILDINGS_VERSION
         );
         println!("built cells in {cells}/<token>/");
+        let auth = Auth::from_env().await.map_err(std::io::Error::other)?;
+        println!(
+            "{}",
+            if auth.is_some() {
+                "sign-in with Google"
+            } else {
+                "no sign-in: open to all"
+            }
+        );
         let app = Arc::new(App {
             cells,
             aircraft,
+            auth,
             building: Mutex::default(),
         });
         let mut router = Router::new()
             .route("/ground/{token}/{table}", get(table))
             .route("/aircraft", get(air_traffic))
+            .route("/auth/{step}", get(sign_in))
+            .route("/auth/google/callback", get(callback))
             .with_state(app);
         if let Some(site) = &site {
             router = router.fallback_service(tower_http::services::ServeDir::new(site));
@@ -105,11 +120,57 @@ async fn log(request: axum::extract::Request, next: axum::middleware::Next) -> R
     response
 }
 
+/// /auth/google, /auth/me and /auth/logout (auth.rs). Without sign-in, /auth/me answers null: nothing to sign in to.
+async fn sign_in(
+    State(app): State<Arc<App>>,
+    Path(step): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(auth) = &app.auth else {
+        return match step.as_str() {
+            "me" => ([(header::CONTENT_TYPE, "application/json")], "null").into_response(),
+            _ => (StatusCode::NOT_FOUND, "no sign-in here\n").into_response(),
+        };
+    };
+    match step.as_str() {
+        "google" => auth.start(&q),
+        "me" => auth.me(&headers).await,
+        "logout" => auth.logout(&headers).await,
+        _ => (StatusCode::NOT_FOUND, "not found\n").into_response(),
+    }
+}
+
+async fn callback(
+    State(app): State<Arc<App>>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    match &app.auth {
+        Some(auth) => auth.callback(&q, &headers).await,
+        None => (StatusCode::NOT_FOUND, "no sign-in here\n").into_response(),
+    }
+}
+
+/// The refusal, if a request may not have cells and air traffic: anyone may without sign-in, else the signed in.
+fn refused(app: &App, headers: &HeaderMap) -> Option<Response> {
+    match &app.auth {
+        Some(auth) if !auth.allowed(headers) => {
+            Some((StatusCode::FORBIDDEN, "sign in first: /auth/google\n").into_response())
+        }
+        _ => None,
+    }
+}
+
 /// Live air traffic around a point: ?lat=&lon=&nm= (nautical miles).
 async fn air_traffic(
     State(app): State<Arc<App>>,
     Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
+    if let Some(refusal) = refused(&app, &headers) {
+        return refusal;
+    }
     let number = |k: &str| {
         q.get(k)
             .and_then(|v| v.parse::<f64>().ok())
@@ -134,7 +195,11 @@ async fn air_traffic(
 async fn table(
     State(app): State<Arc<App>>,
     Path((token, table)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
+    if let Some(refusal) = refused(&app, &headers) {
+        return refusal;
+    }
     if !TABLES.contains(&table.as_str()) {
         return (StatusCode::NOT_FOUND, "not found\n").into_response();
     }

@@ -1,4 +1,4 @@
-// Dev server for the viewer. /ground/<token>/<table>.arrow and /aircraft are
+// Dev server for the viewer. /ground/<token>/<table>.arrow, /aircraft and /auth/ are
 // proxied to the Rust cell generator (`cellgen serve`, which builds cells on a
 // miss; CELLGEN_SERVER overrides its URL).
 // CELLGEN_SERVER="" turns the proxy off, so cells are served as static files
@@ -17,6 +17,7 @@ export default defineConfig({
     port: 5173,
     proxy: cellgenServer ? {
       "/aircraft": { target: cellgenServer },
+      "/auth": { target: cellgenServer },
       "/ground": { target: cellgenServer, timeout: 600_000, proxyTimeout: 600_000 },
     } : undefined,
   },

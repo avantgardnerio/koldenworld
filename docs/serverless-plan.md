@@ -142,6 +142,29 @@ Order: SDK (done) → built cells in S3 (done) → FABDEM range reads (done) →
   `docker run --rm -p 8080:8080 -v ~/.aws:/root/.aws:ro -e AWS_PROFILE=koldenworld koldenworld`. The server now
   answers `/ground/<token>/<table>.arrow` itself (Vite proxies it unchanged) and the viewer's files at `/`.
 
+## Step 2b: logs and sign-in (2026-11-26)
+
+- **Logs:** CloudFront's access logs (every request, cached or not: client address, path, status, bytes, user
+  agent) in the private `koldenworld-logs-<account>` bucket under `cloudfront/`, kept 90 days; and the server's line
+  per request (status, time, path and query, client address, user agent) in CloudWatch, `/aws/lambda/koldenworld`.
+- **Sign-in with Google, anyone with an account** (`crates/cellgen/src/auth.rs`). After Google's consent screen the
+  server sets a session cookie (its SHA-256 kept in `sessions`) and CloudFront's signed cookies (custom policy for
+  the whole site, 30 days, refreshed by `/auth/me`). `/ground/*` and `/aircraft` trust the `koldenworld-players` key
+  group, so CloudFront refuses them at the edge, before its cache or the function; the server checks the same
+  cookies itself where nothing is in front (local dev). The viewer's files stay public: `sign-in.ts` shows the
+  Google button when `/auth/me` answers 401. With sign-in on, reserved concurrency is 100 (5 without).
+- **The database: Aurora DSQL** (serverless Postgres, no VPC, IAM auth tokens, nothing to pay while idle), not this
+  machine's Postgres (localhost only). Migrations are plain SQL, forward only, in `crates/cellgen/migrations/`,
+  applied by `cellgen migrate` as admin from `deploy.sh`; the server connects as `koldenworld_app`, mapped to the
+  function's IAM role. Tables: `users` (by Google `sub`), `sessions`.
+- **Secrets in SSM Parameter Store:** `/koldenworld/google-client-id` (String), `/koldenworld/google-client-secret`
+  (SecureString, put by hand), `/koldenworld/cloudfront-key` (the cookie-signing RSA key, made by `deploy.sh`, never
+  on disk). `deploy.sh` turns sign-in on once the client id is there.
+- **Locally:** `cellgen serve` with `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET_SSM=/koldenworld/google-client-secret`,
+  `CLOUDFRONT_KEY_SSM=/koldenworld/cloudfront-key`, `CLOUDFRONT_KEY_PAIR_ID` and `DSQL_ENDPOINT` (the stack's
+  outputs); `AUTH_ORIGIN` defaults to `http://localhost:5173` (Vite proxies `/auth`). Without `GOOGLE_CLIENT_ID`,
+  no sign-in.
+
 ## Step 3 (only if needed): WASM
 
 Only if the browser ever needs Rust code that's in cellgen (sharing it with the TS rather than porting it): the
@@ -166,6 +189,6 @@ crate's pure parts to `wasm32`. Not a way to read the data from the browser: the
 
 ## Infrastructure as of 2026-11-26
 
-- Big box: on-demand r7gd.8xlarge `i-084a4e23a28d94b89` (us-east-2, $2.18/h, 18.188.171.88, instance store wiped on
-  stop), tmux `work` (windows `planet`, `fabdem`, `finish`). Terminate when the planet run is verified.
+- Big box: r7gd.8xlarge `i-084a4e23a28d94b89`, terminated 2026-11-26 12:08 MDT (~38 h, ~$83: it set off the
+  budget alarm, as Cost Explorer posts hours late).
 - Bucket `koldenworld-data-2` (us-east-2). AWS SSO profile `koldenworld`; set `AWS_REGION=us-east-2`.
