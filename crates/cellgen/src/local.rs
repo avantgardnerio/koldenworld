@@ -34,8 +34,9 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// The level of the cells the files are split by.
 const FILE_LEVEL: u32 = 6;
-/// The cell files, unless CELLGEN_OSM_S3 says otherwise.
-const SOURCE: &str = "s3://koldenworld-data-2/osm/planet-261116/raw";
+/// The cell files, unless CELLGEN_OSM_S3 says otherwise: planet 261116 from the Batch job (deploy/osm-run.sh), the
+/// run the deployed game serves too.
+const SOURCE: &str = "s3://koldenworld-data-2/osm/planet-261116/runs/20261127T171143Z-game-508726388371-dirty-sedona-83edbf3ce5a1-dirty-20261127171057/raw";
 /// Footer bytes fetched first, hoping the whole footer is in them (the largest seen: ~1 MB, 727 row groups).
 const TAIL: u64 = 1 << 20;
 

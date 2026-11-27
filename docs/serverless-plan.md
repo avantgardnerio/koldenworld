@@ -16,7 +16,8 @@ Done and committed:
 - **OSM cell files on S3:** the SedonaDB splitter (`../sedona-db`, branch `osm-pbf-reader`) writes
   `coarse=<level-6 token>/{ways,nodes}.parquet` straight to S3. Dense node-location array (`WayNodesExec`) instead
   of two 13 B-row sorts; memory reserved from the pool; KLL-sketched cuts for the final routing (`range_sketch.rs`,
-  from Ballista); `SEDONA_SPILL_COMPRESSION`. Planet 261116 → `s3://koldenworld-data-2/osm/planet-261116/raw/`.
+  from Ballista); `SEDONA_SPILL_COMPRESSION`. Planet 261116 → `s3://koldenworld-data-2/osm/planet-261116/runs/20261127T171143Z-…/raw/` (the Batch job's run;
+  the earlier hand-run `…/raw/`, `cells/` and `shapes/` were deleted 2026-11-27).
 - **cellgen without Postgres** (steps 1a–1c): `local::load_box` reads any box's OSM from the level-6 files it
   touches; `from_extracted` for roads, water, airports, buildings reproduces each Postgres query exactly
   (`boxes.rs`: ST_Intersects, &&, ST_ForcePolygonCCW). The ground server (`cellgen serve`, port 5175) builds every cell
@@ -121,7 +122,7 @@ One Docker image, run the same way locally and on Lambda, the only thing to depl
     nearly the whole level-6 area in bbox (876d: 727 row groups), so measure first and fix the sort in the splitter
     if need be. **Done:** measured, the ways prune fine too (one wide row group was the outlier): a cell's box keeps
     19 of 727 way row groups (12 of 506 MB) and 14 of 328 node row groups. `local.rs` reads only S3 (default the
-    planet, `osm/planet-261116/raw`): footers once per file (kept), row groups by their stats, one range request each,
+    planet, a run's `raw/` under `osm/planet-261116/runs/`): footers once per file (kept), row groups by their stats, one range request each,
     side by side, kept in a row-group cache (CELLGEN_ROW_GROUP_CACHE_MB, 512; a build loads its box, then its reach).
     Output byte-identical to the disk build. A first Denver cell: 17 MB; a neighbor: 13 MB more. From home a cold
     cell takes ~10 s, the next ~1.4 s (release). The server reads and writes nothing on disk (`s3::local_copy` is
