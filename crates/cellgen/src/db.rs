@@ -20,11 +20,18 @@ pub const APP_ROLE: &str = "koldenworld_app";
 const MAX_AGE: Duration = Duration::from_secs(50 * 60);
 
 /// The migrations, in order: (version, file name, SQL).
-const MIGRATIONS: [(i32, &str, &str); 1] = [(
-    1,
-    "0001_users_sessions.sql",
-    include_str!("../migrations/0001_users_sessions.sql"),
-)];
+const MIGRATIONS: [(i32, &str, &str); 2] = [
+    (
+        1,
+        "0001_users_sessions.sql",
+        include_str!("../migrations/0001_users_sessions.sql"),
+    ),
+    (
+        2,
+        "0002_bans_visits.sql",
+        include_str!("../migrations/0002_bans_visits.sql"),
+    ),
+];
 
 /// One connection per process, made on first use and remade when it's closed or old.
 pub struct Db {
@@ -110,6 +117,74 @@ pub async fn migrate(endpoint: &str, app_role_arn: &str) -> Result<(), String> {
             .await
             .map_err(e)?;
         println!("{APP_ROLE} mapped to {app_role_arn}");
+    }
+    Ok(())
+}
+
+/// Bans (or with `banned` false, unbans) the player with `email`, as admin, ending their sessions.
+pub async fn ban(endpoint: &str, email: &str, banned: bool) -> Result<(), String> {
+    let db = connect(endpoint, "admin").await?;
+    let e = |e: tokio_postgres::Error| e.to_string();
+    let subs: Vec<String> = db
+        .query(
+            "UPDATE users SET banned_at = CASE WHEN $2 THEN now() END WHERE email = $1 RETURNING google_sub",
+            &[&email, &banned],
+        )
+        .await
+        .map_err(e)?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    if subs.is_empty() {
+        return Err(format!("no player {email}"));
+    }
+    if banned {
+        for sub in &subs {
+            db.execute("DELETE FROM sessions WHERE google_sub = $1", &[sub])
+                .await
+                .map_err(e)?;
+        }
+    }
+    println!(
+        "{email} {}",
+        if banned {
+            "banned: out within the hour"
+        } else {
+            "unbanned"
+        }
+    );
+    Ok(())
+}
+
+/// Every player (or those seen from `address`), most recent first: email, name, last seen, from where, banned.
+pub async fn players(endpoint: &str, address: Option<&str>) -> Result<(), String> {
+    let db = connect(endpoint, "admin").await?;
+    let rows = db
+        .query(
+            "SELECT u.email, coalesce(u.name, ''), max(v.at)::text, coalesce(
+                    (SELECT string_agg(DISTINCT w.address, ' ') FROM visits w WHERE w.google_sub = u.google_sub), ''),
+                    coalesce(u.banned_at::text, '')
+             FROM users u LEFT JOIN visits v ON v.google_sub = u.google_sub
+             WHERE $1::text IS NULL OR EXISTS
+               (SELECT 1 FROM visits w WHERE w.google_sub = u.google_sub AND w.address = $1)
+             GROUP BY u.google_sub, u.email, u.name, u.banned_at
+             ORDER BY max(v.at) DESC NULLS LAST",
+            &[&address],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    for r in rows {
+        let (email, name, seen, from, banned): (String, String, Option<String>, String, String) =
+            (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4));
+        let banned = if banned.is_empty() {
+            String::new()
+        } else {
+            format!("  BANNED {banned}")
+        };
+        println!(
+            "{email} ({name})  last seen {}  from {from}{banned}",
+            seen.as_deref().unwrap_or("never")
+        );
     }
     Ok(())
 }

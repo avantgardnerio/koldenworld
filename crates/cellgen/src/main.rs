@@ -56,6 +56,9 @@ const USAGE: &str = "usage:
                                                 --static the viewer's release build at / (default 127.0.0.1, port
                                                 PORT or 5175); sign-in with Google when GOOGLE_CLIENT_ID is set
                                                 (auth.rs)
+  cellgen players [<address>]                   players, most recent first, with where they've been seen (only those
+                                                seen from <address>, an address from the logs); DSQL_ENDPOINT
+  cellgen ban <email> | unban <email>          bans a player (out within the hour) or lets them back; DSQL_ENDPOINT
   cellgen migrate <DSQL endpoint> <role ARN>    the database's migrations, as admin (db.rs); the server's role mapped
                                                 to that IAM role (the function's)
 
@@ -374,6 +377,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let host = value("--host")?.map_or("127.0.0.1", String::as_str);
             serve::serve(host, port, value("--static")?.map(PathBuf::from))
+        }
+        Some(command @ ("players" | "ban" | "unban")) => {
+            let endpoint =
+                std::env::var("DSQL_ENDPOINT").map_err(|_| "DSQL_ENDPOINT is required")?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            match command {
+                "players" => {
+                    runtime.block_on(db::players(&endpoint, args.get(1).map(String::as_str)))?
+                }
+                _ => {
+                    let email = args.get(1).ok_or(USAGE)?;
+                    runtime.block_on(db::ban(&endpoint, email, command == "ban"))?
+                }
+            }
+            Ok(())
         }
         Some("migrate") => {
             let (Some(endpoint), Some(role)) = (args.get(1), args.get(2)) else {

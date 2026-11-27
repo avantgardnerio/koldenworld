@@ -6,7 +6,9 @@
 //! - GET /auth/google?then=<path>: to Google's consent screen, with a random state (also in a short cookie).
 //! - GET /auth/google/callback: Google's answer; the code traded for an ID token (straight from Google over TLS, with
 //!   our secret, so its claims are Google's), the player saved, a session made, the cookies set, back to <path>.
-//! - GET /auth/me: the signed-in player (and fresh CloudFront cookies), or 401.
+//! - GET /auth/me: the signed-in player and fresh CloudFront cookies, or 401. The cookies last CLOUDFRONT (an hour) and
+//!   the viewer renews them here well before, so a ban (`cellgen ban`, db.rs) shuts a player out within the hour.
+//!   Each sign-in and renewal records the address and browser in `visits`, so the access logs' addresses map to players.
 //! - GET /auth/logout: the session ended, the cookies cleared.
 //!
 //! Configured from the environment: AUTH_ORIGIN (the public origin Google redirects to, default http://localhost:5173),
@@ -26,8 +28,10 @@ use sha2::Digest;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// How long a session (and its CloudFront cookies, refreshed by /auth/me) lasts.
+/// How long a session lasts.
 const SESSION: Duration = Duration::from_secs(30 * 24 * 3600);
+/// How long CloudFront's cookies last: renewed by /auth/me, so how long a banned player keeps playing at most.
+const CLOUDFRONT: Duration = Duration::from_secs(3600);
 /// How long the consent screen may take.
 const STATE: Duration = Duration::from_secs(10 * 60);
 const SESSION_COOKIE: &str = "kw_session";
@@ -196,13 +200,18 @@ impl Auth {
             }
         };
         let token = match self.begin(&player).await {
-            Ok(t) => t,
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                println!("refused, banned: {} ({})", player.email, player.sub);
+                return (StatusCode::FORBIDDEN, "banned\n").into_response();
+            }
             Err(e) => {
                 eprintln!("sign-in: {e}");
                 return (StatusCode::BAD_GATEWAY, "sign-in failed\n").into_response();
             }
         };
         println!("signed in: {} ({})", player.email, player.sub);
+        self.visit(&player, "sign-in", headers).await;
         let mut response = (
             StatusCode::FOUND,
             [
@@ -224,7 +233,7 @@ impl Auth {
                 .parse()
                 .unwrap(),
         );
-        for c in self.cloudfront_cookies(SESSION) {
+        for c in self.cloudfront_cookies(CLOUDFRONT) {
             h.append(header::SET_COOKIE, c.parse().unwrap());
         }
         response
@@ -247,6 +256,7 @@ impl Auth {
                 return (StatusCode::BAD_GATEWAY, "sessions unavailable\n").into_response();
             }
         };
+        self.visit(&player, "renewal", headers).await;
         let body = serde_json::json!({
             "email": player.email, "name": player.name, "picture": player.picture,
         });
@@ -258,7 +268,7 @@ impl Auth {
             body.to_string(),
         )
             .into_response();
-        for c in self.cloudfront_cookies(SESSION) {
+        for c in self.cloudfront_cookies(CLOUDFRONT) {
             response
                 .headers_mut()
                 .append(header::SET_COOKIE, c.parse().unwrap());
@@ -355,18 +365,23 @@ impl Auth {
         })
     }
 
-    /// The player saved, and a new session's token.
-    async fn begin(&self, p: &Player) -> Result<String, String> {
+    /// The player saved, and a new session's token; None for a banned player.
+    async fn begin(&self, p: &Player) -> Result<Option<String>, String> {
         let db = self.db.client().await?;
         let e = |e: tokio_postgres::Error| e.to_string();
-        db.execute(
-            "INSERT INTO users (google_sub, email, name, picture) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (google_sub) DO UPDATE
-             SET email = excluded.email, name = excluded.name, picture = excluded.picture, last_login = now()",
-            &[&p.sub, &p.email, &p.name, &p.picture],
-        )
-        .await
-        .map_err(e)?;
+        let saved = db
+            .query_one(
+                "INSERT INTO users (google_sub, email, name, picture) VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (google_sub) DO UPDATE
+                 SET email = excluded.email, name = excluded.name, picture = excluded.picture, last_login = now()
+                 RETURNING banned_at IS NOT NULL",
+                &[&p.sub, &p.email, &p.name, &p.picture],
+            )
+            .await
+            .map_err(e)?;
+        if saved.get::<_, bool>(0) {
+            return Ok(None);
+        }
         let token = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
         let expires = SystemTime::now() + SESSION;
         db.execute(
@@ -375,7 +390,35 @@ impl Auth {
         )
         .await
         .map_err(e)?;
-        Ok(token)
+        Ok(Some(token))
+    }
+
+    /// Records where a player signed in or renewed from (the client's address as CloudFront forwards it), as best it
+    /// can: a failure here costs only the record.
+    async fn visit(&self, p: &Player, kind: &str, headers: &HeaderMap) {
+        let header = |name| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+        };
+        let address = header("x-forwarded-for")
+            .split(',')
+            .next()
+            .unwrap_or("-")
+            .trim();
+        let recorded = async {
+            let db = self.db.client().await?;
+            db.execute(
+                "INSERT INTO visits (google_sub, kind, address, user_agent) VALUES ($1, $2, $3, $4)",
+                &[&p.sub, &kind, &address, &header("user-agent")],
+            )
+            .await
+            .map_err(|e| e.to_string())
+        };
+        if let Err(e) = recorded.await {
+            eprintln!("visit: {e}");
+        }
     }
 
     /// The request's session's player, if it has a live one.
@@ -388,7 +431,7 @@ impl Auth {
             .query_opt(
                 "SELECT u.google_sub, u.email, u.name, u.picture
                  FROM sessions s JOIN users u ON u.google_sub = s.google_sub
-                 WHERE s.token_sha256 = $1 AND s.expires_at > now()",
+                 WHERE s.token_sha256 = $1 AND s.expires_at > now() AND u.banned_at IS NULL",
                 &[&sha256(&token)],
             )
             .await
@@ -512,12 +555,12 @@ mod tests {
     #[test]
     fn cloudfront_cookies_check_out() {
         let a = auth("https://example.test");
-        assert!(a.allowed(&sent(&a.cloudfront_cookies(SESSION))));
+        assert!(a.allowed(&sent(&a.cloudfront_cookies(CLOUDFRONT))));
         assert!(!a.allowed(&HeaderMap::new()));
         // Expired, signed by another key, or the policy changed: refused.
         assert!(!a.allowed(&sent(&a.cloudfront_cookies(Duration::ZERO))));
-        assert!(!auth("https://example.test").allowed(&sent(&a.cloudfront_cookies(SESSION))));
-        let mut forged = a.cloudfront_cookies(SESSION);
+        assert!(!auth("https://example.test").allowed(&sent(&a.cloudfront_cookies(CLOUDFRONT))));
+        let mut forged = a.cloudfront_cookies(CLOUDFRONT);
         let policy = r#"{"Statement":[{"Resource":"https://example.test/*","Condition":{"DateLessThan":{"AWS:EpochTime":9999999999}}}]}"#;
         forged[0] = format!("CloudFront-Policy={}", to_cloudfront(policy.as_bytes()));
         assert!(!a.allowed(&sent(&forged)));
