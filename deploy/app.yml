@@ -210,6 +210,9 @@ Resources:
           AllowedMethods: [GET, HEAD]
           Compress: true
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          # Managed UserAgentRefererHeaders: the browser's user agent and referer reach the server's log (not in the
+          # cache key), on every behavior.
+          OriginRequestPolicyId: acba4595-bd28-49b8-b9fe-13317c0390fa
         CacheBehaviors:
           - PathPattern: /ground/*
             TargetOriginId: lambda
@@ -217,12 +220,14 @@ Resources:
             AllowedMethods: [GET, HEAD]
             Compress: true
             CachePolicyId: !Ref CellsCache
+            OriginRequestPolicyId: acba4595-bd28-49b8-b9fe-13317c0390fa
           - PathPattern: /aircraft
             TargetOriginId: lambda
             ViewerProtocolPolicy: redirect-to-https
             AllowedMethods: [GET, HEAD]
             Compress: true
             CachePolicyId: !Ref AircraftCache
+            OriginRequestPolicyId: acba4595-bd28-49b8-b9fe-13317c0390fa
 
 Outputs:
   DistributionId:
