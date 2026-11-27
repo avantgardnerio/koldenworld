@@ -1,23 +1,30 @@
-# A monthly cost alarm for the account: the game is public with no auth (until Google OAuth), so anyone can make
-# cells build. Email at 80% of the limit actually spent, and when the month is forecast to pass it. Deployed once:
-#   aws cloudformation deploy --stack-name koldenworld-budget --template-file deploy/budget.yml --region us-east-2
+# A monthly cost limit for the account, with a kill switch. Email at 80% of the limit actually spent and when the month
+# is forecast to pass it; at 100% actually spent, the game's function is switched off (reserved concurrency 0: every
+# request it would serve fails; CloudFront still answers what it has cached). The next deploy/deploy.sh switches it
+# back on. Budgets updates a few times a day and AWS posts some usage hours late, so this stops a runaway bill, not
+# one exactly at the limit. Deployed once (and again after a change):
+#   aws cloudformation deploy --stack-name koldenworld-budget --template-file deploy/budget.yml --region us-east-2 \
+#     --capabilities CAPABILITY_IAM
 AWSTemplateFormatVersion: "2010-09-09"
-Description: koldenworld monthly cost alarm (AWS Budgets)
+Description: koldenworld monthly cost limit (AWS Budgets) that switches the game off
 
 Parameters:
   LimitUsd:
     Type: Number
-    Default: 100
+    Default: 200
   Email:
     Type: String
     Default: bgardner@squarelabs.net
+  FunctionName:
+    Type: String
+    Default: koldenworld
 
 Resources:
   Budget:
     Type: AWS::Budgets::Budget
     Properties:
       Budget:
-        BudgetName: koldenworld-monthly
+        BudgetName: koldenworld-limit
         BudgetType: COST
         TimeUnit: MONTHLY
         BudgetLimit: { Amount: !Ref LimitUsd, Unit: USD }
@@ -34,3 +41,83 @@ Resources:
             Threshold: 100
             ThresholdType: PERCENTAGE
           Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref Email }]
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: SNS, Address: !Ref OverLimit }
+            - { SubscriptionType: EMAIL, Address: !Ref Email }
+
+  # What Budgets tells when the limit is passed: the kill switch listens.
+  OverLimit:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: koldenworld-over-budget
+  OverLimitPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref OverLimit]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: budgets.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref OverLimit
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+
+  KillSwitchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: switch-off
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:PutFunctionConcurrency
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
+
+  # Sets the game's reserved concurrency to 0. Tiny and boto3-only, so inline.
+  KillSwitch:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: koldenworld-kill-switch
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt KillSwitchRole.Arn
+      Environment:
+        Variables: { FUNCTION_NAME: !Ref FunctionName }
+      Code:
+        ZipFile: |
+          import os, boto3
+          def handler(event, context):
+              name = os.environ["FUNCTION_NAME"]
+              boto3.client("lambda").put_function_concurrency(FunctionName=name, ReservedConcurrentExecutions=0)
+              print(f"over budget: {name} switched off (reserved concurrency 0)")
+  KillSwitchInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref KillSwitch
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref OverLimit
+  KillSwitchSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OverLimit
+      Protocol: lambda
+      Endpoint: !GetAtt KillSwitch.Arn
