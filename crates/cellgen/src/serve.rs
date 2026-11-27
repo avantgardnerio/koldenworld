@@ -72,6 +72,7 @@ pub fn serve(
             router = router.fallback_service(tower_http::services::ServeDir::new(site));
             println!("the viewer from {}", site.display());
         }
+        let router = router.layer(axum::middleware::from_fn(log));
         let listener = tokio::net::TcpListener::bind((host, port)).await?;
         println!(
             "on http://{host}:{port}/: /ground/<token>/{{{}}}, /aircraft",
@@ -80,6 +81,28 @@ pub fn serve(
         axum::serve(listener, router).await
     })?;
     Ok(())
+}
+
+/// One line per request (stdout: CloudWatch on Lambda): status, time taken, method, path and query, and who asked:
+/// the client's address as CloudFront forwards it, and its user agent.
+async fn log(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let started = std::time::Instant::now();
+    // In a block: a borrow of the request (its body isn't Sync) held over the await would make the future not Send.
+    let (client, agent) = {
+        let header = |name| {
+            let value = request.headers().get(name).and_then(|v| v.to_str().ok());
+            value.unwrap_or("-").to_owned()
+        };
+        (header("x-forwarded-for"), header("user-agent"))
+    };
+    let (method, uri) = (request.method().clone(), request.uri().clone());
+    let response = next.run(request).await;
+    println!(
+        "{} {:.0?} {method} {uri} {client} {agent:?}",
+        response.status().as_u16(),
+        started.elapsed()
+    );
+    response
 }
 
 /// Live air traffic around a point: ?lat=&lon=&nm= (nautical miles).

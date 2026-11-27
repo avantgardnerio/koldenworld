@@ -63,6 +63,31 @@ Resources:
                 Action: s3:ListBucket
                 Resource: !Sub arn:aws:s3:::${Bucket}
 
+  # CloudFront's access logs: every request, cached or not (time, client address, path, status, bytes, user agent),
+  # as gzipped files under cloudfront/. Private; kept 90 days. CloudFront's legacy logging writes with an ACL
+  # (granted to its log delivery account when the distribution is deployed), so the bucket allows ACLs.
+  AccessLogs:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub koldenworld-logs-${AWS::AccountId}
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerPreferred }]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # The server's own log: a line per request (status, time taken, path, client, user agent), and cell builds.
   Logs:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -157,6 +182,10 @@ Resources:
         Comment: koldenworld
         HttpVersion: http2and3
         PriceClass: PriceClass_100
+        Logging:
+          Bucket: !GetAtt AccessLogs.DomainName
+          Prefix: cloudfront/
+          IncludeCookies: false
         Aliases: !If [HasDomain, [!Ref Domain], !Ref AWS::NoValue]
         ViewerCertificate: !If
           - HasDomain
